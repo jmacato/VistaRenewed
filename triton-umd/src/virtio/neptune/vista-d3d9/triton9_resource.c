@@ -1907,6 +1907,150 @@ triton9SetDisplayMode(HANDLE hDevice, const D3DDDIARG_SETDISPLAYMODE *args)
         device->callbacks.pfnSetDisplayModeCb(device->hRTDevice, &callback));
 }
 
+/* Caller holds shaderLock across rendering completion, Present and the
+ * consumption marker. Each frame has a unique, increasing GPU fence value;
+ * a cached value from an earlier frame cannot satisfy this frame's wait. */
+static HRESULT
+triton9WaitForPresentGpuCompletion(TRITON9_DEVICE *device)
+{
+    ID3D11Device5 *device5 = NULL;
+    ID3D11DeviceContext4 *context4 = NULL;
+    ID3D11Fence *fence = NULL;
+    UINT64 target, completed;
+    DWORD start;
+    HRESULT hr;
+
+    if (!device || !device->hostDevice || !device->hostContext)
+        return E_INVALIDARG;
+    if (!device->presentFence) {
+        hr = ID3D11Device1_QueryInterface(device->hostDevice,
+                                          &IID_ID3D11Device5, (void **)&device5);
+        if (FAILED(hr) || !device5)
+            return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
+        hr = ID3D11DeviceContext1_QueryInterface(device->hostContext,
+                    &IID_ID3D11DeviceContext4, (void **)&context4);
+        if (SUCCEEDED(hr) && context4)
+            hr = ID3D11Device5_CreateFence(device5, 0, D3D11_FENCE_FLAG_NONE,
+                                            &IID_ID3D11Fence, (void **)&fence);
+        ID3D11Device5_Release(device5);
+        if (FAILED(hr) || !context4 || !fence) {
+            if (fence)
+                ID3D11Fence_Release(fence);
+            if (context4)
+                ID3D11DeviceContext4_Release(context4);
+            return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
+        }
+        device->presentFence = fence;
+        device->presentContext = context4;
+        device->presentFenceValue = 0;
+    }
+    /* UINT64_MAX is the D3D11 device-removal sentinel, never a frame ID. */
+    if (device->presentFenceValue >= UINT64_MAX - 1) {
+        device->deviceLost = TRUE;
+        return D3DDDIERR_DEVICEREMOVED;
+    }
+    target = ++device->presentFenceValue;
+    hr = ID3D11DeviceContext4_Signal(device->presentContext,
+                                     device->presentFence, target);
+    if (FAILED(hr))
+        return triton9MapDeviceFailure(device, hr);
+    ID3D11DeviceContext1_Flush(device->hostContext);
+    start = GetTickCount();
+    for (;;) {
+        completed = ID3D11Fence_GetCompletedValue(device->presentFence);
+        if (completed == UINT64_MAX) {
+            device->deviceLost = TRUE;
+            return D3DDDIERR_DEVICEREMOVED;
+        }
+        if (completed >= target) {
+            hr = triton9CheckHostDevice(device);
+            if (SUCCEEDED(hr) && target == 1)
+                triton9Diag("TRITON9-PRESENT-TIMELINE-COMPLETE\n");
+            return triton9MapDeviceFailure(device, hr);
+        }
+        if ((DWORD)(GetTickCount() - start) >= TRITON9_HOST_DRAIN_TIMEOUT_MS) {
+            device->deviceLost = TRUE;
+            return D3DDDIERR_DEVICEREMOVED;
+        }
+        Sleep(1);
+    }
+}
+
+/* Caller holds shaderLock. This marker uses the same scheduler context as
+ * Present, so its signal follows the KMD's synchronous source copy. */
+static HRESULT
+triton9WaitForPresentConsumption(TRITON9_DEVICE *device)
+{
+    D3DDDICB_RENDER render;
+    VIOGPU_COMMAND_HDR header;
+    VIOGPU_SIGNAL_EVENT_CMD signal;
+    HANDLE event;
+    DWORD wait;
+    HRESULT hr;
+    const UINT packetSize = sizeof(header) + sizeof(signal);
+
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!event) {
+        device->deviceLost = TRUE;
+        return E_FAIL;
+    }
+    EnterCriticalSection(&device->kmContextLock);
+    if (!device->hKMContext || !device->callbacks.pfnRenderCb ||
+        !device->kmCommandBuffer || device->kmCommandBufferSize < packetSize) {
+        hr = E_FAIL;
+        goto fail;
+    }
+    ZeroMemory(&header, sizeof(header));
+    header.type = VIOGPU_CMD_SIGNAL_EVENT;
+    header.size = sizeof(signal);
+    signal.Event = VioGpuUmHandle(event);
+    CopyMemory(device->kmCommandBuffer, &header, sizeof(header));
+    CopyMemory((BYTE *)device->kmCommandBuffer + sizeof(header),
+               &signal, sizeof(signal));
+    ZeroMemory(&render, sizeof(render));
+    render.CommandLength = packetSize;
+    render.hContext = device->hKMContext;
+    hr = device->callbacks.pfnRenderCb(device->hRTDevice, &render);
+    if (FAILED(hr))
+        goto fail;
+    if (!render.pNewCommandBuffer || render.NewCommandBufferSize < packetSize ||
+        !render.pNewAllocationList || !render.NewAllocationListSize ||
+        !render.pNewPatchLocationList || !render.NewPatchLocationListSize) {
+        hr = E_FAIL;
+        goto fail;
+    }
+    device->kmCommandBuffer = render.pNewCommandBuffer;
+    device->kmCommandBufferSize = render.NewCommandBufferSize;
+    device->kmAllocationList = render.pNewAllocationList;
+    device->kmAllocationListSize = render.NewAllocationListSize;
+    device->kmPatchLocationList = render.pNewPatchLocationList;
+    device->kmPatchLocationListSize = render.NewPatchLocationListSize;
+    LeaveCriticalSection(&device->kmContextLock);
+    wait = WaitForSingleObject(event, TRITON9_HOST_DRAIN_TIMEOUT_MS);
+    CloseHandle(event);
+    if (wait != WAIT_OBJECT_0) {
+        device->deviceLost = TRUE;
+        return D3DDDIERR_DEVICEREMOVED;
+    }
+    if (!device->presentConsumptionReported) {
+        device->presentConsumptionReported = TRUE;
+        triton9Diag("TRITON9-PRESENT-CONSUMED\n");
+    }
+    return S_OK;
+
+fail:
+    device->kmCommandBuffer = NULL;
+    device->kmCommandBufferSize = 0;
+    device->kmAllocationList = NULL;
+    device->kmAllocationListSize = 0;
+    device->kmPatchLocationList = NULL;
+    device->kmPatchLocationListSize = 0;
+    device->deviceLost = TRUE;
+    LeaveCriticalSection(&device->kmContextLock);
+    CloseHandle(event);
+    return triton9MapDeviceFailure(device, hr);
+}
+
 HRESULT APIENTRY
 triton9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *args)
 {
@@ -1960,7 +2104,13 @@ triton9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *args)
         return D3DDDIERR_INVALIDCALL;
     }
     EnterCriticalSection(&device->shaderLock);
-    ID3D11DeviceContext1_Flush(device->hostContext);
+    hr = triton9WaitForPresentGpuCompletion(device);
+    if (FAILED(hr)) {
+        LeaveCriticalSection(&device->shaderLock);
+        return hr;
+    }
+    /* Keep this post-completion drain for the existing KMD/transport ordering
+     * contract.  It does not provide the GPU completion guarantee above. */
     if (!tritonSharedBridgeDrain(device->hostContext,
                                  TRITON9_HOST_DRAIN_TIMEOUT_MS)) {
         device->deviceLost = TRUE;
@@ -1968,18 +2118,24 @@ triton9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *args)
         return D3DDDIERR_DEVICEREMOVED;
     }
     hr = triton9CheckHostDevice(device);
-    LeaveCriticalSection(&device->shaderLock);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+        LeaveCriticalSection(&device->shaderLock);
         return hr;
+    }
     hr = triton9EnsureKernelContext(device);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+        LeaveCriticalSection(&device->shaderLock);
         return hr;
+    }
     ZeroMemory(&callback, sizeof(callback));
     callback.hSrcAllocation = src->hKMAllocation;
     callback.hDstAllocation = dst ? dst->hKMAllocation : 0;
     callback.hContext = device->hKMContext;
     hr = triton9MapDeviceFailure(device,
         device->callbacks.pfnPresentCb(device->hRTDevice, &callback));
+    if (SUCCEEDED(hr))
+        hr = triton9WaitForPresentConsumption(device);
+    LeaveCriticalSection(&device->shaderLock);
     triton9Diag(SUCCEEDED(hr) ? "TRITON9-PRESENT success\n" :
                                 "TRITON9-PRESENT fail\n");
     return hr;

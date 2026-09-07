@@ -11,6 +11,7 @@ import tempfile
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--package', type=Path, default=root/'build/package-x64')
+parser.add_argument('--arch', choices=('x64', 'x86'), default='x64')
 parser.add_argument('--certificate', type=Path, default=root/'driver/signing/triton-vista-linux-signing.cer')
 parser.add_argument('--publications', type=Path, default=root/'vista-kvm/publications')
 parser.add_argument('--no-activate', action='store_true', help='Do not change the local VM deployment pointer')
@@ -18,9 +19,16 @@ parser.add_argument('--installer-readme', type=Path)
 parser.add_argument('--notices-dir', type=Path)
 args = parser.parse_args()
 package = args.package.resolve()
-files = ['viogpu3d-diagnostic.inf', 'viogpu3d-vista-x64.cat', 'viogpu3d.sys',
-         'neptune_d3d9.dll', 'neptune_d3d9_wow.dll', 'triton-vista-deploy.exe',
-         'triton9_runtime_probe_x64.exe']
+files_by_arch = {
+    'x64': ['viogpu3d-diagnostic.inf', 'viogpu3d-vista-x64.cat', 'viogpu3d.sys',
+            'neptune_d3d9.dll', 'neptune_d3d9_wow.dll', 'triton-vista-deploy.exe',
+            'triton9_runtime_probe_x64.exe'],
+    'x86': ['viogpu3d-diagnostic.inf', 'viogpu3d-vista-x86.cat', 'viogpu3d.sys',
+            'neptune_d3d9.dll', 'triton-vista-deploy.exe',
+            'triton9_runtime_probe_x86.exe'],
+}
+files = files_by_arch[args.arch]
+probe_name = f'triton9_runtime_probe_{args.arch}.exe'
 def sha(path):
     with path.open('rb') as stream:
         return hashlib.file_digest(stream, 'sha256').hexdigest()
@@ -39,11 +47,11 @@ with tempfile.TemporaryDirectory(prefix='.stage-', dir=publications) as temp:
     stage = Path(temp)
     tree = stage/'tree'
     tree.mkdir()
-    payload = tree/'driver-x64'
+    payload = tree/f'driver-{args.arch}'
     payload.mkdir()
     for name in files+['package-manifest.sha256']:
         shutil.copy2(package/name, payload/name)
-    for name in ['triton-vista-deploy.exe', 'triton9_runtime_probe_x64.exe']:
+    for name in ['triton-vista-deploy.exe', probe_name]:
         shutil.copy2(package/name, tree/name)
     cert = args.certificate.resolve()
     cert_name = 'triton-vista-linux-signing.cer'
@@ -51,11 +59,12 @@ with tempfile.TemporaryDirectory(prefix='.stage-', dir=publications) as temp:
     ini = f'''[triton-deploy]
 version=1
 id={deployment}
-package=driver-x64
+architecture={args.arch}
+package=driver-{args.arch}
 inf=viogpu3d-diagnostic.inf
 hardware_id=PCI\\VEN_1AF4&DEV_1050
-probe=triton9_runtime_probe_x64.exe
-probe_sha256={sha(tree/'triton9_runtime_probe_x64.exe')}
+probe={probe_name}
+probe_sha256={sha(tree/probe_name)}
 signing_cert={cert_name}
 signing_cert_sha256={sha(cert)}
 '''

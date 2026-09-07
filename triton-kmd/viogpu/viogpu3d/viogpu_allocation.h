@@ -212,6 +212,9 @@ class VioGpuAllocation final : public HandleBase<"VIOGALLO"_M, VioGpuAllocation>
                                 UINT rectCount,
                                 LONG sourceDeltaX,
                                 LONG sourceDeltaY);
+    NTSTATUS CopyHostToPrimary(VioGpuAllocation *source,
+                              const RECT *destinationRects, UINT rectCount,
+                              LONG sourceDeltaX, LONG sourceDeltaY);
 
     NTSTATUS AttachBacking(MDL *pMdl, size_t pageCount, size_t pageOffset);
     NTSTATUS AttachFrameBufferBacking(PHYSICAL_ADDRESS segmentAddress);

@@ -1051,6 +1051,76 @@ static NTSTATUS VioGpuQueueControlSync(CtrlQueue *queue, PGPU_VBUFFER vbuf)
     return responseStatus;
 }
 
+NTSTATUS VioGpuAllocation::CopyHostToPrimary(
+    VioGpuAllocation *source, const RECT *rects, UINT count,
+    LONG deltaX, LONG deltaY)
+{
+    PAGED_CODE();
+    if (!source || source == this || !source->IsHostPresentationSurface() ||
+        !IsPrimary() || IsBlob() || !rects || !count)
+        return STATUS_INVALID_PARAMETER;
+
+    VIOGPU_BLOB_INFO info;
+    {
+        auto guard = source->LockGuard();
+        if (!source->m_Blob.InfoValid)
+            return STATUS_INVALID_DEVICE_STATE;
+        info = source->m_Blob.Info;
+    }
+    UINT width = 0, height = 0;
+    if (!GetDimensions(&width, &height) || !info.width || !info.height ||
+        info.width > 4096 || info.height > 4096 ||
+        info.strides[0] < (ULONGLONG)info.width * 4 ||
+        (info.format != VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM &&
+         info.format != VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM) ||
+        info.strides[1] || info.strides[2] || info.strides[3] ||
+        info.offsets[1] || info.offsets[2] || info.offsets[3])
+        return STATUS_INVALID_PARAMETER;
+
+    // Validate the entire list before issuing any host writes.
+    for (UINT i = 0; i < count; ++i) {
+        const RECT &r = rects[i];
+        if (r.left < 0 || r.top < 0 || r.right <= r.left || r.bottom <= r.top ||
+            (ULONGLONG)r.right > width || (ULONGLONG)r.bottom > height ||
+            (LONGLONG)r.left + deltaX < 0 ||
+            (LONGLONG)r.top + deltaY < 0 ||
+            (LONGLONG)r.right + deltaX > info.width ||
+            (LONGLONG)r.bottom + deltaY > info.height)
+            return STATUS_INVALID_PARAMETER;
+    }
+    for (UINT i = 0; i < count; ++i) {
+        PGPU_VBUFFER vbuf = NULL;
+        GPU_TRITON_PRESENT_BLT *b = (GPU_TRITON_PRESENT_BLT *)
+            m_adapter->ctrlQueue.AllocCmd(&vbuf, sizeof(*b));
+        if (!b)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        RtlZeroMemory(b, sizeof(*b));
+        b->hdr.type = VIRTIO_GPU_CMD_TRITON_PRESENT_BLT;
+        b->source_resource_id = source->GetId();
+        b->destination_resource_id = GetId();
+        b->source_width = info.width;
+        b->source_height = info.height;
+        b->source_format = info.format;
+        b->source_stride = info.strides[0];
+        b->source_offset = info.offsets[0];
+        b->source_rect.x = (ULONG)((LONGLONG)rects[i].left + deltaX);
+        b->source_rect.y = (ULONG)((LONGLONG)rects[i].top + deltaY);
+        b->source_rect.width = rects[i].right - rects[i].left;
+        b->source_rect.height = rects[i].bottom - rects[i].top;
+        b->destination_x = rects[i].left;
+        b->destination_y = rects[i].top;
+        NTSTATUS status = VioGpuQueueControlSync(&m_adapter->ctrlQueue, vbuf);
+        if (!NT_SUCCESS(status))
+            return status;
+    }
+    static LONG reported = 0;
+    if (InterlockedCompareExchange(&reported, 1, 0) == 0)
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("TRITON-HOST-BLT-CONSUMED src=%u dst=%u rects=%u\n",
+                  source->GetId(), GetId(), count));
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS VioGpuQueueScanout(CtrlQueue *queue,
                                    UINT scanId,
                                    UINT resourceId,

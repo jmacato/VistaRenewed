@@ -421,6 +421,8 @@ struct _VIOGPU_BLIT_PRESENT
 // so QEMU flushes the uploaded pixels instead of the resource's old contents.
 // DxgkDdiRender rejects this command from user mode.
 #define VIOGPU_CMD_FLUSH_FIXED_PRIMARY 0x8
+// KMD-only SHM-to-primary rectangle copy; body is COPY_FIXED_PRIMARY_CMD.
+#define VIOGPU_CMD_COPY_HOST_PRIMARY  0x9
 
 // #define VIOGPU_EXECBUF_FENCE_FD_IN  0x01
 // #define VIOGPU_EXECBUF_FENCE_FD_OUT 0x02

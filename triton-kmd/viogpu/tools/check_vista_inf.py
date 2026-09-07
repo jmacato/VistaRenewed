@@ -24,6 +24,7 @@ EXPECTED = {
         "catalog": "viogpu3d-vista-x86.cat",
         "manufacturer": "[rhel.ntx86]",
         "files": {"viogpu3d.sys", "neptune_d3d9.dll"},
+        "service_file": "triton-vista-deploy.exe",
         "umds": {"neptune_d3d9.dll"},
         "copy_sections": {
             "[viogpu3d_files.usermode]": {"neptune_d3d9.dll"},
@@ -143,7 +144,17 @@ def validate(path: Path, arch: str, package_dir: Path | None) -> list[str]:
         errors.append("the Vista vendor WDDM package must set FeatureScore=F6")
 
     source_files = file_names(sections.get("[sourcedisksfiles]", []))
-    if source_files != expected["files"]:
+    service_present = False
+    if arch == "x86":
+        service_files = expected["files"] | {expected["service_file"]}
+        if source_files == service_files:
+            service_present = True
+        elif source_files != expected["files"]:
+            errors.append(
+                "SourceDisksFiles must use exactly the driver-only or "
+                "deployment-service x86 layout"
+            )
+    elif source_files != expected["files"]:
         errors.append(
             "SourceDisksFiles does not match required files: "
             + ", ".join(sorted(expected["files"]))
@@ -173,7 +184,7 @@ def validate(path: Path, arch: str, package_dir: Path | None) -> list[str]:
     if registry != expected["registry"]:
         errors.append("user-mode driver registry values do not match the Vista package profile")
 
-    if arch == "x64":
+    if arch == "x64" or service_present:
         deploy_files = file_names(sections.get("[tritonvistadeploy_files]", []))
         if deploy_files != {"triton-vista-deploy.exe"}:
             errors.append("deployment-service copy section is invalid")
@@ -201,9 +212,18 @@ def validate(path: Path, arch: str, package_dir: Path | None) -> list[str]:
         }
         if safe_boot != required_safe_boot:
             errors.append("deployment service is not registered in both SafeBoot lists")
+    elif arch == "x86":
+        service_sections = {
+            "[tritonvistadeploy_files]",
+            "[tritonvistadeploy_service_inst]",
+            "[tritonvistadeploy_safeboot]",
+        }
+        if service_sections & set(sections):
+            errors.append("driver-only x86 layout must not contain deployment-service sections")
 
     if package_dir is not None:
-        for name in expected["files"] | {expected["catalog"]}:
+        required_files = source_files | {expected["catalog"]}
+        for name in required_files:
             if not (package_dir / name).is_file():
                 errors.append(f"package is missing {name}")
     return errors

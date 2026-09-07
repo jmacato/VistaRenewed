@@ -5,12 +5,27 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 meson=${MESON:-meson}
 jobs=${JOBS:-4}
-for arch in x64 x86; do
+arches=(x64 x86)
+if [[ $# -gt 0 ]]; then
+    if [[ $# -ne 2 || $1 != --arch || ( $2 != x64 && $2 != x86 ) ]]; then
+        echo "Usage: $0 [--arch x64|x86]" >&2
+        exit 2
+    fi
+    arches=("$2")
+fi
+if [[ $(uname -s) == Darwin ]]; then
+    sh triton-umd/build-support/bootstrap-vista-crt.sh
+fi
+for arch in "${arches[@]}"; do
     build="triton-umd/build-vista-linux-$arch"
-    setup=()
+    profile="triton-umd/build-support/vista-linux-$arch.ini"
+    if [[ $(uname -s) == Darwin ]]; then
+        profile="triton-umd/build-support/vista-$arch.ini"
+    fi
+    setup=(setup)
     [[ ! -f "$build/meson-private/coredata.dat" ]] || setup+=(--reconfigure)
-    "$meson" setup "${setup[@]}" "$build" triton-umd \
-        --cross-file "triton-umd/build-support/vista-linux-$arch.ini" \
+    "$meson" "${setup[@]}" "$build" triton-umd \
+        --cross-file "$profile" \
         --buildtype debugoptimized -Dplatforms=windows -Dneptune=true \
         -Dnpt_wine=false -Dnpt_umd=off -Dnpt_vista_d3d9=true \
         -Dmin-windows-version=6 -Dgallium-drivers= -Dvulkan-drivers= \

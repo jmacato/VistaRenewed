@@ -1,0 +1,88 @@
+; Vista x86 development package source template.
+; The package builder supplies a locally test-signed KMD, UMD, service, and catalog.
+; This INF is not an installable or production-certified driver package by itself.
+
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%RHEL%
+CatalogFile=viogpu3d-vista-x86.cat
+DriverVer = 08/11/2026,7.14.1.0
+
+[ControlFlags]
+ExcludeFromSelect=*
+
+[DestinationDirs]
+VioGpu3D_Files.Driver = 12
+VioGpu3D_Files.Usermode = 11
+TritonVistaDeploy_Files = 11
+
+[SourceDisksNames]
+1 = %DiskId1%,,,""
+
+[SourceDisksFiles]
+viogpu3d.sys = 1
+neptune_d3d9.dll = 1
+triton-vista-deploy.exe = 1
+
+[Manufacturer]
+%RHEL%=RHEL,NTx86
+
+[RHEL.NTx86]
+%VioGpu3D.DeviceDesc% = VioGpu3D_Inst,PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01,PCI\VEN_1AF4&DEV_1050
+
+[VioGpu3D_Files.Driver]
+viogpu3d.sys,,,2
+
+[VioGpu3D_Files.Usermode]
+neptune_d3d9.dll,,,0x00004000
+
+[TritonVistaDeploy_Files]
+triton-vista-deploy.exe,,,0x00004000
+
+[VioGpu3D_Inst]
+Include=msdv.inf
+FeatureScore=F6
+CopyFiles=VioGpu3D_Files.Driver,VioGpu3D_Files.Usermode,TritonVistaDeploy_Files
+AddReg=VioGpu3D_DeviceSettings,TritonVistaDeploy_SafeBoot
+
+[VioGpu3D_Inst.Services]
+AddService=VioGpu3D,0x00000002,VioGpu3D_Service_Inst
+AddService=TritonVistaDeploy,0x00000000,TritonVistaDeploy_Service_Inst
+
+[VioGpu3D_Service_Inst]
+ServiceType=%SERVICE_KERNEL_DRIVER%
+StartType=%SERVICE_DEMAND_START%
+ErrorControl=%SERVICE_ERROR_NORMAL%
+ServiceBinary=%12%\viogpu3d.sys
+
+[TritonVistaDeploy_Service_Inst]
+DisplayName=%TritonVistaDeploy.ServiceDesc%
+ServiceType=%SERVICE_WIN32_OWN_PROCESS%
+StartType=%SERVICE_AUTO_START%
+ErrorControl=%SERVICE_ERROR_NORMAL%
+ServiceBinary=%11%\triton-vista-deploy.exe --service
+
+[VioGpu3D_DeviceSettings]
+HKR,,UserModeDriverName,%REG_MULTI_SZ%,neptune_d3d9.dll
+HKR,,InstalledDisplayDrivers,%REG_MULTI_SZ%,neptune_d3d9
+HKR,,VgaCompatible,%REG_DWORD%,0
+HKR,,CapabilityOverride,%REG_DWORD%,0x8
+
+[TritonVistaDeploy_SafeBoot]
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\TritonVistaDeploy",,0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\TritonVistaDeploy",,0x00000000,"Service"
+
+[Strings]
+DiskId1="VirtIO GPU Vista x86 diagnostic installation disk"
+VioGpu3D.DeviceDesc="VirtIO GPU 3D (Vista x86 serial-trace probe)"
+RHEL="Red Hat, Inc."
+SERVICE_KERNEL_DRIVER=0x1
+SERVICE_WIN32_OWN_PROCESS=0x10
+SERVICE_DEMAND_START=0x3
+SERVICE_AUTO_START=0x2
+SERVICE_ERROR_NORMAL=0x1
+TritonVistaDeploy.ServiceDesc="Triton Vista driver deployment"
+REG_MULTI_SZ=0x00010000
+REG_DWORD=0x00010001

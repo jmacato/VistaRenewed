@@ -27,7 +27,7 @@
 #include <d3d9types.h>
 #include <d3dumddi.h>
 #include <d3d9caps.h>
-#include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <dxgiformat.h>
 
 #include <stdbool.h>
@@ -188,6 +188,13 @@ typedef struct TRITON9_DEVICE {
     ID3D11DeviceContext1      *hostContext;
     D3D_FEATURE_LEVEL          featureLevel;
     HANDLE                      hKMContext;
+    void                       *kmCommandBuffer;
+    UINT                        kmCommandBufferSize;
+    D3DDDI_ALLOCATIONLIST       *kmAllocationList;
+    UINT                        kmAllocationListSize;
+    D3DDDI_PATCHLOCATIONLIST    *kmPatchLocationList;
+    UINT                        kmPatchLocationListSize;
+    BOOL                        presentConsumptionReported;
     BOOL                        runtimeContextInitialized;
     UINT                        runtimeContextId;
     BOOL                        deviceLost;
@@ -262,6 +269,11 @@ typedef struct TRITON9_DEVICE {
     D3DMATRIX                   worldTransform;
     D3DMATRIX                   viewTransform;
     D3DMATRIX                   projectionTransform;
+    /* Internal Present completion gate.  It is separate from application
+     * D3D9 query handles and is reused for the lifetime of this device. */
+    ID3D11Fence                 *presentFence;
+    ID3D11DeviceContext4        *presentContext;
+    UINT64                      presentFenceValue;
     void                       *queries;
 } TRITON9_DEVICE;
 

@@ -1,0 +1,30 @@
+{
+  "deployment_id": "35188205532539e77f468d10e427077b71f1adac5b3fe5025f6c1e32829831db",
+  "certificate_sha256": "4c563429f83118fb3f77a5e0d67c51207c83819ff2c1cef7ebc85c6708463619",
+  "iso_sha256": "7a433fdbcc29b0a7a7070d4d5552cc9a7b77ff5f343ae81bf7b599f43cf26ee3",
+  "first_normal_commit_utc": "2026-09-07T17:42:17Z",
+  "second_normal_commit_utc": "2026-09-07T17:55:03Z",
+  "first_probe_nonce": "1175779ac491304d6c24b05696fbd07889458e3e41ee15626e95dbe6f23f98ef",
+  "second_probe_nonce": "ccaeb6c2f0eb6b5ae8f48dbc52e1c5841ada7220c90a7b20b990d110801b0635",
+  "validation": {
+    "normal_boots": 2,
+    "d3d9_passes": 2,
+    "aero_api_passes": 2,
+    "user_confirmed_aero": true,
+    "user_accepted_timeline_flicker_fix": true,
+    "bcd_first_boot": {
+      "testsigning": "No",
+      "nointegritychecks": "No",
+      "loadoptions": "absent",
+      "safeboot": "absent"
+    }
+  },
+  "qemu_sha256": "5020fe810273a23c970abe729db0ddbc7e0a5e7b73d8e96d2fe68b26b07d7887",
+  "native_fence_evidence": {
+    "module": "libdxmt-native.dylib",
+    "sha256": "c0ad17a1619d36afff1432cdfa11f729e2010ee33bb672e4d1b5c856c0e1821a",
+    "signal": "MTLD3D11ImmediateContext::Signal at 0x67b34 -> queued lambda at 0x94264 -> ArgumentEncodingContext::signalEvent at 0x100e3c (call at 0x94294)",
+    "completion": "MTLD3D11FenceImpl::GetCompletedValue at 0xcf0d0 -> MTLSharedEvent_signaledValue at 0xd480c (branch at 0xcf0d4)",
+    "cpu_wait": "Sleep(1) polling; SetEventOnCompletion is not used by Present"
+  }
+}

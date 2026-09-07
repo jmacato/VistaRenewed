@@ -8,7 +8,7 @@
  * After restart, it compares all installed bytes before it starts the probe.
  * It does not require a desktop, keyboard, network, or host-side VM control.
  *
- * Build target: Windows Vista SP2 x64, legacy msvcrt.dll.
+ * Build target: Windows Vista x86 or x64, legacy msvcrt.dll.
  */
 
 #ifndef UNICODE
@@ -17,8 +17,12 @@
 #ifndef _UNICODE
 #define _UNICODE
 #endif
+#ifndef WINVER
 #define WINVER 0x0600
+#endif
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0600
+#endif
 #define _CRT_SECURE_NO_WARNINGS
 
 #include <windows.h>
@@ -45,7 +49,15 @@
 #define DEPLOY_INI L"triton-deploy.ini"
 #define DEPLOY_SECTION L"triton-deploy"
 #define PACKAGE_MANIFEST L"package-manifest.sha256"
+#if defined(_WIN64)
 #define PROBE_EXE_NAME L"triton9_runtime_probe_x64.exe"
+#define CATALOG_NAME L"viogpu3d-vista-x64.cat"
+#define TRITON_DEPLOY_HAS_WOW64 1
+#else
+#define PROBE_EXE_NAME L"triton9_runtime_probe_x86.exe"
+#define CATALOG_NAME L"viogpu3d-vista-x86.cat"
+#define TRITON_DEPLOY_HAS_WOW64 0
+#endif
 #define SIGNING_CERT_NAME L"triton-vista-linux-signing.cer"
 #ifdef TRITON_DEPLOY_SIGNING_HEADER
 #include TRITON_DEPLOY_SIGNING_HEADER
@@ -766,7 +778,10 @@ static BOOL verify_package_manifest(const DeployMedia *media)
     DWORD bytes_read = 0;
     CHAR *cursor;
     BOOL have_inf = FALSE, have_cat = FALSE, have_sys = FALSE;
-    BOOL have_native = FALSE, have_wow = FALSE, have_service = FALSE;
+    BOOL have_native = FALSE, have_service = FALSE;
+#if TRITON_DEPLOY_HAS_WOW64
+    BOOL have_wow = FALSE;
+#endif
     BOOL have_probe = FALSE;
     BOOL ok = FALSE;
 
@@ -835,17 +850,22 @@ static BOOL verify_package_manifest(const DeployMedia *media)
             goto done;
         }
         if (_wcsicmp(filename, media->inf) == 0) have_inf = TRUE;
-        if (_wcsicmp(filename, L"viogpu3d-vista-x64.cat") == 0) have_cat = TRUE;
+        if (_wcsicmp(filename, CATALOG_NAME) == 0) have_cat = TRUE;
         if (_wcsicmp(filename, L"viogpu3d.sys") == 0) have_sys = TRUE;
         if (_wcsicmp(filename, L"neptune_d3d9.dll") == 0) have_native = TRUE;
+#if TRITON_DEPLOY_HAS_WOW64
         if (_wcsicmp(filename, L"neptune_d3d9_wow.dll") == 0) have_wow = TRUE;
+#endif
         if (_wcsicmp(filename, SERVICE_EXE_NAME) == 0) have_service = TRUE;
         if (_wcsicmp(filename, PROBE_EXE_NAME) == 0)
             have_probe = TRUE;
         cursor = line_end;
         while (*cursor == '\r' || *cursor == '\n') ++cursor;
     }
-    ok = have_inf && have_cat && have_sys && have_native && have_wow &&
+    ok = have_inf && have_cat && have_sys && have_native &&
+#if TRITON_DEPLOY_HAS_WOW64
+         have_wow &&
+#endif
          have_service && have_probe;
     if (!ok) {
         emit_status(L"VERIFY_FAIL id=%ls step=required-files", media->id);
@@ -890,13 +910,17 @@ static BOOL verify_package_signatures(const DeployMedia *media)
     static const WCHAR *const catalog_members[] = {
         L"viogpu3d.sys",
         L"neptune_d3d9.dll",
+#if TRITON_DEPLOY_HAS_WOW64
         L"neptune_d3d9_wow.dll",
+#endif
         SERVICE_EXE_NAME
     };
     static const WCHAR *const embedded_files[] = {
         L"viogpu3d.sys",
         L"neptune_d3d9.dll",
+#if TRITON_DEPLOY_HAS_WOW64
         L"neptune_d3d9_wow.dll",
+#endif
         SERVICE_EXE_NAME,
         PROBE_EXE_NAME
     };
@@ -923,7 +947,7 @@ static BOOL verify_package_signatures(const DeployMedia *media)
 
     if (!install_pinned_signing_certificate(media) ||
         !format_wstr(catalog_path, MAX_DEPLOY_PATH,
-                     L"%ls\\viogpu3d-vista-x64.cat", media->package_dir) ||
+                     L"%ls\\%ls", media->package_dir, CATALOG_NAME) ||
         !verify_authenticode_file(catalog_path)) {
         emit_status(L"VERIFY_FAIL id=%ls step=catalog-signature error=%lu",
                     media->id, (unsigned long)GetLastError());
@@ -1358,7 +1382,8 @@ static BOOL install_driver(const DeployMedia *media, DWORD *error_out)
     WCHAR pending[4][MAX_DEPLOY_PATH];
     WCHAR windows[MAX_PATH], system[MAX_PATH];
     BOOL needs_replacement[4];
-    DWORD index;
+    DWORD index, graphics_payloads = TRITON_DEPLOY_HAS_WOW64 ? 3 : 2;
+    DWORD service_payload = graphics_payloads;
     BOOL ok = FALSE;
 
     *error_out = ERROR_SUCCESS;
@@ -1377,19 +1402,21 @@ static BOOL install_driver(const DeployMedia *media, DWORD *error_out)
                      L"%ls\\neptune_d3d9.dll", media->package_dir) ||
         !format_wstr(destinations[1], MAX_DEPLOY_PATH,
                      L"%ls\\neptune_d3d9.dll", system) ||
+#if TRITON_DEPLOY_HAS_WOW64
         !format_wstr(sources[2], MAX_DEPLOY_PATH,
                      L"%ls\\neptune_d3d9_wow.dll", media->package_dir) ||
         !format_wstr(destinations[2], MAX_DEPLOY_PATH,
                      L"%ls\\SysWOW64\\neptune_d3d9_wow.dll", windows) ||
-        !format_wstr(sources[3], MAX_DEPLOY_PATH,
+#endif
+        !format_wstr(sources[TRITON_DEPLOY_HAS_WOW64 ? 3 : 2], MAX_DEPLOY_PATH,
                      L"%ls\\%ls", media->package_dir, SERVICE_EXE_NAME) ||
-        !GetModuleFileNameW(NULL, destinations[3], MAX_DEPLOY_PATH)) {
+        !GetModuleFileNameW(NULL, destinations[TRITON_DEPLOY_HAS_WOW64 ? 3 : 2], MAX_DEPLOY_PATH)) {
         *error_out = GetLastError();
         goto done;
     }
     /* Stage every byte first. A staging failure therefore leaves no pending
      * rename that a later reboot could apply as a mixed driver generation. */
-    for (index = 0; index < 4; ++index) {
+    for (index = 0; index <= service_payload; ++index) {
         if (!stage_payload_replacement(media, sources[index],
                                        destinations[index], pending[index],
                                        &needs_replacement[index], error_out)) {
@@ -1399,17 +1426,17 @@ static BOOL install_driver(const DeployMedia *media, DWORD *error_out)
     /* Apply the complete graphics generation only while SafeBoot is still
      * set. A power loss between members restarts in Safe Mode, where this
      * idempotent loop finishes the same authenticated generation. */
-    for (index = 0; index < 3; ++index) {
+    for (index = 0; index < graphics_payloads; ++index) {
         if (needs_replacement[index] &&
             !activate_staged_payload(pending[index], destinations[index],
                                      error_out)) {
             goto done;
         }
     }
-    if (needs_replacement[3] &&
-        !schedule_staged_payload(pending[3], destinations[3], error_out))
+    if (needs_replacement[service_payload] &&
+        !schedule_staged_payload(pending[service_payload], destinations[service_payload], error_out))
         goto done;
-    for (index = 0; index < 3; ++index) {
+    for (index = 0; index < graphics_payloads; ++index) {
         if (!files_equal(sources[index], destinations[index])) {
             *error_out = ERROR_INVALID_DATA;
             emit_status(L"INSTALL_PAYLOAD_FAIL file=%ls step=safe-byte-verify error=%lu",
@@ -1466,10 +1493,12 @@ static BOOL verify_installed_payloads(const DeployMedia *media)
                      L"%ls\\neptune_d3d9.dll", system) ||
         !verify_installed_payload_pair(media, L"neptune_d3d9.dll", installed))
         return FALSE;
+#if TRITON_DEPLOY_HAS_WOW64
     if (!format_wstr(installed, MAX_DEPLOY_PATH,
                      L"%ls\\SysWOW64\\neptune_d3d9_wow.dll", windows) ||
         !verify_installed_payload_pair(media, L"neptune_d3d9_wow.dll", installed))
         return FALSE;
+#endif
     if (!GetModuleFileNameW(NULL, installed, MAX_DEPLOY_PATH) ||
         !verify_installed_payload_pair(media, SERVICE_EXE_NAME, installed))
         return FALSE;
@@ -1509,13 +1538,13 @@ static BOOL run_process_and_wait(const WCHAR *arguments, DWORD timeout_ms)
     return exit_code == ERROR_SUCCESS;
 }
 
-/* The deployment media remains manifest-SHA256 authenticated, but this
- * checked Vista image must not run a second, boot-time trust policy over the
- * locally built Triton binaries.  Set every Vista-era BCD form before the
- * Safe Mode transition so both the installer boot and the activated-driver
- * boot inherit the same explicit test configuration. */
-static BOOL disable_boot_integrity_enforcement(void)
+static BOOL bcd_current_has_option(const CHAR *option, BOOL *present);
+
+/* x86 uses the installed signing certificate and normal boot policy.
+ * Retain the existing x64 development policy until that package is addressed. */
+static BOOL configure_boot_integrity(void)
 {
+#if defined(_WIN64)
     BOOL testsigning;
     BOOL nointegritychecks;
     BOOL loadoptions;
@@ -1543,6 +1572,23 @@ static BOOL disable_boot_integrity_enforcement(void)
                 (unsigned long)loadoptions,
                 (unsigned long)GetLastError());
     return FALSE;
+#else
+    BOOL has_legacy_bypass = FALSE;
+    if (!bcd_current_has_option("DDISABLE_INTEGRITY_CHECKS", &has_legacy_bypass) ||
+        !run_process_and_wait(L"/set {current} testsigning off", 30000) ||
+        !run_process_and_wait(L"/set {current} nointegritychecks off", 30000) ||
+        (has_legacy_bypass &&
+         !run_process_and_wait(L"/deletevalue {current} loadoptions", 30000)) ||
+        !run_process_and_wait(L"/set {current} advancedoptions off", 30000)) {
+        emit_status(L"BOOT_INTEGRITY_NORMAL_FAIL arch=x86 error=%lu",
+                    (unsigned long)GetLastError());
+        return FALSE;
+    }
+    emit_status(L"BOOT_INTEGRITY_NORMAL_OK arch=x86 testsigning=off "
+                L"nointegritychecks=off legacy-loadoptions-removed=%lu",
+                (unsigned long)has_legacy_bypass);
+    return TRUE;
+#endif
 }
 
 static BOOL buffer_contains_ascii_case_insensitive(const CHAR *buffer,
@@ -1640,7 +1686,7 @@ done:
     return ok;
 }
 
-static BOOL bcd_current_has_safeboot(BOOL *has_safeboot)
+static BOOL bcd_current_has_option(const CHAR *option, BOOL *present)
 {
     WCHAR system[MAX_PATH], application[MAX_DEPLOY_PATH], command[2048];
     STARTUPINFOW startup;
@@ -1651,7 +1697,7 @@ static BOOL bcd_current_has_safeboot(BOOL *has_safeboot)
     DWORD bytes_read = 0, chunk = 0, exit_code = ERROR_GEN_FAILURE;
     BOOL ok = FALSE;
 
-    *has_safeboot = FALSE;
+    *present = FALSE;
     ZeroMemory(&security, sizeof(security));
     security.nLength = sizeof(security);
     security.bInheritHandle = TRUE;
@@ -1686,10 +1732,10 @@ static BOOL bcd_current_has_safeboot(BOOL *has_safeboot)
                         sizeof(output) - bytes_read, &chunk, NULL) && chunk) {
             bytes_read += chunk;
         }
-        *has_safeboot = buffer_contains_ascii_case_insensitive(
-            output, bytes_read, "safeboot") ||
+        *present = buffer_contains_ascii_case_insensitive(
+            output, bytes_read, option) ||
             buffer_contains_utf16le_ascii_case_insensitive(
-                output, bytes_read, "safeboot");
+                output, bytes_read, option);
         ok = TRUE;
     } else {
         SetLastError(exit_code);
@@ -1700,6 +1746,11 @@ done:
     if (pipe_read) CloseHandle(pipe_read);
     if (pipe_write) CloseHandle(pipe_write);
     return ok;
+}
+
+static BOOL bcd_current_has_safeboot(BOOL *has_safeboot)
+{
+    return bcd_current_has_option("safeboot", has_safeboot);
 }
 
 static BOOL enable_shutdown_privilege(void)
@@ -1923,8 +1974,8 @@ static BOOL install_normal_mode(const DeployMedia *media)
         !write_state(L"ReprobeGuardId", L"PENDING") ||
         !write_state(L"VerifiedSuccessId", L"PENDING") ||
         !write_state(L"SafeModeOwned", L"1")) return FALSE;
-    if (!disable_boot_integrity_enforcement()) {
-        write_state(L"Result", L"FAILED_BOOT_INTEGRITY_BYPASS");
+    if (!configure_boot_integrity()) {
+        write_state(L"Result", L"FAILED_BOOT_INTEGRITY_CONFIGURATION");
         return FALSE;
     }
     if (!set_safe_mode())
@@ -2030,16 +2081,19 @@ static BOOL bind_initial_gpu(const DeployMedia *media)
     DWORD error;
     if (!format_wstr(inf, MAX_DEPLOY_PATH, L"%ls\\%ls",
                      media->package_dir, media->inf)) return FALSE;
-    if (format_wstr(catalog, MAX_DEPLOY_PATH, L"%ls\\viogpu3d-vista-x64.cat", media->package_dir)) {
+    if (format_wstr(catalog, MAX_DEPLOY_PATH, L"%ls\\%ls", media->package_dir, CATALOG_NAME)) {
         BOOL verified = verify_catalog_member(catalog, inf);
         emit_status(L"INF_CATALOG_VERIFY ok=%lu error=%lu", (unsigned long)verified,
                     (unsigned long)GetLastError());
         {
             const WCHAR *members[] = {L"viogpu3d.sys", L"neptune_d3d9.dll",
-                L"neptune_d3d9_wow.dll", SERVICE_EXE_NAME, PROBE_EXE_NAME};
+#if TRITON_DEPLOY_HAS_WOW64
+                L"neptune_d3d9_wow.dll",
+#endif
+                SERVICE_EXE_NAME, PROBE_EXE_NAME};
             WCHAR member[MAX_DEPLOY_PATH];
             DWORD index;
-            for (index = 0; index < 5; ++index) {
+            for (index = 0; index < sizeof(members) / sizeof(members[0]); ++index) {
                 if (!format_wstr(member, MAX_DEPLOY_PATH, L"%ls\\%ls",
                                  media->package_dir, members[index])) continue;
                 verified = verify_catalog_member(catalog, member);

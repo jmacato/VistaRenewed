@@ -235,34 +235,37 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent,
     }
 
 #if defined(VIOGPU_TARGET_VISTA)
-    /* A standard shared primary is a present target, not DWM's pixel store.
-     * For a full-size Neptune shared texture, use the host surface as the
-     * scanout source (the same ownership model as VirtualBox's
-     * BLIT_SURFACE_TO_SCREEN path).  Do not create a virgl copy or read it
-     * back through the CPU-fixed primary. */
+    // A Blt updates retained primary pixels. Do not substitute selection of
+    // the mutable source: DWM may update only the supplied dirty rectangles.
     const BOOLEAN directHostPresent =
         dst->IsPrimary() && !dst->IsBlob() &&
         src->IsHostPresentationSurface() &&
         srcWidth == dstWidth && srcHeight == dstHeight;
     if (directHostPresent)
     {
-        if (pPresent->DmaSize < sizeof(VIOGPU_COMMAND_HDR))
+        const ULONGLONG bodySize = sizeof(VIOGPU_COPY_FIXED_PRIMARY_CMD) +
+            (ULONGLONG)pPresent->SubRectCnt * sizeof(RECT);
+        if (bodySize > MAXULONG ||
+            sizeof(VIOGPU_COMMAND_HDR) + bodySize > pPresent->DmaSize)
         {
             pPresent->MultipassOffset = 0;
             return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
         }
-
-        VIOGPU_COMMAND_HDR *cmd =
+        VIOGPU_COMMAND_HDR *header =
             (VIOGPU_COMMAND_HDR *)pPresent->pDmaBuffer;
-        cmd->type = VIOGPU_CMD_NOP;
-        cmd->size = 0;
-        cmd->flags = 0;
-        cmd->ring_idx = 0;
-        pPresent->pDmaBuffer =
-            (UCHAR *)pPresent->pDmaBuffer + sizeof(*cmd);
-        DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("%s direct host scanout src=%d dst-standard-primary=%d\n",
-                  __FUNCTION__, src->GetId(), dst->GetId()));
+        RtlZeroMemory(header, sizeof(*header));
+        header->type = VIOGPU_CMD_COPY_HOST_PRIMARY;
+        header->size = (UINT)bodySize;
+        VIOGPU_COPY_FIXED_PRIMARY_CMD *copy =
+            (VIOGPU_COPY_FIXED_PRIMARY_CMD *)(header + 1);
+        copy->SourceAllocationIndex = DXGK_PRESENT_SOURCE_INDEX;
+        copy->DestinationAllocationIndex = DXGK_PRESENT_DESTINATION_INDEX;
+        copy->SourceDeltaX = (LONG)dx64;
+        copy->SourceDeltaY = (LONG)dy64;
+        copy->RectCount = pPresent->SubRectCnt;
+        RtlCopyMemory(copy + 1, pPresent->pDstSubRects,
+                      (SIZE_T)pPresent->SubRectCnt * sizeof(RECT));
+        pPresent->pDmaBuffer = (UCHAR *)(header + 1) + (SIZE_T)bodySize;
         return STATUS_SUCCESS;
     }
 #endif
@@ -1131,11 +1134,10 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
                 srcWidth == dstWidth && srcHeight == dstHeight;
             if (directHostScanout)
             {
-                // The NOP emitted by GenerateBltPresent still has a real
-                // scheduler fence. Switch the visible source only from that
-                // command's successful retirement path.
+                // Publish the retained destination only after every SHM
+                // rectangle copy has completed in the DMA worker.
                 cmd->SetScanoutSourceCompletion(
-                    srcAlloc, m_pAdapter->vidpn.GetScanoutSourceGeneration());
+                    dstAlloc, m_pAdapter->vidpn.GetScanoutSourceGeneration());
             }
         }
         return STATUS_SUCCESS;
@@ -1348,6 +1350,7 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
                     break;
                 }
 
+                case VIOGPU_CMD_COPY_HOST_PRIMARY:
                 case VIOGPU_CMD_COPY_FIXED_PRIMARY:
                 case VIOGPU_CMD_FLUSH_FIXED_PRIMARY:
                     // This is emitted only by the kernel's GDI Present path.

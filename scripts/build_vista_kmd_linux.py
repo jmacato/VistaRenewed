@@ -2,7 +2,9 @@
 """Build Vista KMD using Clang's Microsoft ABI and verified WDK 7.1 inputs."""
 import argparse
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -78,6 +80,7 @@ rc_source = out / 'viogpu3d.rc'
 rc_source.write_text((kmd/'viogpu/viogpu3d/viogpu3d.rc').read_text(encoding='utf-16').replace('..\\..\\build\\vendor.ver', str(kmd/'build/vendor.ver')))
 rc_preprocessed = out/'viogpu3d.preprocessed.rc'
 resource = out/'viogpu3d.res'
+llvm_rc = os.environ.get('LLVM_RC') or shutil.which('llvm-rc-18') or shutil.which('llvm-rc') or 'llvm-rc-18'
 rc_flags = [f'/I{wdk}/inc/api', f'/I{wdk}/inc/ddk', f'/I{wdk}/inc/crt',
             f'/I{kmd}/viogpu/viogpu3d', f'/I{kmd}/build',
             '/DRC_INVOKED', '/DVER_OS=Vista', f'/DVER_ARCH={args.arch}',
@@ -86,7 +89,9 @@ with (out/'resource.log').open('w') as log:
     subprocess.run(['clang', '--driver-mode=cl', '/nologo', '/P', f'/Fi{rc_preprocessed}',
                     '/clang:-ivfsoverlay', f'/clang:{vfs}', *rc_flags, f'/Tc{rc_source}'],
                    stdout=log, stderr=subprocess.STDOUT, check=True)
-    subprocess.run(['llvm-rc-18', '/no-preprocess', f'/fo{resource}', str(rc_preprocessed)],
+    # On POSIX, an absolute input path begins with '/'; use '--' so llvm-rc
+    # does not interpret it as another MS-style option.
+    subprocess.run([llvm_rc, '/no-preprocess', f'/fo{resource}', '--', str(rc_preprocessed)],
                    stdout=log, stderr=subprocess.STDOUT, check=True)
 libdir = wdk/'lib/wlh'/('amd64' if args.arch == 'x64' else 'i386')
 link = ['lld-link', '/nologo', '/nodefaultlib', '/driver', '/subsystem:native,6.00',

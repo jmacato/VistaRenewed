@@ -435,6 +435,7 @@ void VioGpuCommand::Run()
                     break;
                 }
 
+            case VIOGPU_CMD_COPY_HOST_PRIMARY:
             case VIOGPU_CMD_COPY_FIXED_PRIMARY:
                 {
                     if (cmdHdr->size < sizeof(VIOGPU_COPY_FIXED_PRIMARY_CMD))
@@ -475,9 +476,14 @@ void VioGpuCommand::Run()
                     }
 
                     const RECT *rects = (const RECT *)(copy + 1);
-                    NTSTATUS copyStatus = destination->CopyToFixedPrimary(
-                        source, rects, copy->RectCount,
-                        copy->SourceDeltaX, copy->SourceDeltaY);
+                    NTSTATUS copyStatus =
+                        cmdHdr->type == VIOGPU_CMD_COPY_HOST_PRIMARY
+                        ? destination->CopyHostToPrimary(
+                            source, rects, copy->RectCount,
+                            copy->SourceDeltaX, copy->SourceDeltaY)
+                        : destination->CopyToFixedPrimary(
+                            source, rects, copy->RectCount,
+                            copy->SourceDeltaX, copy->SourceDeltaY);
                     if (!NT_SUCCESS(copyStatus))
                     {
                         DbgPrint(TRACE_LEVEL_ERROR,
@@ -582,9 +588,23 @@ end:
         // Read the segment address at retirement, after any Patch callback.
         // Host blt presentation preserves the current address; DMA flips
         // report their own allocation's address on the following vsync.
-        m_pAdapter->vidpn.SetScanoutSourceIfGeneration(
+        BOOLEAN armed = m_pAdapter->vidpn.SetScanoutSourceIfGeneration(
             m_pScanoutSourceCompletion, m_scanoutSourceGeneration,
             m_scanoutSourceIsDmaFlip);
+        if (armed && m_scanoutSourceIsDmaFlip) {
+            // Do not let DMA completion or a following render-event marker
+            // release the source while the display thread still reads it.
+            NTSTATUS status = m_pAdapter->vidpn.CompletePendingFlip();
+            if (!NT_SUCCESS(status)) {
+                RecordFailure(status);
+            } else {
+                static LONG reported = 0;
+                if (InterlockedCompareExchange(&reported, 1, 0) == 0)
+                    DbgPrint(TRACE_LEVEL_WARNING,
+                             ("TRITON-FLIP-COPY-COMPLETE src=%u\n",
+                              m_pScanoutSourceCompletion->GetId()));
+            }
+        }
     }
     m_pScanoutSourceCompletion = NULL;
 

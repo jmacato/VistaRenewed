@@ -64,6 +64,7 @@ VioGpuVidPN::VioGpuVidPN(VioGpuAdapter *adapter)
     m_SystemDisplaySourceId = D3DDDI_ID_UNINITIALIZED;
 #endif
     KeInitializeSpinLock(&m_sourceLock);
+    ExInitializeFastMutex(&m_flipSubmitMutex);
     // Auto-reset: each source latch is one promotion opportunity. A coalesced
     // signal cannot strand a source because TryPromoteFlip checks m_shouldFlip.
     KeInitializeEvent(&m_flipReadyEvent, SynchronizationEvent, FALSE);
@@ -2716,6 +2717,25 @@ PAGED_CODE_SEG_END
 // latched. No cross-thread token association is needed here.
 BOOLEAN VioGpuVidPN::TryPromoteFlip()
 {
+    ExAcquireFastMutex(&m_flipSubmitMutex);
+    BOOLEAN promoted = TryPromoteFlipLocked();
+    ExReleaseFastMutex(&m_flipSubmitMutex);
+    return promoted;
+}
+
+NTSTATUS VioGpuVidPN::CompletePendingFlip()
+{
+    // A timer may already be copying this source. Waiting for the same mutex
+    // covers that case too; an empty arm alone is not proof of completion.
+    ExAcquireFastMutex(&m_flipSubmitMutex);
+    TryPromoteFlipLocked();
+    NTSTATUS status = m_lastFlipStatus;
+    ExReleaseFastMutex(&m_flipSubmitMutex);
+    return status;
+}
+
+BOOLEAN VioGpuVidPN::TryPromoteFlipLocked()
+{
     // Entered only from the flip thread at PASSIVE_LEVEL: the scanout emitted
     // below (FlushToScreen) is PAGE code.
     VIOGPU_ASSERT_CHK(KeGetCurrentIrql() < DISPATCH_LEVEL);
@@ -2772,6 +2792,7 @@ BOOLEAN VioGpuVidPN::TryPromoteFlip()
         res->Release();
     }
 
+    m_lastFlipStatus = status;
     if (!NT_SUCCESS(status))
     {
         InterlockedOr(&m_shouldFlip, 1);

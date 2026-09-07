@@ -902,10 +902,27 @@ triton9EnsureKernelContext(TRITON9_DEVICE *device)
         ZeroMemory(&context, sizeof(context));
         hr = device->callbacks.pfnCreateContextCb(device->hRTDevice, &context);
         hr = triton9MapDeviceFailure(device, hr);
-        if (SUCCEEDED(hr) && context.hContext)
+        if (SUCCEEDED(hr) && context.hContext && context.pCommandBuffer &&
+            context.CommandBufferSize >= sizeof(VIOGPU_COMMAND_HDR) +
+                                         sizeof(VIOGPU_SIGNAL_EVENT_CMD) &&
+            context.pAllocationList && context.AllocationListSize &&
+            context.pPatchLocationList && context.PatchLocationListSize) {
             device->hKMContext = context.hContext;
-        else if (SUCCEEDED(hr))
+            device->kmCommandBuffer = context.pCommandBuffer;
+            device->kmCommandBufferSize = context.CommandBufferSize;
+            device->kmAllocationList = context.pAllocationList;
+            device->kmAllocationListSize = context.AllocationListSize;
+            device->kmPatchLocationList = context.pPatchLocationList;
+            device->kmPatchLocationListSize = context.PatchLocationListSize;
+        } else if (SUCCEEDED(hr)) {
+            if (context.hContext && device->callbacks.pfnDestroyContextCb) {
+                D3DDDICB_DESTROYCONTEXT destroy;
+                ZeroMemory(&destroy, sizeof(destroy));
+                destroy.hContext = context.hContext;
+                device->callbacks.pfnDestroyContextCb(device->hRTDevice, &destroy);
+            }
             hr = E_FAIL;
+        }
     }
     LeaveCriticalSection(&device->kmContextLock);
     return hr;
@@ -1155,6 +1172,16 @@ triton9DestroyDevice(HANDLE hDevice)
         return E_INVALIDARG;
 
     triton9DestroyAllQueries(device);
+    EnterCriticalSection(&device->shaderLock);
+    if (device->presentFence) {
+        ID3D11Fence_Release(device->presentFence);
+        device->presentFence = NULL;
+    }
+    if (device->presentContext) {
+        ID3D11DeviceContext4_Release(device->presentContext);
+        device->presentContext = NULL;
+    }
+    LeaveCriticalSection(&device->shaderLock);
 
     if (device->hKMContext && device->callbacks.pfnDestroyContextCb) {
         D3DDDICB_DESTROYCONTEXT context;

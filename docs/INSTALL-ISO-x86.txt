@@ -1,0 +1,23 @@
+Triton Vista x86 development driver ISO
+=======================================
+
+This ISO is for 32-bit Windows Vista. SP1 compatibility is unverified.
+The ISO is not a Windows installer or a bootable operating-system disk.
+
+The VM must use the matching Neptune-enabled QEMU, virglrenderer, and VirtIO GPU components from this project.
+
+Before you install the driver, shut down the guest and save a VM snapshot.
+Then boot Vista and mount this ISO as the virtual CD/DVD drive.
+
+Open the CD/DVD drive. Right-click install.cmd. Select Run as administrator.
+
+Keep the ISO mounted while the service installs the driver and restarts Vista.
+Do not send another shutdown or restart request during this process.
+
+The installer adds its certificate to the machine Root and TrustedPublisher stores and installs a LocalSystem service. It disables Test Mode and nointegritychecks. It removes the legacy DDISABLE_INTEGRITY_CHECKS loadoptions entry from earlier installations.
+
+The certificate and service remain in the guest until you restore the snapshot. These boot settings apply to x86 only.
+
+Each CI build has a new test certificate. Restore the pre-install snapshot before you install a different build.
+
+This package is experimental and self-signed. It is not Microsoft certified.

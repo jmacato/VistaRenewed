@@ -15,10 +15,17 @@ from asn1crypto import cms, core
 from signify.asn1 import ctl, spc
 
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--arch', choices=('x64', 'x86'), default='x64')
 parser.add_argument('package', type=Path)
 args = parser.parse_args()
-files = ['viogpu3d-diagnostic.inf', 'viogpu3d.sys', 'neptune_d3d9.dll',
-         'neptune_d3d9_wow.dll', 'triton-vista-deploy.exe', 'triton9_runtime_probe_x64.exe']
+files_by_arch = {
+    'x64': ['viogpu3d-diagnostic.inf', 'viogpu3d.sys', 'neptune_d3d9.dll',
+            'neptune_d3d9_wow.dll', 'triton-vista-deploy.exe',
+            'triton9_runtime_probe_x64.exe'],
+    'x86': ['viogpu3d-diagnostic.inf', 'viogpu3d.sys', 'neptune_d3d9.dll',
+            'triton-vista-deploy.exe', 'triton9_runtime_probe_x86.exe'],
+}
+files = files_by_arch[args.arch]
 subjects = []
 for name in files:
     path = args.package/name
@@ -58,6 +65,6 @@ envelope = cms.ContentInfo({'content_type': 'signed_data', 'content': {
     'version': 'v1', 'digest_algorithms': [],
     'encap_content_info': {'content_type': 'microsoft_ctl', 'content': cat},
     'signer_infos': []}})
-output = args.package/'viogpu3d-vista-x64.cat'
+output = args.package/f'viogpu3d-vista-{args.arch}.cat'
 output.write_bytes(envelope.dump())
 print(f'{output}: wrote {len(subjects)} catalog members; catalog must now be signed and verified')

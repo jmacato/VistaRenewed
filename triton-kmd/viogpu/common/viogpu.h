@@ -193,6 +193,21 @@ typedef struct virtio_gpu_set_scanout
 } GPU_SET_SCANOUT, *PGPU_SET_SCANOUT;
 #pragma pack()
 
+// Private Triton extension. One rectangle fits the inline control buffer.
+#define VIRTIO_GPU_CMD_TRITON_PRESENT_BLT 0x0500
+#pragma pack(1)
+typedef struct _GPU_TRITON_PRESENT_BLT
+{
+    GPU_CTRL_HDR hdr;
+    ULONG source_resource_id, destination_resource_id;
+    ULONG source_width, source_height, source_format, source_stride;
+    ULONG source_offset, reserved;
+    GPU_RECT source_rect;
+    ULONG destination_x, destination_y;
+} GPU_TRITON_PRESENT_BLT;
+#pragma pack()
+C_ASSERT(sizeof(GPU_TRITON_PRESENT_BLT) == 80);
+
 /* VIRTIO_GPU_CMD_RESOURCE_FLUSH */
 #pragma pack(1)
 typedef struct virtio_gpu_resource_flush

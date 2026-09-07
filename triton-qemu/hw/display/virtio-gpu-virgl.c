@@ -22,6 +22,9 @@
 
 #include "ui/egl-helpers.h"
 
+#include <sys/mman.h>
+#include <sys/stat.h>
+
 #define VIRGL_RENDERER_UNSTABLE_APIS
 #include <virglrenderer.h>
 
@@ -48,6 +51,19 @@ struct virtio_gpu_virgl_resource {
     uint32_t blob_flags;
     uint32_t blob_ctx_id;
 };
+
+/* Triton private extension: copy one completed SHM rectangle into the
+ * retained, ordinary primary. It does not change scanout. */
+#define VIRTIO_GPU_CMD_TRITON_PRESENT_BLT 0x0500
+struct virtio_gpu_triton_present_blt {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32_t source_resource_id, destination_resource_id;
+    uint32_t source_width, source_height, source_format, source_stride;
+    uint32_t source_offset, reserved;
+    struct virtio_gpu_rect source_rect;
+    uint32_t destination_x, destination_y;
+};
+QEMU_BUILD_BUG_ON(sizeof(struct virtio_gpu_triton_present_blt) != 80);
 
 static bool
 virtio_gpu_virgl_legacy_neptune_context_fence(
@@ -543,8 +559,92 @@ static void virtio_gpu_rect_update(VirtIOGPU *g, int idx, int x, int y,
     dpy_gl_update(g->parent_obj.scanout[idx].con, x, y, width, height);
 }
 
+/*
+ * Neptune HOST3D blobs are exported by the render server as linear shared
+ * memory.  They deliberately have no pipe_resource, so the normal virgl
+ * transfer path cannot read them.  Keep that path for regular resources and
+ * copy SHM blobs into QEMU's CPU DisplaySurface instead.
+ */
+static int virtio_gpu_neptune_readback_blob(
+    const struct virtio_gpu_virgl_resource *res,
+    const struct virtio_gpu_framebuffer *fb,
+    const struct virtio_gpu_rect *source,
+    uint32_t left, uint32_t top, uint32_t width, uint32_t height,
+    DisplaySurface *surface)
+{
+    struct stat st;
+    uint64_t source_offset;
+    uint64_t source_end;
+    uint64_t surface_offset;
+    uint64_t dst_stride;
+    uint64_t surface_end;
+    uint64_t mapped_size;
+    size_t map_len;
+    uint8_t *map;
+    uint8_t *dst;
+    uint32_t fd_type;
+    int fd = -1;
+    int ret;
+
+    if (!res || !res->is_blob || !fb || !surface || !width || !height ||
+        surface_bytes_per_pixel(surface) != fb->bytes_pp) {
+        return -EINVAL;
+    }
+
+    ret = virgl_renderer_resource_export_blob(res->base.resource_id,
+                                              &fd_type, &fd);
+    if (ret) {
+        return ret;
+    }
+    if (fd < 0 || fd_type != VIRGL_RENDERER_BLOB_FD_TYPE_SHM ||
+        fstat(fd, &st) < 0 || st.st_size < 0) {
+        ret = -EINVAL;
+        goto out_close;
+    }
+
+    mapped_size = MIN(res->base.blob_size, (uint64_t)st.st_size);
+    source_offset = (uint64_t)fb->offset +
+                    (uint64_t)(top - source->y) * fb->stride +
+                    (uint64_t)(left - source->x) * fb->bytes_pp;
+    source_end = source_offset + (uint64_t)(height - 1) * fb->stride +
+                 (uint64_t)width * fb->bytes_pp;
+    dst_stride = surface_stride(surface);
+    surface_offset = (uint64_t)(top - source->y) * dst_stride +
+                     (uint64_t)(left - source->x) * fb->bytes_pp;
+    surface_end = surface_offset + (uint64_t)(height - 1) * dst_stride +
+                  (uint64_t)width * fb->bytes_pp;
+    if (source_offset > mapped_size || source_end > mapped_size ||
+        source_end > SIZE_MAX || !dst_stride ||
+        surface_end > dst_stride * surface_height(surface)) {
+        ret = -EINVAL;
+        goto out_close;
+    }
+
+    map_len = source_end;
+    map = mmap(NULL, map_len, PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        ret = -errno;
+        goto out_close;
+    }
+
+    dst = surface_data(surface) + surface_offset;
+    for (uint32_t row = 0; row < height; row++) {
+        memcpy(dst + (uint64_t)row * dst_stride,
+               map + source_offset + (uint64_t)row * fb->stride,
+               (size_t)width * fb->bytes_pp);
+    }
+    munmap(map, map_len);
+    ret = 0;
+
+out_close:
+    close(fd);
+    return ret;
+}
+
 static int virtio_gpu_neptune_readback_surface(
     uint32_t resource_id,
+    const struct virtio_gpu_virgl_resource *res,
+    const struct virtio_gpu_framebuffer *fb,
     const struct virtio_gpu_rect *source,
     const struct virtio_gpu_rect *update,
     DisplaySurface *surface,
@@ -611,10 +711,15 @@ static int virtio_gpu_neptune_readback_surface(
     box.h = bottom - top;
     box.d = 1;
 
-    ret = virgl_renderer_transfer_read_iov(resource_id, 0, 0, stride,
-                                           surface_size,
-                                           (struct virgl_box *)&box,
-                                           offset, &iov, 1);
+    if (res && res->is_blob) {
+        ret = virtio_gpu_neptune_readback_blob(res, fb, source, left, top,
+                                               box.w, box.h, surface);
+    } else {
+        ret = virgl_renderer_transfer_read_iov(resource_id, 0, 0, stride,
+                                               surface_size,
+                                               (struct virgl_box *)&box,
+                                               offset, &iov, 1);
+    }
     if (ret) {
         return ret;
     }
@@ -630,6 +735,8 @@ static int virtio_gpu_neptune_readback_surface(
 
 static DisplaySurface *virtio_gpu_neptune_create_surface(
     uint32_t resource_id,
+    const struct virtio_gpu_virgl_resource *res,
+    const struct virtio_gpu_framebuffer *fb,
     const struct virtio_gpu_rect *source,
     pixman_format_code_t format,
     int *readback_status)
@@ -647,12 +754,97 @@ static DisplaySurface *virtio_gpu_neptune_create_surface(
     surface = qemu_create_displaysurface_from(source->width, source->height,
                                               format, stride, NULL);
     *readback_status = virtio_gpu_neptune_readback_surface(
-        resource_id, source, source, surface, NULL);
+        resource_id, res, fb, source, source, surface, NULL);
     if (*readback_status) {
         qemu_free_displaysurface(surface);
         return NULL;
     }
     return surface;
+}
+
+static int virtio_gpu_neptune_present_blt(
+    const struct virtio_gpu_triton_present_blt *b,
+    const struct virtio_gpu_virgl_resource *src,
+    const struct virtio_gpu_virgl_resource *dst)
+{
+    struct virtio_gpu_framebuffer fb = { 0 };
+    struct virtio_gpu_box box = { 0 };
+    struct iovec iov;
+    DisplaySurface *snapshot;
+    uint64_t offset;
+    int ret;
+
+    if (!src || !dst || !src->is_blob || dst->is_blob || src == dst ||
+        b->reserved || !b->source_width || !b->source_height ||
+        b->source_width > 4096 || b->source_height > 4096 ||
+        !b->source_rect.width || !b->source_rect.height ||
+        (uint64_t)b->source_rect.x + b->source_rect.width > b->source_width ||
+        (uint64_t)b->source_rect.y + b->source_rect.height > b->source_height ||
+        (uint64_t)b->destination_x + b->source_rect.width > dst->base.width ||
+        (uint64_t)b->destination_y + b->source_rect.height > dst->base.height ||
+        b->source_stride < (uint64_t)b->source_width * 4 ||
+        (b->source_format != VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM &&
+         b->source_format != VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM) ||
+        (dst->base.format != VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM &&
+         dst->base.format != VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM)) {
+        return -EINVAL;
+    }
+
+    /* The SHM helper addresses relative to source_rect. Bake the absolute
+     * source origin into offset, then snapshot only the requested rectangle. */
+    offset = (uint64_t)b->source_offset +
+             (uint64_t)b->source_rect.y * b->source_stride +
+             (uint64_t)b->source_rect.x * 4;
+    if (offset > UINT32_MAX) {
+        return -EINVAL;
+    }
+    fb.format = virtio_gpu_get_pixman_format(b->source_format);
+    fb.bytes_pp = 4;
+    fb.width = b->source_width;
+    fb.height = b->source_height;
+    fb.stride = b->source_stride;
+    fb.offset = offset;
+    snapshot = virtio_gpu_neptune_create_surface(
+        b->source_resource_id, src, &fb, &b->source_rect, fb.format, &ret);
+    if (!snapshot) {
+        return ret;
+    }
+
+    /* transfer_write_iov consumes this private snapshot synchronously.
+     * Pixels outside the box remain in the destination resource. The later
+     * ordinary-primary flush publishes the completed group of rectangles. */
+    box.x = b->destination_x;
+    box.y = b->destination_y;
+    box.w = b->source_rect.width;
+    box.h = b->source_rect.height;
+    box.d = 1;
+    iov.iov_base = surface_data(snapshot);
+    iov.iov_len = (size_t)surface_stride(snapshot) * surface_height(snapshot);
+    ret = virgl_renderer_transfer_write_iov(
+        b->destination_resource_id, 0, 0, surface_stride(snapshot),
+        iov.iov_len, (struct virgl_box *)&box, 0, &iov, 1);
+    qemu_free_displaysurface(snapshot);
+    return ret;
+}
+
+static void virgl_cmd_triton_present_blt(VirtIOGPU *g,
+                                        struct virtio_gpu_ctrl_command *cmd)
+{
+    struct virtio_gpu_triton_present_blt b;
+    struct virtio_gpu_virgl_resource *src, *dst;
+    int ret;
+
+    cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    VIRTIO_GPU_FILL_CMD(b);
+    virtio_gpu_bswap_32(&b, sizeof(b));
+    if (!virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
+        cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+        return;
+    }
+    src = virtio_gpu_virgl_find_resource(g, b.source_resource_id);
+    dst = virtio_gpu_virgl_find_resource(g, b.destination_resource_id);
+    ret = virtio_gpu_neptune_present_blt(&b, src, dst);
+    cmd->error = ret ? virgl_status_to_virtio_error(ret) : 0;
 }
 
 static void virgl_cmd_resource_flush(VirtIOGPU *g,
@@ -673,39 +865,32 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
         return;
     }
-    memset(&info, 0, sizeof(info));
-    ret = virgl_renderer_resource_get_info(rf.resource_id, &info);
-    if (ret) {
-        cmd->error = virgl_status_to_virtio_error(ret);
-        return;
-    }
     if (!rf.r.width || !rf.r.height ||
         (uint64_t)rf.r.x + rf.r.width > INT_MAX ||
         (uint64_t)rf.r.y + rf.r.height > INT_MAX) {
         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
         return;
     }
-    /* Blobs have no intrinsic pixel dimensions. Their framebuffer layout
-     * is validated by SET_SCANOUT_BLOB against blob_size, and flushes are
-     * clipped to that scanout below. In particular, an exported Neptune
-     * blob has no pipe_resource, so get_info returns zero dimensions.
-     * Match the simple GPU's blob flush semantics instead of rejecting
-     * every update before the first scanout can be established.
-     */
-    if (!res->is_blob &&
-        (rf.r.x > info.width || rf.r.y > info.height ||
-         rf.r.width > info.width - rf.r.x ||
-         rf.r.height > info.height - rf.r.y)) {
-        cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
-        return;
+    if (!res->is_blob) {
+        memset(&info, 0, sizeof(info));
+        ret = virgl_renderer_resource_get_info(rf.resource_id, &info);
+        if (ret) {
+            cmd->error = virgl_status_to_virtio_error(ret);
+            return;
+        }
+        if (rf.r.x > info.width || rf.r.y > info.height ||
+            rf.r.width > info.width - rf.r.x ||
+            rf.r.height > info.height - rf.r.y) {
+            cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            return;
+        }
     }
 
     for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
         if (g->parent_obj.scanout[i].resource_id != rf.resource_id) {
             continue;
         }
-        if (virtio_gpu_neptune_enabled(g->parent_obj.conf) &&
-            !(res->is_blob && res->base.dmabuf_fd >= 0)) {
+        if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
             struct virtio_gpu_scanout *scanout =
                 &g->parent_obj.scanout[i];
             struct virtio_gpu_rect source;
@@ -716,12 +901,21 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
                 cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
                 return;
             }
+            if (res->is_blob &&
+                (rf.r.x > scanout->fb.width ||
+                 rf.r.y > scanout->fb.height ||
+                 rf.r.width > scanout->fb.width - rf.r.x ||
+                 rf.r.height > scanout->fb.height - rf.r.y)) {
+                cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
+                return;
+            }
             source.x = scanout->x;
             source.y = scanout->y;
             source.width = scanout->width;
             source.height = scanout->height;
             ret = virtio_gpu_neptune_readback_surface(
-                rf.resource_id, &source, &rf.r, scanout->ds, &updated);
+                rf.resource_id, res, &scanout->fb, &source, &rf.r,
+                scanout->ds, &updated);
             if (ret) {
                 cmd->error = virgl_status_to_virtio_error(ret);
                 return;
@@ -856,7 +1050,7 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
     if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
         int readback_status;
         DisplaySurface *surface = virtio_gpu_neptune_create_surface(
-            ss.resource_id, &ss.r, fb.format, &readback_status);
+            ss.resource_id, res, &fb, &ss.r, fb.format, &readback_status);
         if (!surface) {
             cmd->error = virgl_status_to_virtio_error(readback_status);
             return;
@@ -1461,15 +1655,12 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
     }
 #endif
 
-    /* Exported Neptune blobs are untyped DMA-BUFs: use EGL import below,
-     * not transfer_read_iov, which requires a VirGL pipe_resource. */
-    if (virtio_gpu_neptune_enabled(g->parent_obj.conf) &&
-        res->base.dmabuf_fd < 0) {
+    if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
         struct virtio_gpu_scanout *scanout =
             &g->parent_obj.scanout[ss.scanout_id];
         int readback_status;
         DisplaySurface *surface = virtio_gpu_neptune_create_surface(
-            ss.resource_id, &ss.r, fb.format, &readback_status);
+            ss.resource_id, res, &fb, &ss.r, fb.format, &readback_status);
 
         if (!surface) {
             cmd->error = virgl_status_to_virtio_error(readback_status);
@@ -1514,6 +1705,9 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
 
     virgl_renderer_force_ctx_0();
     switch (cmd->cmd_hdr.type) {
+    case VIRTIO_GPU_CMD_TRITON_PRESENT_BLT:
+        virgl_cmd_triton_present_blt(g, cmd);
+        break;
     case VIRTIO_GPU_CMD_CTX_CREATE:
         virgl_cmd_context_create(g, cmd);
         break;

@@ -127,6 +127,7 @@ class VioGpuVidPN
     // Scan out an armed source. Returns TRUE only after the scanout and flush
     // commands have entered the host queue.
     BOOLEAN TryPromoteFlip();
+    NTSTATUS CompletePendingFlip();
     void SetVsyncEnabled(BOOLEAN Enabled)
     {
         InterlockedExchange(&m_vsyncEnabled, Enabled ? TRUE : FALSE);
@@ -237,6 +238,9 @@ class VioGpuVidPN
     PHYSICAL_ADDRESS m_sourceAddress = {0};
     VioGpuAllocation *m_sourceRes = NULL;
     KSPIN_LOCK m_sourceLock;
+    FAST_MUTEX m_flipSubmitMutex;
+    NTSTATUS m_lastFlipStatus = STATUS_SUCCESS;
+    BOOLEAN TryPromoteFlipLocked();
     // SetVidPnSourceAddress, primary creation, and teardown advance this value.
     // A Present completion may replace the source only within its generation.
     volatile LONG m_sourceGeneration = 0;
