@@ -1,25 +1,41 @@
 # Driver ISO builds
 
-The **Vista driver ISO** GitHub Actions workflow runs on pull requests, pushes
-to `main`, version tags and manual dispatch. It produces a downloadable Actions
-artifact; it does not publish a GitHub release or touch a VM.
+Continuous integration (CI) runs automated build checks.
+An ISO file contains a disc image.
+The Vista driver ISO workflow uses GitHub Actions to build an installer image.
+It runs on pull requests, pushes to `main`, version tags and manual requests.
+The workflow uploads downloadable build artifacts.
+It does not publish a GitHub release or control a virtual machine (VM).
 
-The x64 installer contains the miniport, native and WoW64 D3D9 DLLs, deployment
-service, public graphics probe, INF, signed catalog, public test certificate,
-`install.cmd` and installation instructions. It is a data CD, not a bootable
-Windows image. It requires the matching Neptune host stack.
+## Package contents
 
-The build runs in the pinned Ubuntu container, restores hash-checked SDK/WDK
-inputs, compiles both driver architectures, runs the PE/INF checks, test-signs
-the x64 package and verifies its catalog members. It extracts the finished ISO
-and compares every file with the staging manifest before exporting artifacts.
-No GPU, KVM device, Windows guest or persistent signing secret is needed in CI.
-The WDK download depends on Internet Archive availability; a failed download or
-hash check fails the build instead of silently choosing different inputs.
+The x64 installer contains the kernel display driver and Direct3D 9 (D3D9) dynamic-link libraries (DLLs).
+It includes native and Windows-on-Windows 64-bit (WoW64) DLLs.
+WoW64 runs 32-bit applications on 64-bit Windows.
+The installer also contains the deployment service, graphics probe, installation information (INF) file, signed catalog and public test certificate.
+A catalog records signed package membership.
+The disc includes `install.cmd`, license notices and installation instructions.
+It is a data disc, not a bootable Windows image.
+It requires the matching Neptune host graphics software.
 
-## Run the same job locally
+## Build checks
 
-Use a separate checkout so the CI build does not replace development binaries:
+The build uses an Ubuntu container with a fixed base image hash.
+It verifies hashes for Software Development Kit (SDK) and Windows Driver Kit (WDK) inputs.
+It compiles both driver architectures and checks Portable Executable (PE) files and the INF.
+It signs the x64 package with a development certificate and verifies catalog membership.
+It extracts the completed ISO and compares every file against the staging manifest.
+CI needs no graphics processor, hardware virtualization device, Windows guest or persistent signing secret.
+
+The WDK download depends on Internet Archive availability.
+A failed download or hash check stops the build.
+The build does not substitute different inputs.
+
+## Local build
+
+Use a separate checkout to protect existing development binaries.
+Docker builds and runs containers.
+From that checkout, run these commands:
 
 ```sh
 docker build -f scripts/linux-driver.Containerfile -t vista-driver-ci scripts
@@ -28,32 +44,41 @@ docker run --rm -v "$PWD:/workspace" \
   vista-driver-ci bash scripts/ci_build_driver_iso.sh
 ```
 
-Podman can run the same commands (add `--security-opt label=disable` for the
-workspace mount on SELinux hosts). A preexisting, correctly hashed WDK ISO at
-`driver/toolchains/wdk71/GRMWDK_EN_7600_1.ISO` avoids downloading it again.
+Podman also supports these commands.
+On Security-Enhanced Linux (SELinux) hosts, add `--security-opt label=disable` for the workspace mount.
+SELinux controls process access to host resources.
+An existing WDK ISO with the expected hash avoids another download.
+Its required path is `driver/toolchains/wdk71/GRMWDK_EN_7600_1.ISO`.
 
-Outputs are `dist/triton-vista-x64.iso`, `SHA256SUMS`, `build-info.json`, and
-`INSTALL.txt`. The GitHub artifact retains these for 14 days; failure logs are
-retained for seven days. Installation is described in [the ISO instructions](INSTALL-ISO.txt).
+The output directory contains `dist/triton-vista-x64.iso`, `SHA256SUMS`, `build-info.json` and `INSTALL.txt`.
+GitHub retains installer artifacts for 14 days and failure logs for seven days.
+For installation, follow [the ISO instructions](INSTALL-ISO.txt).
 
 ## Signing and installation limits
 
-Each build generates a one-year self-signed development certificate. Its DER
-SHA-256 and SHA-1 thumbprint are compiled into the deployment service; the key
-exists only in a temporary directory and is removed after packaging. The ISO
-contains the public certificate. The local development certificate and default
-service pins are unchanged when building without `VISTA_DEPLOY_CERT`.
+Each build generates a self-signed development certificate with one year of validity.
+Distinguished Encoding Rules (DER) define its binary format.
+The deployment service contains the certificate's SHA-256 file hash and SHA-1 thumbprint.
+A thumbprint is a certificate hash.
+These certificate pins identify the accepted signing certificate.
+The private key exists only in a temporary directory.
+The packager removes this directory after packaging.
+The ISO contains the public certificate.
 
-Vista-compatible SHA-1 signing and the existing checked-build deployment
-behavior are retained. The service skips its redundant WinVerifyTrust pass,
-checks the pinned certificate and manifest, and configures development boot
-integrity settings. Host packaging verifies the signatures and catalog. This
-is a test installer, not a WHQL or production signing pipeline.
+Without `VISTA_DEPLOY_CERT`, service builds retain the existing local certificate pins.
+The CI build does not change the local development certificate.
+The package retains Vista-compatible SHA-1 signatures and the existing checked-build deployment behavior.
+The service skips its redundant WinVerifyTrust signature check.
+It checks the certificate pin and manifest, then configures development boot integrity settings.
+The host packager verifies signatures and catalog membership.
+The installer has no Windows Hardware Quality Labs (WHQL) certification or production signature.
 
-Use a pre-install VM snapshot for each new build: automatic upgrades across
-ephemeral signing identities are not implemented. CI does not boot Vista;
-`guest_runtime_tested` is explicitly false in the build metadata. The earlier
-Aero evidence does not automatically apply to every newly built ISO.
+Before each new build test, restore a VM snapshot from before installation.
+Automatic upgrades between temporary signing identities are not available.
+CI does not boot Vista.
+Build metadata sets `guest_runtime_tested` to false.
+Earlier Aero evidence does not establish runtime correctness for a new ISO.
 
-The scripts reproduce the build procedure, not byte-identical ISOs: certificate
-keys, signatures, catalog identifiers and timestamps change between builds.
+The scripts repeat the build procedure.
+They do not produce identical ISO bytes.
+Certificate keys, signatures, catalog identifiers and timestamps change between builds.

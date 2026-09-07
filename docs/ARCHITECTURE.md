@@ -1,5 +1,15 @@
 # Architecture
 
+Triton implements the Windows Vista graphics driver interfaces.
+Neptune transfers graphics commands between the guest and host.
+QEMU runs the virtual machine.
+DXVK converts host Direct3D 11 commands to Vulkan graphics operations.
+
+Desktop Window Manager (DWM) composes the Windows desktop.
+Direct3D 9 (D3D9) supplies the graphics interface that DWM uses on Vista.
+A graphics processing unit (GPU) executes host graphics operations.
+VirtIO supplies the virtual device interface.
+
 ```mermaid
 flowchart LR
     A[Vista applications and DWM] --> B[Windows Direct3D 9 runtime]
@@ -10,10 +20,9 @@ flowchart LR
     F --> G[Vulkan host GPU]
 ```
 
-The driver implements Vista's interfaces while reusing Triton's Neptune
-transport and host rendering infrastructure. The Linux path is the verified
-configuration here; the retained DXMT/Metal sources belong to the earlier
-macOS development route.
+Tests verify the Linux host configuration.
+The repository also retains DXMT and Metal source files from earlier macOS development.
+DXMT converts Direct3D commands to Metal, the macOS graphics interface.
 
 | Directory | Role |
 | --- | --- |
@@ -27,6 +36,7 @@ macOS development route.
 | `scripts` | Build, deployment, inspection and verification tools |
 | `test-artifacts/vista-driver-deploy-service.c` | Guest-owned deployment and proof reboot service |
 
-Changes to resource ownership, fences, shader state and presentation are
-described in the historical `notes/` reports. Their intermediate results should
-not be read as the current support matrix.
+Historical `notes/` reports describe changes to resource ownership, fences, shader state and presentation.
+A fence marks completion of graphics work.
+Use [the current status](STATUS.md) for the supported test configuration.
+Do not treat intermediate test results as current support claims.

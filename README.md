@@ -1,58 +1,74 @@
 # Triton for Windows Vista
 
-A port of osy's Triton graphics driver to Windows Vista's WDDM 1.0 and
-Direct3D 9 interfaces. The Linux host path uses Neptune, DXVK and Vulkan
-to render a Vista guest in QEMU. Aero Glass works in the tested VM,
-including DWM's transparency and blur.
+This project ports osy's Triton graphics driver to Windows Vista.
+The port supports Windows Display Driver Model (WDDM) 1.0 and Direct3D 9 graphics interfaces.
+QEMU runs the virtual machine (VM).
+Neptune transfers graphics commands to the Linux host.
+DXVK converts host graphics commands to Vulkan, a graphics programming interface.
+
+Aero Glass transparency and blur work in the tested VM.
+Desktop Window Manager (DWM), the Windows desktop compositor, supplies these effects.
 
 ![Aero Glass running in the Vista development VM](docs/evidence/glass-boot2.png)
 
-This is experimental driver development. The verified guest is **Vista Ultimate
-SP2 x64, checked build 6002.18005**, running with four KVM vCPUs on a Linux
-host with Intel Iris Xe graphics. Both x64 and x86 drivers compile; the x86
-guest runtime has not been validated. Recent development also encountered
-boot/shutdown blue screens. See the [status and limits](docs/STATUS.md).
+This driver is experimental.
+The verified guest uses Vista Ultimate Service Pack 2 (SP2) x64, checked build 6002.18005.
+x64 identifies the 64-bit target.
+x86 identifies the 32-bit target.
+A checked build includes additional diagnostic checks.
+The Linux host uses Intel Iris Xe graphics and Kernel-based Virtual Machine (KVM) acceleration.
+The VM uses four virtual processors.
+Both x64 and x86 drivers compile.
+Tests do not establish x86 guest compatibility.
+Boot and shutdown tests also produced blue screens.
+See the [status and limits](docs/STATUS.md).
 
 ## Start here
 
 - [Build and development setup](docs/BUILDING.md)
-- [CI-built driver installer ISO](docs/CI.md)
+- [Continuous integration (CI) driver ISO build](docs/CI.md)
 - [Architecture and source map](docs/ARCHITECTURE.md)
 - [Verification and known limits](docs/STATUS.md)
 - [Detailed Aero evidence](notes/AERO_GLASS_VERIFICATION.md)
 - [Upstream sources and licenses](docs/UPSTREAM.md)
+- [Documentation rules](docs/WRITING.md)
 
-Clone without `--recurse-submodules`, then run:
+An ISO file contains a disc image.
+CI builds produce an experimental installer ISO with a development signature.
+Git contains source files, not a certified driver release.
+
+Clone the repository without `--recurse-submodules`.
+From the repository root, run this command:
 
 ```sh
 python3 scripts/bootstrap_sources.py
 ```
 
-DXVK's local change is supplied as a Git bundle and readable patch. The
-bootstrap restores the exact recorded commit before fetching its dependencies.
-Ordinary recursive submodule initialization cannot fetch that commit from
-osy's upstream repository yet.
+The repository includes the local DXVK change as a Git bundle and a readable patch.
+The bootstrap script restores the recorded commit, then downloads its dependencies.
+Ordinary recursive submodule initialization cannot download this local commit from osy's upstream repository.
 
-## What changed
+## Driver changes
 
-The port adds a Vista kernel display driver path and a Direct3D 9 user-mode
-driver, including shader translation, resource sharing, synchronization and
-presentation. Host changes carry the operations through Neptune to the Linux
-renderer. A public D3D9 probe and pixel measurements check the resulting output.
+The port adds a Vista kernel display driver and a Direct3D 9 user-mode driver.
+The user-mode driver handles shader translation, resource sharing, synchronization and presentation.
+Host changes transfer these operations through Neptune to the Linux renderer.
+A graphics probe and pixel measurements check the output.
+A probe is a test program that records observed behavior.
 
-One bug kept Glass from blurring: the shader converter mapped all eight of
-DWM's texture-coordinate inputs to TEXCOORD0. Initializing the identity mapping
-restored distinct samples. The regression checks the average of eight different
-gray texels, then the desktop test checks actual transmitted and softened edges.
+The shader converter initially mapped all eight DWM texture-coordinate inputs to TEXCOORD0.
+This error prevented Glass blur.
+The identity mapping restored eight distinct texture samples.
+The regression test checks the average of eight different gray texture pixels.
+The desktop test checks background transmission and softened edges.
 
 ## Repository layout
 
-The `triton-*` directories retain their upstream layouts and license files.
-Build and deployment tools live in `scripts/`; development service and probe
-support sources remain in `test-artifacts/` for compatibility with existing
-builds. `notes/` and `handoff/` retain the investigation and transfer history.
+The `triton-*` directories retain upstream layouts and license files.
+The `scripts/` directory contains build and deployment tools.
+The `test-artifacts/` directory contains deployment service and probe support source files.
+Existing builds use these paths.
+The `notes/` and `handoff/` directories contain investigation and transfer records.
 
-VM disks, Windows installation media, SDK/WDK downloads, signing identities and
-generated packages are local inputs and are excluded from Git. Supply your own
-guest. CI produces an experimental test-signed installer ISO; no certified
-driver release is included in Git.
+Git excludes VM disks, Windows installation media, downloaded development kits, signing identities and generated packages.
+Supply your own Vista guest.
