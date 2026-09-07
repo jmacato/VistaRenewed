@@ -3,18 +3,18 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-out=test-artifacts/linux-build
+out=build
 mkdir -p "$out"
 signing_args=()
 if [[ -n ${VISTA_DEPLOY_CERT:-} ]]; then
     python3 scripts/write_vista_signing_header.py "$VISTA_DEPLOY_CERT" "$out/deploy-signing.h"
     signing_args+=("-DTRITON_DEPLOY_SIGNING_HEADER=\"$root/$out/deploy-signing.h\"")
 fi
-x86_64-w64-mingw32-windres -I test-artifacts \
-    test-artifacts/vista-driver-deploy-service.rc "$out/vista-deploy-resource.o"
+x86_64-w64-mingw32-windres -I packaging \
+    packaging/vista-driver-deploy-service.rc "$out/vista-deploy-resource.o"
 x86_64-w64-mingw32-gcc -std=c11 -Os -Wall -Wextra -Werror \
     "${signing_args[@]}" -static -static-libgcc -municode -Wl,--subsystem,console:6.0 \
-    -Wl,--disable-high-entropy-va test-artifacts/vista-driver-deploy-service.c \
+    -Wl,--disable-high-entropy-va packaging/vista-driver-deploy-service.c \
     "$out/vista-deploy-resource.o" -o "$out/triton-vista-deploy.exe" \
     -ladvapi32 -lcrypt32 -lwintrust
 python3 triton-kmd/viogpu/tools/check_vista_pe.py --kind exe --arch x64 \

@@ -94,41 +94,11 @@ Before you use this script on a new machine, complete these steps:
 
 Distinguished Encoding Rules (DER) define the certificate's binary format.
 A certificate pin identifies the signing certificate that the service accepts.
-The service source is `test-artifacts/vista-driver-deploy-service.c`.
+The service source is `packaging/vista-driver-deploy-service.c`.
 Do not remove certificate verification to accept a mismatched identity.
 The default signing directory is `~/.local/share/triton-vista-signing`.
 The historical Python default uses a local `/tmp` environment.
 The repository supplies no private signing key.
 
-Use a separately installed Vista development guest.
-Put its working overlay at `vista-kvm/work.qcow2`.
-An overlay stores guest disk changes separately from the backing image.
-Keep the backing image unchanged.
-Configure development driver signing inside the guest.
-As administrator, run the generated disc's `bootstrap.cmd` once.
-The guest service then controls installation and restarts.
-See [deployment details](../test-artifacts/VISTA_GUEST_DEPLOY.md).
-
-With the overlay and a publication at `vista-kvm/deploy-current`, run this command:
-
-```sh
-VISTA_DISPLAY=gtk VISTA_ACCEL=kvm python3 scripts/run_vista_neptune_linux.py
-```
-
-The GTK window toolkit requires `DISPLAY` and an existing `XAUTHORITY` file for native display.
-The launcher defaults to four virtual processors, 2 GiB memory and a USB tablet.
-The USB tablet supplies absolute pointer coordinates.
-The `VISTA_CPUS` variable changes the processor count.
-The current graphics selection targets Intel and `/dev/dri/renderD128`.
-For another host, adapt and test the graphics selection.
-
-Without `VISTA_DISPLAY=gtk`, the launcher uses a headless EGL display and a local VNC socket.
-EGL connects rendering software to the display system.
-Virtual Network Computing (VNC) supplies remote display access.
-
-## Historical tools
-
-The older `build_deploy_vista_driver.sh`, `build_vista_deploy_service.sh` and Windows batch files describe the macOS/Parallels build configuration.
-They remain as historical records.
-Use the Linux commands above for this setup.
-The handoff and resume notes describe intermediate failures and later corrections.
+For installation, follow [the ISO instructions](INSTALL-ISO.txt).
+The guest must use the matching Neptune-enabled QEMU and renderer built above.

@@ -2,7 +2,7 @@
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-out="$root/test-artifacts/linux-build"
+out="$root/build"
 src="$root/triton-umd/src/virtio/neptune/vista-d3d9"
 prefix="$root/host-linux"
 label=${TRITON_TEST_LABEL:-native}
@@ -23,6 +23,6 @@ for test in cpu-layout clear-contract draw-contract shader-token-contract; do
     "$out/$test"
 done
 "${CXX:-g++}" -std=c++17 -O2 -I"$prefix/include/dxvk" \
-    test-artifacts/linux-d3d11-test.cpp -L"$prefix/lib/x86_64-linux-gnu" \
+    tests/linux-d3d11-test.cpp -L"$prefix/lib/x86_64-linux-gnu" \
     -ldxvk_d3d11 -ldxvk_dxgi -o "$out/d3d11-test"
 "$out/d3d11-test" "$out/d3d11-$label-results.txt"

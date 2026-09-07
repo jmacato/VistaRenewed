@@ -13,7 +13,7 @@ parser.add_argument('--verbose-trace', action='store_true', help='Enable expensi
 args = parser.parse_args()
 kmd = root / 'triton-kmd'
 wdk = root / 'driver/toolchains/wdk71/extracted/WinDDK/7600.16385.win7_wdk.100208-1538'
-out = root / f'test-artifacts/linux-build/kmd-{args.arch}'
+out = root / f'build/kmd-{args.arch}'
 out.mkdir(parents=True, exist_ok=True)
 
 def vfs_entry(path):

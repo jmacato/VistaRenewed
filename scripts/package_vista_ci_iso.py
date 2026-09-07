@@ -27,11 +27,11 @@ def sha(path):
 
 
 inputs = {
-    'viogpu3d.sys': root / 'test-artifacts/linux-build/kmd-x64/viogpu3d.sys',
+    'viogpu3d.sys': root / 'build/kmd-x64/viogpu3d.sys',
     'neptune_d3d9.dll': root / 'triton-umd/build-vista-linux-x64/src/virtio/neptune/vista-d3d9/neptune_d3d9.dll',
     'neptune_d3d9_wow.dll': root / 'triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d9/neptune_d3d9.dll',
     'triton9_runtime_probe_x64.exe': root / 'triton-umd/build-vista-linux-x64/src/virtio/neptune/vista-d3d9/triton9_runtime_probe.exe',
-    'viogpu3d-diagnostic.inf': root / 'test-artifacts/vista-driver-x64-kd-serialtrace/viogpu3d-diagnostic.inf',
+    'viogpu3d-diagnostic.inf': root / 'packaging/viogpu3d-diagnostic.inf',
 }
 for path in inputs.values():
     if not path.is_file():
@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='triton-ci-signing-') as temporary:
     run('openssl', 'x509', '-in', pem, '-outform', 'DER', '-out', cert)
     run('bash', 'scripts/build_vista_service_linux.sh',
         env={**os.environ, 'VISTA_DEPLOY_CERT': str(cert)})
-    inputs['triton-vista-deploy.exe'] = root/'test-artifacts/linux-build/triton-vista-deploy.exe'
+    inputs['triton-vista-deploy.exe'] = root/'build/triton-vista-deploy.exe'
     if sha(cert).encode('utf-16le') not in inputs['triton-vista-deploy.exe'].read_bytes():
         raise SystemExit('Deployment service does not contain this build certificate pin')
     package = work/'package'

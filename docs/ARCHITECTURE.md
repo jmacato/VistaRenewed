@@ -33,10 +33,10 @@ DXMT converts Direct3D commands to Metal, the macOS graphics interface.
 | `triton-virglrenderer/src/neptune` | Host command dispatch |
 | `triton-dxvk` | Native D3D11/Vulkan backend |
 | `triton-dxmt`, `triton-angle`, `triton-libepoxy` | Retained macOS route and graphics dependencies |
-| `scripts` | Build, deployment, inspection and verification tools |
-| `test-artifacts/vista-driver-deploy-service.c` | Guest-owned deployment and proof reboot service |
+| `scripts` | Bootstrap, build, validation and packaging tools |
+| `packaging` | Installer service source, resources and package INF |
+| `tests` | Native host graphics test source |
 
-Historical `notes/` reports describe changes to resource ownership, fences, shader state and presentation.
-A fence marks completion of graphics work.
-Use [the current status](STATUS.md) for the supported test configuration.
-Do not treat intermediate test results as current support claims.
+The driver coordinates shared resources, completion fences and presentation
+across the guest and host. A fence marks completion of graphics work.
+The [build instructions](BUILDING.md) list the components in dependency order.

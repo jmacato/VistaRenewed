@@ -16,17 +16,13 @@ Upstream means the original project from which these source files came.
 | `triton-angle` | https://github.com/utmapp/WebKit | `ed78ab6e1a37f4f11583a0bd038f22ec91f3ff10` |
 | `triton-libepoxy` | https://github.com/utmapp/libepoxy | `bf98587477fe68d07b93319ece7b40a7d0e2eabe` |
 
-Most directories arrived as source exports with available submodule files.
-These exports did not contain their original Git history.
-The `handoff/repositories.json` file records their origins and revisions.
-Adjacent patches describe the earlier transfer state.
-Do not apply those patches over the current source exports.
-Transfer records also identify missing source files.
-This repository is not a complete upstream mirror.
+The component directories retain their upstream source layouts. The table above
+records their base revisions; this repository includes subsequent Vista and Linux
+changes and is not a complete upstream mirror.
 
-DXVK retains its Git history.
-The `patches/dxvk-neptune.bundle` file contains the additional commit and requires the recorded upstream base.
-The `handoff/triton-dxvk-linux.patch` file presents the same change as readable text.
+DXVK retains its Git history. `patches/dxvk-neptune.bundle` supplies the additional
+commit required by the Linux host build and depends on the recorded upstream base.
+Run `scripts/bootstrap_sources.py` to restore it and its dependencies.
 
 Each component and dependency retains its copyright and license notices.
 No repository-wide license replaces those terms.

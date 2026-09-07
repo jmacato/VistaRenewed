@@ -55,7 +55,7 @@ jobs:
           name: driver-build-logs-${{ github.sha }}
           path: |
             ci-logs/*.log
-            test-artifacts/linux-build/kmd-*/*.log
+            build/kmd-*/*.log
             triton-umd/build-vista-linux-*/meson-logs/meson-log.txt
           if-no-files-found: ignore
           retention-days: 7

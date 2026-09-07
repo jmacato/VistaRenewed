@@ -10,7 +10,7 @@ import tempfile
 
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--package', type=Path, default=root/'test-artifacts/linux-build/package-x64')
+parser.add_argument('--package', type=Path, default=root/'build/package-x64')
 parser.add_argument('--certificate', type=Path, default=root/'driver/signing/triton-vista-linux-signing.cer')
 parser.add_argument('--publications', type=Path, default=root/'vista-kvm/publications')
 parser.add_argument('--no-activate', action='store_true', help='Do not change the local VM deployment pointer')
