@@ -47,7 +47,14 @@
 #define PACKAGE_MANIFEST L"package-manifest.sha256"
 #define PROBE_EXE_NAME L"triton9_runtime_probe_x64.exe"
 #define SIGNING_CERT_NAME L"triton-vista-linux-signing.cer"
+#ifdef TRITON_DEPLOY_SIGNING_HEADER
+#include TRITON_DEPLOY_SIGNING_HEADER
+#else
 #define SIGNING_CERT_SHA256 L"c1237845766aca1fa1304b7afd11c4c9c358dba9b8512addeb38f5902685a757"
+#define SIGNING_CERT_THUMBPRINT_BYTES \
+    0x56, 0xbf, 0xb6, 0x60, 0x05, 0x96, 0x0c, 0x09, 0x8c, 0x55, \
+    0xde, 0xb0, 0x82, 0x0c, 0x7f, 0x00, 0xe3, 0x9f, 0x0e, 0xa1
+#endif
 #define HARDWARE_ID_DEFAULT L"PCI\\VEN_1AF4&DEV_1050"
 #define MAX_DEPLOY_PATH 1024
 #define MAX_DEPLOY_VALUE 256
@@ -517,8 +524,7 @@ static int ascii_hex_value(CHAR ch)
 static BOOL certificate_has_pinned_thumbprint(PCCERT_CONTEXT certificate)
 {
     static const BYTE expected[20] = {
-        0x56, 0xbf, 0xb6, 0x60, 0x05, 0x96, 0x0c, 0x09, 0x8c, 0x55,
-        0xde, 0xb0, 0x82, 0x0c, 0x7f, 0x00, 0xe3, 0x9f, 0x0e, 0xa1
+        SIGNING_CERT_THUMBPRINT_BYTES
     };
     BYTE actual[20];
     DWORD actual_size = sizeof(actual);

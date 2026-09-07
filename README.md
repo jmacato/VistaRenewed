@@ -16,6 +16,7 @@ boot/shutdown blue screens. See the [status and limits](docs/STATUS.md).
 ## Start here
 
 - [Build and development setup](docs/BUILDING.md)
+- [CI-built driver installer ISO](docs/CI.md)
 - [Architecture and source map](docs/ARCHITECTURE.md)
 - [Verification and known limits](docs/STATUS.md)
 - [Detailed Aero evidence](notes/AERO_GLASS_VERIFICATION.md)
@@ -53,5 +54,5 @@ builds. `notes/` and `handoff/` retain the investigation and transfer history.
 
 VM disks, Windows installation media, SDK/WDK downloads, signing identities and
 generated packages are local inputs and are excluded from Git. Supply your own
-guest and build inputs. This repository does not include a ready-to-install
-signed driver release.
+guest. CI produces an experimental test-signed installer ISO; no certified
+driver release is included in Git.

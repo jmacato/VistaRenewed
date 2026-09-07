@@ -1,0 +1,61 @@
+name: Vista driver ISO
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: driver-iso-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          submodules: false # The guest driver build does not use the DXVK host backend.
+      - name: Build Linux toolchain image
+        run: docker build -f scripts/linux-driver.Containerfile -t vista-driver-ci scripts
+      - name: Compile, test-sign and assemble ISO
+        env:
+          VISTA_SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          mkdir -p ci-logs
+          set -o pipefail
+          docker run --rm \
+            -e VISTA_SOURCE_REVISION \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            vista-driver-ci bash scripts/ci_build_driver_iso.sh 2>&1 | tee ci-logs/build.log
+      - name: Upload installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: triton-vista-x64-${{ github.sha }}
+          path: |
+            dist/triton-vista-x64.iso
+            dist/SHA256SUMS
+            dist/build-info.json
+            dist/INSTALL.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: driver-build-logs-${{ github.sha }}
+          path: |
+            ci-logs/*.log
+            test-artifacts/linux-build/kmd-*/*.log
+            triton-umd/build-vista-linux-*/meson-logs/meson-log.txt
+          if-no-files-found: ignore
+          retention-days: 7

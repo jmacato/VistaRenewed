@@ -1,0 +1,34 @@
+Triton Vista x64 development driver ISO
+=====================================
+
+Target: Windows Vista SP2 x64. Includes the 32-bit compatibility DLL for
+WoW64 applications. This is not an x86 Windows installer or a bootable OS disc.
+
+The VM must use the matching Neptune-enabled QEMU/virglrenderer host stack
+and VirtIO GPU from this project. Stock QEMU graphics are not sufficient.
+Build instructions: docs/BUILDING.md in the source repository.
+
+Install on a disposable development VM:
+1. Shut the guest down and save a VM snapshot before testing the driver.
+2. Boot Vista and mount this ISO as its virtual CD/DVD.
+3. Open the disc, right-click install.cmd, and choose Run as administrator.
+4. Keep the ISO mounted while the guest service installs and reboots.
+   Do not interrupt it with a second manual shutdown/reboot request.
+
+The installer trusts this build's test certificate, installs a LocalSystem
+deployment service, enables test signing and disables driver integrity checks
+for development, and uses Safe Mode during installation. It runs a graphics
+probe and requests additional reboots. These are persistent guest changes.
+
+Each CI build uses a new test certificate. Start from the pre-install snapshot
+when testing another build; replacing an already running deployment service
+with a different identity is not an automated upgrade path.
+
+This is an experimental, self-signed package, not a Microsoft-certified driver.
+CI checks builds, PE imports, signatures, catalog members, and ISO contents.
+It does not boot Vista or establish Aero correctness for this build. Boot and
+shutdown blue screens have occurred during development. To undo all changes,
+restore the pre-install VM snapshot.
+
+If the installer fails, preserve its output and the guest deployment logs.
+Do not assume a successful CI build establishes guest runtime compatibility.

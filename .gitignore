@@ -3,6 +3,8 @@
 /driver/
 /host-linux/
 /aaaaa/
+/dist/
+/ci-logs/
 /recovery-vista/
 *.qcow2
 *.iso

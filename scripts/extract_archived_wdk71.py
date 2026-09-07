@@ -3,14 +3,35 @@
 
 Requires 7z and msiextract (p7zip-full and msitools on Ubuntu).
 """
+import argparse
 import hashlib
 import json
 from pathlib import Path
 import subprocess
+import tempfile
+import urllib.request
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--download', action='store_true', help='Download the pinned archive if the ISO is absent')
+args = parser.parse_args()
 
 root = Path(__file__).resolve().parent.parent / 'driver/toolchains/wdk71'
 iso = root / 'GRMWDK_EN_7600_1.ISO'
 expected = '5edc723b50ea28a070cad361dd0927df402b7a861a036bbcf11d27ebba77657d'
+download_url = 'https://archive.org/download/en_windows_driver_kit_version_7.1.0_x86_x64_ia64_dvd_496758/en_windows_driver_kit_version_7.1.0_x86_x64_ia64_dvd_496758.iso'
+if args.download and not iso.exists():
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=root, suffix='.download') as temporary:
+        with urllib.request.urlopen(download_url, timeout=60) as response:
+            while chunk := response.read(1024 * 1024):
+                temporary.write(chunk)
+        temporary.flush()
+        temporary.seek(0)
+        if hashlib.file_digest(temporary, 'sha256').hexdigest() != expected:
+            raise SystemExit('Downloaded WDK ISO SHA-256 mismatch')
+        # Copy only after verification; the temporary download is always removed.
+        import shutil
+        shutil.copyfile(temporary.name, iso)
 with iso.open('rb') as stream:
     actual = hashlib.file_digest(stream, 'sha256').hexdigest()
 if actual != expected:

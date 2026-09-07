@@ -6,11 +6,11 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libglib2.0-dev libpixman-1-dev libslirp-dev libgtk-3-dev libspice-server-dev \
     libva-dev libv4l-dev libx11-dev libxrandr-dev libxpresent-dev check \
     glslang-tools mesa-vulkan-drivers vulkan-tools \
-    p7zip-full msitools cabextract clang lld wine64 osslsigncode \
+    p7zip-full msitools cabextract clang lld llvm-18 llvm-18-tools wine64 osslsigncode openssl xorriso \
     gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
     gcc-mingw-w64-i686-posix g++-mingw-w64-i686-posix \
     && python3 -m venv --system-site-packages /opt/vista-build-tools \
-    && /opt/vista-build-tools/bin/pip install meson==1.8.5 \
+    && /opt/vista-build-tools/bin/pip install meson==1.8.5 pefile==2024.8.26 asn1crypto==1.5.1 signify==0.9.2 \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH="/opt/vista-build-tools/bin:${PATH}"
 WORKDIR /workspace
