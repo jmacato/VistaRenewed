@@ -31,7 +31,6 @@ See the [status and limits](docs/STATUS.md).
 - [Verification and known limits](docs/STATUS.md)
 - [Detailed Aero evidence](notes/AERO_GLASS_VERIFICATION.md)
 - [Upstream sources and licenses](docs/UPSTREAM.md)
-- [Documentation rules](docs/WRITING.md)
 
 An ISO file contains a disc image.
 CI builds produce an experimental installer ISO with a development signature.
