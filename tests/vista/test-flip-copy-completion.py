@@ -4,6 +4,7 @@ root=Path(__file__).resolve().parents[2]
 s=(root/'triton-kmd/viogpu/viogpu3d/viogpu_vidpn.cpp').read_text();a=s.index('BOOLEAN VioGpuVidPN::TryPromoteFlip()');b=s.index('BOOLEAN VioGpuVidPN::TryPromoteFlipLocked()',a)
 code=r'''
 #include <mutex>
+#include <initializer_list>
 #include <condition_variable>
 #include <thread>
 #include <atomic>

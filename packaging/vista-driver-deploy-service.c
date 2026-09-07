@@ -1540,38 +1540,26 @@ static BOOL run_process_and_wait(const WCHAR *arguments, DWORD timeout_ms)
 
 static BOOL bcd_current_has_option(const CHAR *option, BOOL *present);
 
-/* x86 uses the installed signing certificate and normal boot policy.
- * Retain the existing x64 development policy until that package is addressed. */
+/* Vista x64 requires Test Mode for our self-signed kernel driver. Both
+ * architectures remove the legacy integrity bypasses from older installs. */
 static BOOL configure_boot_integrity(void)
 {
 #if defined(_WIN64)
-    BOOL testsigning;
-    BOOL nointegritychecks;
-    BOOL loadoptions;
-    BOOL automatic_boot;
-
-    testsigning = run_process_and_wait(
-        L"/set {current} testsigning on", 30000);
-    nointegritychecks = run_process_and_wait(
-        L"/set {current} nointegritychecks on", 30000);
-    loadoptions = run_process_and_wait(
-        L"/set {current} loadoptions DDISABLE_INTEGRITY_CHECKS", 30000);
-    /* The setup-time F8 menu must not interrupt guest-owned recovery boots. */
-    automatic_boot = run_process_and_wait(
-        L"/set {current} advancedoptions off", 30000);
-    if (testsigning && nointegritychecks && loadoptions && automatic_boot) {
-        emit_status(L"BOOT_INTEGRITY_BYPASS_OK testsigning=on "
-                    L"nointegritychecks=on "
-                    L"loadoptions=DDISABLE_INTEGRITY_CHECKS advancedoptions=off");
-        return TRUE;
+    BOOL has_legacy_bypass = FALSE;
+    if (!bcd_current_has_option("DDISABLE_INTEGRITY_CHECKS", &has_legacy_bypass) ||
+        !run_process_and_wait(L"/set {current} testsigning on", 30000) ||
+        !run_process_and_wait(L"/set {current} nointegritychecks off", 30000) ||
+        (has_legacy_bypass &&
+         !run_process_and_wait(L"/deletevalue {current} loadoptions", 30000)) ||
+        !run_process_and_wait(L"/set {current} advancedoptions off", 30000)) {
+        emit_status(L"BOOT_INTEGRITY_TEST_FAIL arch=x64 error=%lu",
+                    (unsigned long)GetLastError());
+        return FALSE;
     }
-    emit_status(L"BOOT_INTEGRITY_BYPASS_FAIL testsigning=%lu "
-                L"nointegritychecks=%lu loadoptions=%lu error=%lu",
-                (unsigned long)testsigning,
-                (unsigned long)nointegritychecks,
-                (unsigned long)loadoptions,
-                (unsigned long)GetLastError());
-    return FALSE;
+    emit_status(L"BOOT_INTEGRITY_TEST_OK arch=x64 testsigning=on "
+                L"nointegritychecks=off legacy-loadoptions-removed=%lu",
+                (unsigned long)has_legacy_bypass);
+    return TRUE;
 #else
     BOOL has_legacy_bypass = FALSE;
     if (!bcd_current_has_option("DDISABLE_INTEGRITY_CHECKS", &has_legacy_bypass) ||

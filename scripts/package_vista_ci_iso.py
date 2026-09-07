@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import argparse
+from asn1crypto import pem as asn1_pem, x509
 
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
@@ -62,9 +63,15 @@ with tempfile.TemporaryDirectory(prefix='triton-ci-signing-') as temporary:
         '-addext', 'extendedKeyUsage=codeSigning', '-keyout', key, '-out', pem,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     key.chmod(0o600)
-    purposes = run('openssl', 'x509', '-in', pem, '-noout', '-purpose',
-                   capture_output=True, text=True).stdout
-    if 'Code signing : Yes' not in purposes or 'Code signing CA : No' not in purposes:
+    # OpenSSL 3.0 (the Linux builder) does not list a code-signing purpose.
+    # Validate the actual extensions instead of version-specific CLI labels.
+    certificate = x509.Certificate.load(asn1_pem.unarmor(pem.read_bytes())[2])
+    extensions = {extension['extn_id'].native: extension['extn_value'].parsed.native
+                  for extension in certificate['tbs_certificate']['extensions']}
+    if (extensions.get('basic_constraints', {}).get('ca', True) or
+            'digital_signature' not in extensions.get('key_usage', set()) or
+            'key_cert_sign' in extensions.get('key_usage', set()) or
+            'code_signing' not in extensions.get('extended_key_usage', [])):
         raise SystemExit('Generated certificate is not an end-entity code-signing certificate')
     run('openssl', 'x509', '-in', pem, '-outform', 'DER', '-out', cert)
     run('bash', 'scripts/build_vista_service_linux.sh',

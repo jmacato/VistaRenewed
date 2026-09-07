@@ -1,4 +1,5 @@
 /* Focused executable contract test for virtio_gpu_neptune_readback_blob. */
+#define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>

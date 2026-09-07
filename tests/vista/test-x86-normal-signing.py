@@ -32,8 +32,18 @@ int main(void){
  puts("PASS x86 legacy migration, clean install, every command failure, and BCD read failure");
 }
 '''
-with tempfile.TemporaryDirectory() as d:
- d=Path(d);(d/'test.c').write_text(pre+helper+test)
- subprocess.run(['clang','-Wall','-Wextra','-Werror',str(d/'test.c'),'-o',str(d/'test')],check=True)
- r=subprocess.run([str(d/'test')],check=True,capture_output=True,text=True)
- print(r.stdout)
+for arch in ('x86', 'x64'):
+    with tempfile.TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        signing_test = test.replace(
+            'testsigning off',
+            'testsigning on' if arch == 'x64' else 'testsigning off',
+        ).replace('PASS x86', f'PASS {arch}')
+        source = directory / 'test.c'
+        binary = directory / 'test'
+        source.write_text(pre + helper + signing_test)
+        subprocess.run([
+            'clang', *(['-D_WIN64'] if arch == 'x64' else []),
+            '-Wall', '-Wextra', '-Werror', str(source), '-o', str(binary),
+        ], check=True)
+        subprocess.run([str(binary)], check=True)

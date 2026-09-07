@@ -16,8 +16,9 @@ Install on a disposable development VM:
    Do not interrupt it with a second manual shutdown/reboot request.
 
 The installer trusts this build's test certificate, installs a LocalSystem
-deployment service, enables test signing and disables driver integrity checks
-for development, and uses Safe Mode during installation. It runs a graphics
+deployment service, enables Test Mode for the self-signed x64 kernel driver,
+disables nointegritychecks, removes legacy DDISABLE_INTEGRITY_CHECKS loadoptions,
+and uses Safe Mode during installation. It runs a graphics
 probe and requests additional reboots. These are persistent guest changes.
 
 Each CI build uses a new test certificate. Start from the pre-install snapshot

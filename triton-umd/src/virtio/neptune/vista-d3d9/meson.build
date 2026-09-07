@@ -5,6 +5,7 @@ triton9_src = files(
   'triton9_cpu_layout.c',
   'triton9_draw_contract.c',
   'triton9_ddi.c',
+  'triton9_guids.c',
   'triton9_resource.c',
   'triton9_format.c',
   'triton9_unsupported.c',
@@ -82,7 +83,7 @@ libneptune_d3d9 = shared_library(
   dependencies : npt_deps,
   c_args : triton9_c_args + ['-DNPT_NO_D3D11_ENTRYPOINTS'],
   cpp_args : triton9_c_args,
-  # dxguid supplies IID_ID3D11Device1 and IID_ID3D11DeviceContext1.  There is
+  # triton9_guids.c supplies D3D11 IDs missing from older dxguid archives. There is
   # deliberately no d3d11.lib/dxgi.lib here: the UMD only uses Neptune's
   # guest-side proxy creator and must not import the OS D3D11 stack on Vista.
   link_args : triton9_msvcrt_args + ['-static', '-ldxguid', '-Wl,--subsystem,windows:6.0'],
