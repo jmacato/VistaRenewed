@@ -1,0 +1,272 @@
+From c6bb6d57fac2b6cae7f6adbbc521eb949849815e Mon Sep 17 00:00:00 2001
+From: Jumar Macato <16554748+jmacato@users.noreply.github.com>
+Date: Mon, 7 Sep 2026 13:23:39 +0800
+Subject: [PATCH] Add synchronous Neptune depth and stencil rectangle clears
+
+---
+ include/native/dxvk_neptune.h   | 25 ++++++++++++
+ include/native/meson.build      |  1 +
+ src/d3d11/d3d11.sym             |  1 +
+ src/d3d11/d3d11_context.cpp     |  6 ++-
+ src/d3d11/d3d11_context_imm.cpp | 67 +++++++++++++++++++++++++++++++++
+ src/d3d11/d3d11_context_imm.h   |  6 +++
+ src/d3d11/d3d11_main.cpp        | 25 ++++++++++++
+ src/dxvk/dxvk_device.cpp        |  6 ++-
+ src/dxvk/dxvk_device.h          |  2 +-
+ 9 files changed, 135 insertions(+), 4 deletions(-)
+ create mode 100644 include/native/dxvk_neptune.h
+
+diff --git a/include/native/dxvk_neptune.h b/include/native/dxvk_neptune.h
+new file mode 100644
+index 0000000..bfd58cb
+--- /dev/null
++++ b/include/native/dxvk_neptune.h
+@@ -0,0 +1,25 @@
++/* SPDX-License-Identifier: Zlib */
++#pragma once
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Native host ABI, not the COM calling convention. Context and DSV must
++ * belong to this DXVK module and the same device. Only immediate contexts
++ * are supported. Flags are D3D11_CLEAR_DEPTH (1) / D3D11_CLEAR_STENCIL (2).
++ * Each rectangle is four signed integers: left, top, right, bottom.
++ * Count must be 1..4096 and every rectangle must be nonempty and in bounds.
++ * The entire batch is validated before recording. Success means submitted
++ * GPU work completed; unselected planes and pixels outside rectangles are
++ * preserved. A device failure can leave a partially executed batch.
++ */
++int32_t dxvk_d3d11_clear_depth_stencil_rects(
++    void *context, void *view, uint32_t flags, float depth,
++    uint8_t stencil, uint32_t count, const int32_t *rects);
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/include/native/meson.build b/include/native/meson.build
+index f472900..20a7a4f 100644
+--- a/include/native/meson.build
++++ b/include/native/meson.build
+@@ -21,5 +21,6 @@ install_headers(
+ 
+ install_headers(
+   'dxvk_shared_resource.h',
++  'dxvk_neptune.h',
+   subdir: 'dxvk',
+ )
+diff --git a/src/d3d11/d3d11.sym b/src/d3d11/d3d11.sym
+index 91c8598..1842edd 100644
+--- a/src/d3d11/d3d11.sym
++++ b/src/d3d11/d3d11.sym
+@@ -1,5 +1,6 @@
+ {
+   global:
++    dxvk_d3d11_clear_depth_stencil_rects;
+     D3D11CoreCreateDevice;
+     D3D11CreateDevice;
+     D3D11CreateDeviceAndSwapChain;
+diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
+index e2188eb..a8fd99f 100644
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -713,7 +713,11 @@ namespace dxvk {
+     if (dsv) {
+       Rc<DxvkImageView> imgView = dsv->GetImageView();
+ 
+-      if (imgView)
++      // ClearView admits depth-only resources, not depth/stencil resources.
++      // Neptune uses its separate plane-selective command for D24S8.
++      if (imgView &&
++          !(imgView->image()->formatInfo()->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) &&
++          (dsv->GetWritableAspectMask() & VK_IMAGE_ASPECT_DEPTH_BIT))
+         ClearImageView(std::move(imgView), Color, pRect, NumRects);
+     } else if (rtv) {
+       Rc<DxvkImageView> imgView = rtv->GetImageView();
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index 2120f71..270bbb4 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -3,6 +3,8 @@
+ #include "d3d11_device.h"
+ #include "d3d11_fence.h"
+ #include "d3d11_texture.h"
++#include "d3d11_view_dsv.h"
++#include <vector>
+ 
+ #include "../util/util_win32_compat.h"
+ 
+@@ -163,6 +165,71 @@ namespace dxvk {
+   }
+ 
+ 
++  HRESULT D3D11ImmediateContext::ClearDepthStencilRects(
++          ID3D11DepthStencilView* View, UINT Flags, FLOAT Depth,
++          UINT8 Stencil, UINT Count, const int32_t* Rects) {
++    D3D10DeviceLock lock = LockContext();
++    auto dsv = dynamic_cast<D3D11DepthStencilView*>(View);
++    Com<ID3D11Device> viewDevice;
++    if (dsv)
++      dsv->GetDevice(&viewDevice);
++    if (!dsv || viewDevice.ptr() != GetParentInterface()
++     || !Flags || (Flags & ~(D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL))
++     || !Count || Count > 4096 || !Rects
++     || ((Flags & D3D11_CLEAR_DEPTH) && (!(Depth >= 0.0f) || Depth > 1.0f)))
++      return E_INVALIDARG;
++
++    VkImageAspectFlags aspects = 0;
++    if (Flags & D3D11_CLEAR_DEPTH) aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
++    if (Flags & D3D11_CLEAR_STENCIL) aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
++    if ((dsv->GetWritableAspectMask() & aspects) != aspects)
++      return E_INVALIDARG;
++
++    auto view = dsv->GetImageView();
++    auto extent = view->mipLevelExtent(0);
++    // Validate the entire batch before recording any change.
++    for (UINT i = 0; i < Count; i++) {
++      const int32_t* r = Rects + 4 * i;
++      if (r[0] < 0 || r[1] < 0 || r[2] <= r[0] || r[3] <= r[1]
++       || uint32_t(r[2]) > extent.width || uint32_t(r[3]) > extent.height)
++        return E_INVALIDARG;
++    }
++    HRESULT hr = m_parent->GetDeviceRemovedReason();
++    if (FAILED(hr))
++      return hr;
++
++    VkClearValue value = {};
++    value.depthStencil = { Depth, Stencil };
++    // A 4096-rectangle wire batch is larger than a 16 KiB CS chunk.
++    // Keep the copied array in the command's owned heap storage instead.
++    std::vector<VkRect2D> rectangles;
++    rectangles.reserve(Count);
++    for (UINT i = 0; i < Count; i++) {
++      const int32_t* r = Rects + 4 * i;
++      rectangles.push_back({
++        { r[0], r[1] }, { uint32_t(r[2] - r[0]), uint32_t(r[3] - r[1]) }
++      });
++    }
++    AddCost(GpuCostEstimate::Transfer);
++    EmitCs([cView = std::move(view), cAspects = aspects, cValue = value,
++            cRects = std::move(rectangles)] (DxvkContext* ctx) {
++      for (const auto& rect : cRects) {
++        ctx->clearImageView(cView,
++          { rect.offset.x, rect.offset.y, 0 },
++          { rect.extent.width, rect.extent.height, 1 },
++          cAspects, cValue);
++      }
++    });
++    ExecuteFlush(GpuFlushType::ExplicitFlush, nullptr, true);
++    // ExecuteFlush only waits for submission in the D3D11-on-12 path.
++    // Drain the native CS worker before waiting on the device's GPU queue.
++    SynchronizeCsThread(DxvkCsThread::SynchronizeAll);
++    if (m_device->waitForIdle() != VK_SUCCESS)
++      return DXGI_ERROR_DEVICE_RESET;
++    return m_parent->GetDeviceRemovedReason();
++  }
++
++
+   void STDMETHODCALLTYPE D3D11ImmediateContext::Flush() {
+     RequestFlush(D3D11_CONTEXT_TYPE_ALL, nullptr);
+   }
+diff --git a/src/d3d11/d3d11_context_imm.h b/src/d3d11/d3d11_context_imm.h
+index e5beec2..a1c4363 100644
+--- a/src/d3d11/d3d11_context_imm.h
++++ b/src/d3d11/d3d11_context_imm.h
+@@ -42,6 +42,12 @@ namespace dxvk {
+             ID3D11Asynchronous*         pAsync);
+     
+     void STDMETHODCALLTYPE Flush();
++
++    // Neptune's private clear contract; standard ClearView cannot select
++    // the stencil plane. Completes GPU work before returning success.
++    HRESULT ClearDepthStencilRects(
++            ID3D11DepthStencilView* View, UINT Flags, FLOAT Depth,
++            UINT8 Stencil, UINT Count, const int32_t* Rects);
+     
+     void STDMETHODCALLTYPE Flush1(
+             D3D11_CONTEXT_TYPE          ContextType,
+diff --git a/src/d3d11/d3d11_main.cpp b/src/d3d11/d3d11_main.cpp
+index 2c76f36..8733a11 100644
+--- a/src/d3d11/d3d11_main.cpp
++++ b/src/d3d11/d3d11_main.cpp
+@@ -7,6 +7,10 @@
+ #include "d3d11_device.h"
+ #include "d3d11_enums.h"
+ #include "d3d11_interop.h"
++#include "d3d11_context_imm.h"
++#ifndef _WIN32
++#include <dxvk_neptune.h>
++#endif
+ 
+ namespace dxvk {
+   Logger Logger::s_instance("d3d11.log");
+@@ -14,6 +18,27 @@ namespace dxvk {
+   
+ extern "C" {
+   using namespace dxvk;
++
++  // Native C ABI shared with the Neptune renderer. COM methods retain their
++  // normal calling convention; the export itself uses the native host ABI.
++  HRESULT dxvk_d3d11_clear_depth_stencil_rects(
++      void* context, void* view, uint32_t flags, float depth,
++      uint8_t stencil, uint32_t count, const int32_t* rects) {
++    auto immediate = dynamic_cast<D3D11ImmediateContext*>(
++      static_cast<ID3D11DeviceContext*>(context));
++    if (!immediate)
++      return E_INVALIDARG;
++    try {
++      return immediate->ClearDepthStencilRects(
++        static_cast<ID3D11DepthStencilView*>(view), flags, depth,
++        stencil, count, rects);
++    } catch (const std::bad_alloc&) {
++      return E_OUTOFMEMORY;
++    } catch (const DxvkError& e) {
++      Logger::err(e.message());
++      return E_FAIL;
++    }
++  }
+   
+   HRESULT D3D11InternalCreateDevice(
+           IDXGIFactory*       pFactory,
+diff --git a/src/dxvk/dxvk_device.cpp b/src/dxvk/dxvk_device.cpp
+index 1092a15..c95e1d5 100644
+--- a/src/dxvk/dxvk_device.cpp
++++ b/src/dxvk/dxvk_device.cpp
+@@ -695,14 +695,16 @@ namespace dxvk {
+   }
+   
+   
+-  void DxvkDevice::waitForIdle() {
++  VkResult DxvkDevice::waitForIdle() {
+     m_submissionQueue.waitForIdle();
+     m_submissionQueue.lockDeviceQueue();
+ 
+-    if (m_vkd->vkDeviceWaitIdle(m_vkd->device()) != VK_SUCCESS)
++    VkResult result = m_vkd->vkDeviceWaitIdle(m_vkd->device());
++    if (result != VK_SUCCESS)
+       Logger::err("DxvkDevice: waitForIdle: Operation failed");
+ 
+     m_submissionQueue.unlockDeviceQueue();
++    return result;
+   }
+   
+   
+diff --git a/src/dxvk/dxvk_device.h b/src/dxvk/dxvk_device.h
+index f4be975..8bffcb8 100644
+--- a/src/dxvk/dxvk_device.h
++++ b/src/dxvk/dxvk_device.h
+@@ -732,7 +732,7 @@ namespace dxvk {
+      * used to ensure that resources that were previously
+      * used by the GPU can be safely destroyed.
+      */
+-    void waitForIdle();
++    VkResult waitForIdle();
+     
+   private:
+     
+-- 
+2.48.1
+

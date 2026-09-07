@@ -1,0 +1,545 @@
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index 46326e1..ee27fb7 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -644,4 +644,29 @@ InitializeImmediateContext(MTLD3D11Device *pDevice, CommandQueue &cmd_queue) {
+   return std::make_unique<MTLD3D11ImmediateContext>(pDevice, cmd_queue);
+ }
+ 
+-}; // namespace dxmt
+\ No newline at end of file
++}; // namespace dxmt
++
++extern "C" int32_t
++dxmt_d3d11_clear_depth_stencil_rects(
++    void *context, void *depth_stencil_view, uint32_t clear_flags,
++    float depth, uint8_t stencil, uint32_t rect_count,
++    const int32_t *rect_ltrb) {
++  if (!context || !depth_stencil_view || !rect_ltrb || !rect_count)
++    return (int32_t)E_INVALIDARG;
++
++  IMTLD3D11DeviceContext *private_context = nullptr;
++  auto d3d_context = static_cast<ID3D11DeviceContext *>(context);
++  HRESULT hr = d3d_context->QueryInterface(
++      __uuidof(IMTLD3D11DeviceContext),
++      reinterpret_cast<void **>(&private_context));
++  if (FAILED(hr))
++    return (int32_t)hr;
++
++  static_assert(sizeof(D3D11_RECT) == sizeof(int32_t) * 4);
++  hr = private_context->ClearDepthStencilViewRects(
++      static_cast<ID3D11DepthStencilView *>(depth_stencil_view), clear_flags,
++      depth, stencil, reinterpret_cast<const D3D11_RECT *>(rect_ltrb),
++      rect_count);
++  private_context->Release();
++  return (int32_t)hr;
++}
+diff --git a/src/d3d11/d3d11_context_impl.cpp b/src/d3d11/d3d11_context_impl.cpp
+index 5b00f63..979a9ab 100644
+--- a/src/d3d11/d3d11_context_impl.cpp
++++ b/src/d3d11/d3d11_context_impl.cpp
+@@ -810,6 +810,55 @@ public:
+     ClearDepthStencilView(static_cast<D3D11DepthStencilView*>(pDepthStencilView), ClearFlags, Depth, Stencil);
+   }
+ 
++  HRESULT
++  ClearDepthStencilViewRects(ID3D11DepthStencilView *pDepthStencilView,
++                             UINT ClearFlags, FLOAT Depth, UINT8 Stencil,
++                             const D3D11_RECT *pRects, UINT NumRects) override {
++    std::lock_guard<mutex_t> lock(mutex);
++
++    if (!pDepthStencilView || !pRects || !NumRects ||
++        !(ClearFlags & (D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL)) ||
++        (ClearFlags & ~(D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL)) ||
++        ((ClearFlags & D3D11_CLEAR_DEPTH) &&
++         (!(Depth >= 0.0f) || Depth > 1.0f)))
++      return E_INVALIDARG;
++
++    auto dsv = static_cast<D3D11DepthStencilView *>(pDepthStencilView);
++    const uint32_t plane_flags =
++        DepthStencilPlanarFlags(dsv->texture()->pixelFormat(dsv->viewId()));
++    if (!plane_flags || (ClearFlags & ~plane_flags))
++      return E_INVALIDARG;
++
++    const auto &desc = dsv->description();
++    for (UINT i = 0; i < NumRects; ++i) {
++      if (pRects[i].left < 0 || pRects[i].top < 0 ||
++          pRects[i].right <= pRects[i].left ||
++          pRects[i].bottom <= pRects[i].top ||
++          (UINT)pRects[i].right > desc.Width ||
++          (UINT)pRects[i].bottom > desc.Height)
++        return E_INVALIDARG;
++    }
++
++    InvalidateCurrentPass(true);
++    EmitST([texture = dsv->texture(), view = dsv->viewId(), ClearFlags,
++            Stencil](ArgumentEncodingContext &enc) {
++      enc.clear_rt_cmd.begin(texture, view, ClearFlags, Stencil);
++    });
++    const std::array<float, 4> value = {Depth, 0.0f, 0.0f, 0.0f};
++    for (UINT i = 0; i < NumRects; ++i) {
++      const D3D11_RECT rect = pRects[i];
++      EmitOP([rect, value](ArgumentEncodingContext &enc) {
++        enc.clear_rt_cmd.clear((uint32_t)rect.left, (uint32_t)rect.top,
++                               (uint32_t)(rect.right - rect.left),
++                               (uint32_t)(rect.bottom - rect.top), value);
++      });
++    }
++    EmitST([](ArgumentEncodingContext &enc) { enc.clear_rt_cmd.end(); });
++
++    WaitUntilGPUIdle();
++    return device->GetDeviceRemovedReason();
++  }
++
+   void
+   STDMETHODCALLTYPE
+   ClearView(ID3D11View *pView, const FLOAT Color[4], const D3D11_RECT *pRect, UINT NumRects) override {
+@@ -843,7 +892,7 @@ public:
+       }
+       InvalidateCurrentPass(true);
+       EmitST([texture = rtv->texture(), view = rtv->viewId()](ArgumentEncodingContext &enc) {
+-        enc.clear_rt_cmd.begin(texture, view);
++        enc.clear_rt_cmd.begin(texture, view, 0, 0);
+       });
+       for (unsigned i = 0; i < NumRects; i++) {
+         auto rect = pRect[i];
+@@ -868,6 +917,11 @@ public:
+       // d3d11 spec: ClearView doesn’t support 3D textures.
+       if (dsv->texture()->textureType(dsv->viewId()) == WMTTextureType3D)
+         return;
++      // ClearView supports DSVs only when the resource has no stencil plane.
++      if (DepthStencilPlanarFlags(
++              dsv->texture()->pixelFormat(dsv->viewId())) !=
++          D3D11_CLEAR_DEPTH)
++        return;
+       // check if rtv is fully cleared (which can be potentially optimized as a LoadActionClear)
+       while (NumRects <= 1) {
+         if (pRect) {
+@@ -884,7 +938,7 @@ public:
+       }
+       InvalidateCurrentPass(true);
+       EmitST([texture = dsv->texture(), view = dsv->viewId()](ArgumentEncodingContext &enc) {
+-        enc.clear_rt_cmd.begin(texture, view);
++        enc.clear_rt_cmd.begin(texture, view, D3D11_CLEAR_DEPTH, 0);
+       });
+       for (unsigned i = 0; i < NumRects; i++) {
+         auto rect = pRect[i];
+@@ -5855,4 +5909,4 @@ private:
+ 
+ };
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/d3d11/d3d11_device.hpp b/src/d3d11/d3d11_device.hpp
+index 37ea5c9..29cf1e1 100644
+--- a/src/d3d11/d3d11_device.hpp
++++ b/src/d3d11/d3d11_device.hpp
+@@ -17,6 +17,9 @@ DEFINE_COM_INTERFACE("3a3f085a-d0fe-4324-b0ae-fe04de18571c",
+   virtual void WaitUntilGPUIdle() = 0;
+   virtual void PrepareFlush() = 0;
+   virtual void Commit() = 0;
++  virtual HRESULT ClearDepthStencilViewRects(
++      ID3D11DepthStencilView *pDepthStencilView, UINT ClearFlags, FLOAT Depth,
++      UINT8 Stencil, const D3D11_RECT *pRects, UINT NumRects) = 0;
+   virtual void SOGetTargetsWithOffsets(UINT NumBuffers, REFIID riid, void ** ppSOTargets, UINT *pOffsets) = 0;
+ };
+ 
+@@ -69,4 +72,4 @@ Com<IMTLDXGIDevice> CreateD3D11Device(std::unique_ptr<Device> &&device,
+                                       IMTLDXGIAdapter *pAdapter,
+                                       D3D_FEATURE_LEVEL FeatureLevel,
+                                       UINT Flags);
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/dxmt-native/dxmt_native.exports b/src/dxmt-native/dxmt_native.exports
+index 9ec353e..6dbce8b 100644
+--- a/src/dxmt-native/dxmt_native.exports
++++ b/src/dxmt-native/dxmt_native.exports
+@@ -29,3 +29,4 @@ _dxmt_event_clear
+ _dxmt_event_close
+ _dxmt_event_dup_fd
+ _dxmt_event_wait
++_dxmt_d3d11_clear_depth_stencil_rects
+diff --git a/src/dxmt-native/dxmt_native.h b/src/dxmt-native/dxmt_native.h
+index 1470e14..6fdd79a 100644
+--- a/src/dxmt-native/dxmt_native.h
++++ b/src/dxmt-native/dxmt_native.h
+@@ -40,6 +40,18 @@ void  dxmt_event_close(void* handle);
+ int   dxmt_event_dup_fd(void* handle);
+ dxmt_wait_status dxmt_event_wait(void* handle, uint64_t timeout_ns);
+ 
++/* == Private D3D11 depth/stencil rectangle clear ========================== */
++
++#define DXMT_D3D11_CLEAR_DEPTH   0x1u
++#define DXMT_D3D11_CLEAR_STENCIL 0x2u
++
++/* rect_ltrb contains rect_count groups of four signed values:
++ * left, top, right, and bottom.  The call waits for GPU completion. */
++int32_t dxmt_d3d11_clear_depth_stencil_rects(
++    void *context, void *depth_stencil_view, uint32_t clear_flags,
++    float depth, uint8_t stencil, uint32_t rect_count,
++    const int32_t *rect_ltrb);
++
+ /* == Cross-process shared textures ========================================= */
+ 
+ #define DXMT_SHARED_TEXTURE_MAGIC 0x58544D44u /* 'DMTX' */
+diff --git a/src/dxmt/dxmt_command.cpp b/src/dxmt/dxmt_command.cpp
+index 7e2a1dd..1086efc 100644
+--- a/src/dxmt/dxmt_command.cpp
++++ b/src/dxmt/dxmt_command.cpp
+@@ -127,10 +127,26 @@ ClearRenderTargetContext::ClearRenderTargetContext(
+   ds_info.depth_write_enabled = true;
+ 
+   depth_write_state_ = device.newDepthStencilState(ds_info);
++
++  ds_info.depth_write_enabled = false;
++  ds_info.front_stencil.enabled = true;
++  ds_info.front_stencil.stencil_compare_function = WMTCompareFunctionAlways;
++  ds_info.front_stencil.depth_stencil_pass_op = WMTStencilOperationReplace;
++  ds_info.front_stencil.depth_fail_op = WMTStencilOperationReplace;
++  ds_info.front_stencil.stencil_fail_op = WMTStencilOperationReplace;
++  ds_info.front_stencil.write_mask = 0xff;
++  ds_info.front_stencil.read_mask = 0;
++  ds_info.back_stencil = ds_info.front_stencil;
++
++  stencil_write_state_ = device.newDepthStencilState(ds_info);
++
++  ds_info.depth_write_enabled = true;
++  depth_stencil_write_state_ = device.newDepthStencilState(ds_info);
+ }
+ 
+ void
+-ClearRenderTargetContext::begin(Rc<Texture> texture, TextureViewKey view) {
++ClearRenderTargetContext::begin(Rc<Texture> texture, TextureViewKey view,
++                                uint32_t clear_flags, uint8_t stencil) {
+   assert(!clearing_texture_);
+ 
+   WMT::Reference<WMT::Error> err;
+@@ -138,8 +154,11 @@ ClearRenderTargetContext::begin(Rc<Texture> texture, TextureViewKey view) {
+   auto format = texture->pixelFormat(view);
+   auto dsv_flag = DepthStencilPlanarFlags(format);
+ 
+-  if (dsv_flag & ~1u)
+-    return; // stencil clear is not supported
++  if (dsv_flag &&
++      (!clear_flags || (clear_flags & ~dsv_flag) || (clear_flags & ~3u)))
++    return;
++  if (!dsv_flag && clear_flags)
++    return;
+ 
+   // enforce array render target for now
+   view = texture->checkViewUseArray(view, true);
+@@ -151,7 +170,10 @@ ClearRenderTargetContext::begin(Rc<Texture> texture, TextureViewKey view) {
+     pipeline_info.vertex_function = vs_clear_;
+     if (dsv_flag) {
+       pipeline_info.fragment_function = fs_clear_depth_;
+-      pipeline_info.depth_pixel_format = format;
++      if (dsv_flag & 1u)
++        pipeline_info.depth_pixel_format = format;
++      if (dsv_flag & 2u)
++        pipeline_info.stencil_pixel_format = format;
+     } else if (IsIntegerFormat(format)) {
+       pipeline_info.colors[0].pixel_format = format;
+       if (MTLGetUnsignedIntegerFormat(format) == format) {
+@@ -182,13 +204,21 @@ ClearRenderTargetContext::begin(Rc<Texture> texture, TextureViewKey view) {
+   auto array_length = texture->arrayLength(view);
+   auto &pass_info = *ctx_.startRenderPass(dsv_flag, 0, 1, 0);
+ 
+-  if (dsv_flag) {
++  if (dsv_flag & 1u) {
+     auto &depth = pass_info.depth;
+     depth.attachment = ctx_.access<PipelineStage::Pixel>(texture, view, ResourceAccess::Write);
+     depth.depth_plane = 0;
+     depth.load_action = WMTLoadActionLoad;
+     depth.store_action = WMTStoreActionStore;
+-  } else {
++  }
++  if (dsv_flag & 2u) {
++    auto &stencil_plane = pass_info.stencil;
++    stencil_plane.attachment = ctx_.access<PipelineStage::Pixel>(texture, view, ResourceAccess::Write);
++    stencil_plane.depth_plane = 0;
++    stencil_plane.load_action = WMTLoadActionLoad;
++    stencil_plane.store_action = WMTStoreActionStore;
++  }
++  if (!dsv_flag) {
+     auto &color = pass_info.colors[0];
+     color.attachment = ctx_.access<PipelineStage::Pixel>(texture, view, ResourceAccess::Write);
+     color.depth_plane = 0;
+@@ -211,8 +241,15 @@ ClearRenderTargetContext::begin(Rc<Texture> texture, TextureViewKey view) {
+ 
+   auto &setdsso = ctx_.encodeRenderCommand<wmtcmd_render_setdsso>();
+   setdsso.type = WMTRenderCommandSetDSSO;
+-  setdsso.dsso = dsv_flag ? depth_write_state_.handle : depth_readonly_state_.handle;
+-  setdsso.stencil_ref = 0;
++  if (clear_flags == 3u)
++    setdsso.dsso = depth_stencil_write_state_.handle;
++  else if (clear_flags == 2u)
++    setdsso.dsso = stencil_write_state_.handle;
++  else if (clear_flags == 1u)
++    setdsso.dsso = depth_write_state_.handle;
++  else
++    setdsso.dsso = depth_readonly_state_.handle;
++  setdsso.stencil_ref = stencil;
+ 
+   clearing_texture_ = std::move(texture);
+   clearing_texture_view_ = view;
+@@ -748,4 +785,4 @@ TileBarrierContext::getPSO(TileBarrierPSOKey &key) {
+   return psos_.emplace(key, std::move(pso)).first->second;
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/dxmt/dxmt_command.hpp b/src/dxmt/dxmt_command.hpp
+index bb1b790..54776f8 100644
+--- a/src/dxmt/dxmt_command.hpp
++++ b/src/dxmt/dxmt_command.hpp
+@@ -208,7 +208,8 @@ class ClearRenderTargetContext {
+ public:
+   ClearRenderTargetContext(WMT::Device device, InternalCommandLibrary &lib, ArgumentEncodingContext &ctx);
+ 
+-  void begin(Rc<Texture> texture, TextureViewKey view);
++  void begin(Rc<Texture> texture, TextureViewKey view, uint32_t clear_flags,
++             uint8_t stencil);
+ 
+   void clear(uint32_t offset_x, uint32_t offset_y, uint32_t width, uint32_t height, const std::array<float, 4>& color);
+ 
+@@ -224,6 +225,8 @@ private:
+   WMT::Reference<WMT::Function> fs_clear_depth_;
+   WMT::Reference<WMT::DepthStencilState> depth_write_state_;
+   WMT::Reference<WMT::DepthStencilState> depth_readonly_state_;
++  WMT::Reference<WMT::DepthStencilState> stencil_write_state_;
++  WMT::Reference<WMT::DepthStencilState> depth_stencil_write_state_;
+   std::unordered_map<WMTPixelFormat, WMT::Reference<WMT::RenderPipelineState>> pso_cache_;
+   Rc<Texture> clearing_texture_;
+   TextureViewKey clearing_texture_view_;
+@@ -327,4 +330,4 @@ private:
+   std::unordered_map<TileBarrierPSOKey, WMT::Reference<WMT::RenderPipelineState>> psos_;
+ };
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/tests/native/d3d11_test.cpp b/tests/native/d3d11_test.cpp
+index 57bccce..eafa121 100644
+--- a/tests/native/d3d11_test.cpp
++++ b/tests/native/d3d11_test.cpp
+@@ -34,6 +34,10 @@ extern "C" {
+ void *dxmt_event_create(int manual_reset, int initial_state);
+ void dxmt_event_close(void *);
+ int dxmt_event_wait(void *, uint64_t timeout_ns);
++int32_t dxmt_d3d11_clear_depth_stencil_rects(
++    void *context, void *depth_stencil_view, uint32_t clear_flags,
++    float depth, uint8_t stencil, uint32_t rect_count,
++    const int32_t *rect_ltrb);
+ }
+ 
+ static FILE *g_out = nullptr;
+@@ -686,6 +690,197 @@ test_depth(Ctx &c) {
+   emit("[CRC] %s.rt = 0x%08x", T, crc32_of(img.data(), img.size()));
+ }
+ 
++/* D24S8 is not an ordinary CPU-mappable DXMT format.  Read it through the
++ * depth and stencil tests, and return their result in an ordinary RGBA8
++ * target.  A white pixel passed the requested tests; a black pixel failed. */
++static std::vector<uint8_t>
++probe_depth_stencil(Ctx &c, ID3D11DepthStencilView *dsv, UINT width,
++                    UINT height, float depth, bool test_depth,
++                    bool test_stencil, uint8_t stencil_ref) {
++  D3D11_TEXTURE2D_DESC td = {};
++  td.Width = width;
++  td.Height = height;
++  td.MipLevels = 1;
++  td.ArraySize = 1;
++  td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++  td.SampleDesc = {1, 0};
++  td.Usage = D3D11_USAGE_DEFAULT;
++  td.BindFlags = D3D11_BIND_RENDER_TARGET;
++  Com<ID3D11Texture2D> target;
++  if (FAILED(c.device->CreateTexture2D(&td, nullptr, &target)))
++    return {};
++  Com<ID3D11RenderTargetView> rtv;
++  if (FAILED(c.device->CreateRenderTargetView(target, nullptr, &rtv)))
++    return {};
++
++  Vertex quad[6];
++  memcpy(quad, kQuadFull, sizeof(quad));
++  for (auto &vertex : quad)
++    vertex.uv[0] = depth;
++  D3D11_BUFFER_DESC bd = {};
++  bd.ByteWidth = sizeof(quad);
++  bd.Usage = D3D11_USAGE_IMMUTABLE;
++  bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
++  D3D11_SUBRESOURCE_DATA init = {quad, 0, 0};
++  Com<ID3D11Buffer> vb;
++  if (FAILED(c.device->CreateBuffer(&bd, &init, &vb)))
++    return {};
++
++  Com<ID3D11VertexShader> vertex_shader;
++  Com<ID3D11PixelShader> pixel_shader;
++  Com<ID3D11InputLayout> layout;
++  if (FAILED(c.device->CreateVertexShader(
++          dxbc_vs_depth, sizeof(dxbc_vs_depth), nullptr, &vertex_shader)) ||
++      FAILED(c.device->CreatePixelShader(
++          dxbc_ps_color, sizeof(dxbc_ps_color), nullptr, &pixel_shader)) ||
++      FAILED(c.device->CreateInputLayout(
++          kLayout, 3, dxbc_vs_depth, sizeof(dxbc_vs_depth), &layout)))
++    return {};
++
++  D3D11_DEPTH_STENCIL_DESC state_desc = {};
++  state_desc.DepthEnable = test_depth;
++  state_desc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
++  state_desc.DepthFunc = D3D11_COMPARISON_LESS;
++  state_desc.StencilEnable = test_stencil;
++  state_desc.StencilReadMask = D3D11_DEFAULT_STENCIL_READ_MASK;
++  state_desc.StencilWriteMask = 0;
++  state_desc.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP;
++  state_desc.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_KEEP;
++  state_desc.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP;
++  state_desc.FrontFace.StencilFunc = D3D11_COMPARISON_EQUAL;
++  state_desc.BackFace = state_desc.FrontFace;
++  Com<ID3D11DepthStencilState> state;
++  if (FAILED(c.device->CreateDepthStencilState(&state_desc, &state)))
++    return {};
++
++  const float black[4] = {0, 0, 0, 1};
++  c.ctx->ClearRenderTargetView(rtv, black);
++  c.ctx->OMSetRenderTargets(1, &rtv, dsv);
++  c.ctx->OMSetDepthStencilState(state, stencil_ref);
++  D3D11_VIEWPORT viewport = {0, 0, (float)width, (float)height, 0, 1};
++  c.ctx->RSSetViewports(1, &viewport);
++  UINT stride = sizeof(Vertex);
++  UINT offset = 0;
++  c.ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
++  c.ctx->IASetInputLayout(layout);
++  c.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
++  c.ctx->VSSetShader(vertex_shader, nullptr, 0);
++  c.ctx->PSSetShader(pixel_shader, nullptr, 0);
++  c.ctx->Draw(6, 0);
++
++  auto image = readback_tex2d(c, target, 0, 4);
++  c.ctx->ClearState();
++  return image;
++}
++
++static void
++test_partial_d16_clear(Ctx &c) {
++  const char *T = "partial_d16_clear";
++  const UINT W = 8, H = 8;
++  D3D11_TEXTURE2D_DESC td = {};
++  td.Width = W;
++  td.Height = H;
++  td.MipLevels = 1;
++  td.ArraySize = 1;
++  td.Format = DXGI_FORMAT_D16_UNORM;
++  td.SampleDesc = {1, 0};
++  td.Usage = D3D11_USAGE_DEFAULT;
++  td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
++
++  Com<ID3D11Texture2D> texture;
++  CHECK_HR(T, c.device->CreateTexture2D(&td, nullptr, &texture));
++  Com<ID3D11DepthStencilView> dsv;
++  CHECK_HR(T, c.device->CreateDepthStencilView(texture, nullptr, &dsv));
++  c.ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 0.25f, 0);
++
++  Com<ID3D11DeviceContext1> context1;
++  CHECK_HR(T, c.ctx->QueryInterface(
++                  __uuidof(ID3D11DeviceContext1), (void **)&context1));
++  const float clear_value[4] = {0.75f, 0.0f, 0.0f, 0.0f};
++  const D3D11_RECT clear_rect = {2, 2, 6, 6};
++  context1->ClearView(dsv, clear_value, &clear_rect, 1);
++
++  auto image =
++      probe_depth_stencil(c, dsv, W, H, 0.5f, true, false, 0);
++  CHECK(T, image.size() == W * H * 4, return);
++  CHECK(T, px_eq(image, W, 1, 1, 0, 0, 0, 255, 0),
++        log_px(image, W, 1, 1, "D16 outside"));
++  CHECK(T, px_eq(image, W, 2, 2, 255, 255, 255, 255, 0),
++        log_px(image, W, 2, 2, "D16 inside"));
++}
++
++static void
++test_partial_d24s8_clear(Ctx &c) {
++  const char *T = "partial_d24s8_clear";
++  const UINT W = 8, H = 8;
++  D3D11_TEXTURE2D_DESC td = {};
++  td.Width = W;
++  td.Height = H;
++  td.MipLevels = 1;
++  td.ArraySize = 1;
++  td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
++  td.SampleDesc = {1, 0};
++  td.Usage = D3D11_USAGE_DEFAULT;
++  td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
++
++  Com<ID3D11Texture2D> texture;
++  CHECK_HR(T, c.device->CreateTexture2D(&td, nullptr, &texture));
++  Com<ID3D11DepthStencilView> dsv;
++  CHECK_HR(T, c.device->CreateDepthStencilView(texture, nullptr, &dsv));
++
++  c.ctx->ClearDepthStencilView(
++      dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.25f, 0x55);
++
++  const int32_t depth_rect[4] = {2, 2, 6, 6};
++  CHECK_HR(T, (HRESULT)dxmt_d3d11_clear_depth_stencil_rects(
++                  c.ctx, dsv, D3D11_CLEAR_DEPTH, 0.75f, 0,
++                  1, depth_rect));
++  auto image = probe_depth_stencil(c, dsv, W, H, 0.5f, true, false, 0);
++  CHECK(T, image.size() == W * H * 4, return);
++  CHECK(T, px_eq(image, W, 1, 1, 0, 0, 0, 255, 0),
++        log_px(image, W, 1, 1, "depth outside"));
++  CHECK(T, px_eq(image, W, 2, 2, 255, 255, 255, 255, 0),
++        log_px(image, W, 2, 2, "depth inside"));
++  image = probe_depth_stencil(c, dsv, W, H, 0.0f, false, true, 0x55);
++  CHECK(T, image.size() == W * H * 4, return);
++  CHECK(T, px_eq(image, W, 1, 1, 255, 255, 255, 255, 0),
++        log_px(image, W, 1, 1, "stencil outside after depth"));
++  CHECK(T, px_eq(image, W, 3, 3, 255, 255, 255, 255, 0),
++        log_px(image, W, 3, 3, "stencil inside after depth"));
++
++  const int32_t stencil_rect[4] = {3, 3, 5, 5};
++  CHECK_HR(T, (HRESULT)dxmt_d3d11_clear_depth_stencil_rects(
++                  c.ctx, dsv, D3D11_CLEAR_STENCIL, 0.0f, 0xaa,
++                  1, stencil_rect));
++  image = probe_depth_stencil(c, dsv, W, H, 0.5f, true, false, 0);
++  CHECK(T, image.size() == W * H * 4, return);
++  CHECK(T, px_eq(image, W, 1, 1, 0, 0, 0, 255, 0),
++        log_px(image, W, 1, 1, "depth outside after stencil"));
++  CHECK(T, px_eq(image, W, 3, 3, 255, 255, 255, 255, 0),
++        log_px(image, W, 3, 3, "depth inside after stencil"));
++  image = probe_depth_stencil(c, dsv, W, H, 0.0f, false, true, 0xaa);
++  CHECK(T, image.size() == W * H * 4, return);
++  CHECK(T, px_eq(image, W, 2, 2, 0, 0, 0, 255, 0),
++        log_px(image, W, 2, 2, "stencil outside"));
++  CHECK(T, px_eq(image, W, 3, 3, 255, 255, 255, 255, 0),
++        log_px(image, W, 3, 3, "stencil inside"));
++
++  Com<ID3D11DeviceContext1> context1;
++  CHECK_HR(T, c.ctx->QueryInterface(
++                  __uuidof(ID3D11DeviceContext1), (void **)&context1));
++  const float clear_value[4] = {1.0f, 0.0f, 0.0f, 0.0f};
++  const D3D11_RECT clear_rect = {0, 0, (LONG)W, (LONG)H};
++  context1->ClearView(dsv, clear_value, &clear_rect, 1);
++  image = probe_depth_stencil(c, dsv, W, H, 0.5f, true, false, 0);
++  CHECK(T, image.size() == W * H * 4, return);
++  CHECK(T, px_eq(image, W, 1, 1, 0, 0, 0, 255, 0));
++  CHECK(T, px_eq(image, W, 3, 3, 255, 255, 255, 255, 0));
++  image = probe_depth_stencil(c, dsv, W, H, 0.0f, false, true, 0xaa);
++  CHECK(T, image.size() == W * H * 4, return);
++  CHECK(T, px_eq(image, W, 2, 2, 0, 0, 0, 255, 0));
++  CHECK(T, px_eq(image, W, 3, 3, 255, 255, 255, 255, 0));
++}
++
+ static Com<ID3D11BlendState> g_blend;
+ 
+ static void
+@@ -1310,6 +1505,8 @@ main(int argc, char **argv) {
+   test_draw_textured(c);
+   test_draw_instanced(c);
+   test_depth(c);
++  test_partial_d16_clear(c);
++  test_partial_d24s8_clear(c);
+   test_blend_additive(c);
+   test_msaa_resolve(c);
+   test_compute(c);

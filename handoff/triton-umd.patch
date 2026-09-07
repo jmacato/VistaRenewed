@@ -1,0 +1,3478 @@
+diff --git a/meson.build b/meson.build
+index 5a8113d..74540c6 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1166,10 +1166,17 @@ if ['linux', 'cygwin', 'gnu', 'freebsd', 'gnu/kfreebsd', 'haiku', 'android', 'ma
+ elif host_machine.system() == 'sunos'
+   pre_args += '-D__EXTENSIONS__'
+ elif host_machine.system() == 'windows'
+-  pre_args += [
+-    '-D_WIN32_WINNT=0x0A00',
+-    '-DWINVER=0x0A00',
+-  ]
++  if get_option('npt_vista_d3d9')
++    pre_args += [
++      '-D_WIN32_WINNT=0x0600',
++      '-DWINVER=0x0600',
++    ]
++  else
++    pre_args += [
++      '-D_WIN32_WINNT=0x0A00',
++      '-DWINVER=0x0A00',
++    ]
++  endif
+   if cc.get_argument_syntax() == 'msvc'
+     pre_args += [
+       '-D_USE_MATH_DEFINES',
+diff --git a/meson.options b/meson.options
+index f199308..6f768a3 100644
+--- a/meson.options
++++ b/meson.options
+@@ -247,6 +247,12 @@ option(
+   value : 'off',
+   description : 'Native Windows packaging: off = COM-only DLLs, ddi = Triton DDI DLL only, both = produce both side-by-side',
+ )
++option(
++  'npt_vista_d3d9',
++  type : 'boolean',
++  value : false,
++  description : 'Build the isolated Vista SP2 WDDM 1.0 neptune_d3d9.dll UMD',
++)
+ option(
+   'amdgpu-virtio',
+   type : 'boolean',
+@@ -782,10 +788,10 @@ option(
+ option(
+   'min-windows-version',
+   type : 'integer',
+-  min : 7,
++  min : 6,
+   max : 11,
+   value : 8,
+-  description : 'Minimum Windows version to support. Defaults to Windows 8.'
++  description : 'Minimum Windows version to support. Version 6 enables Vista SP2 builds.'
+ )
+ 
+ option(
+diff --git a/src/util/os_misc.h b/src/util/os_misc.h
+index 03cd59c..9b411ac 100644
+--- a/src/util/os_misc.h
++++ b/src/util/os_misc.h
+@@ -36,6 +36,7 @@
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
++#include <stddef.h>
+ 
+ #include "util/detect.h"
+ 
+diff --git a/src/virtio/neptune/meson.build b/src/virtio/neptune/meson.build
+index 54a3d1e..bf6322b 100644
+--- a/src/virtio/neptune/meson.build
++++ b/src/virtio/neptune/meson.build
+@@ -98,6 +98,7 @@ if npt_is_windows
+     npt_common_src += files(
+       'npt_renderer_vtest_protocol.c',
+       'npt_renderer_virtgpu_win32.c',
++      'npt_common_win32.c',
+     )
+   endif
+ endif
+@@ -110,7 +111,14 @@ if npt_is_windows and get_option('npt_umd') != 'off'
+   subdir('triton')
+ endif
+ 
+-if npt_is_windows
++# D3D9's DDI table is selected at compile time.  Keep its Vista build in a
++# separate target so Mesa's modern Windows minimum version and Triton's
++# D3D10/11 DDI interface version cannot change its ABI by accident.
++if npt_is_windows and get_option('npt_vista_d3d9')
++  subdir('vista-d3d9')
++endif
++
++if npt_is_windows and not get_option('npt_vista_d3d9')
+   # Windows: produce d3d11.dll and dxgi.dll as native DLLs for Wine
+   # (MinGW cross-compile, installed to Wine prefix system32 like dxvk).
+   # The nptunix.dll helper builtin provides unixlib access.
+diff --git a/src/virtio/neptune/neptune-protocol/npt_protocol_common_types.h b/src/virtio/neptune/neptune-protocol/npt_protocol_common_types.h
+index 1781dcc..a2c8062 100644
+--- a/src/virtio/neptune/neptune-protocol/npt_protocol_common_types.h
++++ b/src/virtio/neptune/neptune-protocol/npt_protocol_common_types.h
+@@ -13605,44 +13605,57 @@ npt_decode_DXGI_USAGE_array(struct npt_cs_decoder *dec,
+     npt_decode_UINT_array(dec, (UINT *)val, count);
+ }
+ 
+-/* HANDLE (alias for uint64_t) */
++/* HANDLE uses an unsigned 64-bit wire value on every guest architecture. */
+ 
+ static inline size_t
+ npt_sizeof_HANDLE(const HANDLE *val, int max_mode)
+ {
+-    return npt_sizeof_uint64_t((const uint64_t *)val, max_mode);
++    (void)val;
++    (void)max_mode;
++    return sizeof(uint64_t);
+ }
+ 
+ static inline void
+ npt_encode_HANDLE(struct npt_cs_encoder *enc, const HANDLE *val)
+ {
+-    npt_encode_uint64_t(enc, (const uint64_t *)val);
++    const uint64_t wire = (uint64_t)(uintptr_t)*val;
++    npt_encode_uint64_t(enc, &wire);
+ }
+ 
+ static inline void
+ npt_decode_HANDLE(struct npt_cs_decoder *dec, HANDLE *val)
+ {
+-    npt_decode_uint64_t(dec, (uint64_t *)val);
++    uint64_t wire = 0;
++    npt_decode_uint64_t(dec, &wire);
++    if (wire > (uint64_t)(uintptr_t)-1) {
++        *val = (HANDLE)0;
++        npt_cs_decoder_set_fatal(dec);
++        return;
++    }
++    *val = (HANDLE)(uintptr_t)wire;
+ }
+ 
+ static inline size_t
+ npt_sizeof_HANDLE_array(const HANDLE *val, uint32_t count)
+ {
+-    return npt_sizeof_uint64_t_array((const uint64_t *)val, count);
++    (void)val;
++    return sizeof(uint64_t) * count;
+ }
+ 
+ static inline void
+ npt_encode_HANDLE_array(struct npt_cs_encoder *enc,
+                              const HANDLE *val, uint32_t count)
+ {
+-    npt_encode_uint64_t_array(enc, (const uint64_t *)val, count);
++    for (uint32_t i = 0; i < count; ++i)
++        npt_encode_HANDLE(enc, &val[i]);
+ }
+ 
+ static inline void
+ npt_decode_HANDLE_array(struct npt_cs_decoder *dec,
+                              HANDLE *val, uint32_t count)
+ {
+-    npt_decode_uint64_t_array(dec, (uint64_t *)val, count);
++    for (uint32_t i = 0; i < count; ++i)
++        npt_decode_HANDLE(dec, &val[i]);
+ }
+ 
+ /* HMONITOR (alias for HANDLE) */
+@@ -14125,44 +14138,58 @@ npt_decode_DWORD_array(struct npt_cs_decoder *dec,
+     npt_decode_uint32_t_array(dec, (uint32_t *)val, count);
+ }
+ 
+-/* LONG_PTR (alias for int64_t) */
++/* LONG_PTR uses a signed 64-bit wire value on every guest architecture. */
+ 
+ static inline size_t
+ npt_sizeof_LONG_PTR(const LONG_PTR *val, int max_mode)
+ {
+-    return npt_sizeof_int64_t((const int64_t *)val, max_mode);
++    (void)val;
++    (void)max_mode;
++    return sizeof(int64_t);
+ }
+ 
+ static inline void
+ npt_encode_LONG_PTR(struct npt_cs_encoder *enc, const LONG_PTR *val)
+ {
+-    npt_encode_int64_t(enc, (const int64_t *)val);
++    const int64_t wire = (int64_t)*val;
++    npt_encode_int64_t(enc, &wire);
+ }
+ 
+ static inline void
+ npt_decode_LONG_PTR(struct npt_cs_decoder *dec, LONG_PTR *val)
+ {
+-    npt_decode_int64_t(dec, (int64_t *)val);
++    int64_t wire = 0;
++    npt_decode_int64_t(dec, &wire);
++    if (sizeof(LONG_PTR) == 4 &&
++        (wire < (int64_t)INT32_MIN || wire > (int64_t)INT32_MAX)) {
++        *val = 0;
++        npt_cs_decoder_set_fatal(dec);
++        return;
++    }
++    *val = (LONG_PTR)wire;
+ }
+ 
+ static inline size_t
+ npt_sizeof_LONG_PTR_array(const LONG_PTR *val, uint32_t count)
+ {
+-    return npt_sizeof_int64_t_array((const int64_t *)val, count);
++    (void)val;
++    return sizeof(int64_t) * count;
+ }
+ 
+ static inline void
+ npt_encode_LONG_PTR_array(struct npt_cs_encoder *enc,
+                              const LONG_PTR *val, uint32_t count)
+ {
+-    npt_encode_int64_t_array(enc, (const int64_t *)val, count);
++    for (uint32_t i = 0; i < count; ++i)
++        npt_encode_LONG_PTR(enc, &val[i]);
+ }
+ 
+ static inline void
+ npt_decode_LONG_PTR_array(struct npt_cs_decoder *dec,
+                              LONG_PTR *val, uint32_t count)
+ {
+-    npt_decode_int64_t_array(dec, (int64_t *)val, count);
++    for (uint32_t i = 0; i < count; ++i)
++        npt_decode_LONG_PTR(dec, &val[i]);
+ }
+ 
+ /* UINT8 (alias for uint8_t) */
+@@ -14885,44 +14912,57 @@ npt_decode_LARGE_INTEGER_array(struct npt_cs_decoder *dec,
+     npt_decode_int64_t_array(dec, (int64_t *)val, count);
+ }
+ 
+-/* SIZE_T (alias for uint64_t) */
++/* SIZE_T uses an unsigned 64-bit wire value on every guest architecture. */
+ 
+ static inline size_t
+ npt_sizeof_SIZE_T(const SIZE_T *val, int max_mode)
+ {
+-    return npt_sizeof_uint64_t((const uint64_t *)val, max_mode);
++    (void)val;
++    (void)max_mode;
++    return sizeof(uint64_t);
+ }
+ 
+ static inline void
+ npt_encode_SIZE_T(struct npt_cs_encoder *enc, const SIZE_T *val)
+ {
+-    npt_encode_uint64_t(enc, (const uint64_t *)val);
++    const uint64_t wire = (uint64_t)*val;
++    npt_encode_uint64_t(enc, &wire);
+ }
+ 
+ static inline void
+ npt_decode_SIZE_T(struct npt_cs_decoder *dec, SIZE_T *val)
+ {
+-    npt_decode_uint64_t(dec, (uint64_t *)val);
++    uint64_t wire = 0;
++    npt_decode_uint64_t(dec, &wire);
++    if (wire > (uint64_t)(SIZE_T)-1) {
++        *val = 0;
++        npt_cs_decoder_set_fatal(dec);
++        return;
++    }
++    *val = (SIZE_T)wire;
+ }
+ 
+ static inline size_t
+ npt_sizeof_SIZE_T_array(const SIZE_T *val, uint32_t count)
+ {
+-    return npt_sizeof_uint64_t_array((const uint64_t *)val, count);
++    (void)val;
++    return sizeof(uint64_t) * count;
+ }
+ 
+ static inline void
+ npt_encode_SIZE_T_array(struct npt_cs_encoder *enc,
+                              const SIZE_T *val, uint32_t count)
+ {
+-    npt_encode_uint64_t_array(enc, (const uint64_t *)val, count);
++    for (uint32_t i = 0; i < count; ++i)
++        npt_encode_SIZE_T(enc, &val[i]);
+ }
+ 
+ static inline void
+ npt_decode_SIZE_T_array(struct npt_cs_decoder *dec,
+                              SIZE_T *val, uint32_t count)
+ {
+-    npt_decode_uint64_t_array(dec, (uint64_t *)val, count);
++    for (uint32_t i = 0; i < count; ++i)
++        npt_decode_SIZE_T(dec, &val[i]);
+ }
+ 
+ /* UCHAR (alias for uint8_t) */
+@@ -15085,84 +15125,84 @@ npt_decode_CLSID(struct npt_cs_decoder *dec, CLSID *val)
+     npt_decode_GUID(dec, (GUID *)val);
+ }
+ 
+-/* HWND (alias for uint64_t) */
++/* HWND uses the same fixed-width wire representation as HANDLE. */
+ 
+ static inline size_t
+ npt_sizeof_HWND(const HWND *val, int max_mode)
+ {
+-    return npt_sizeof_uint64_t((const uint64_t *)val, max_mode);
++    return npt_sizeof_HANDLE((const HANDLE *)val, max_mode);
+ }
+ 
+ static inline void
+ npt_encode_HWND(struct npt_cs_encoder *enc, const HWND *val)
+ {
+-    npt_encode_uint64_t(enc, (const uint64_t *)val);
++    npt_encode_HANDLE(enc, (const HANDLE *)val);
+ }
+ 
+ static inline void
+ npt_decode_HWND(struct npt_cs_decoder *dec, HWND *val)
+ {
+-    npt_decode_uint64_t(dec, (uint64_t *)val);
++    npt_decode_HANDLE(dec, (HANDLE *)val);
+ }
+ 
+ static inline size_t
+ npt_sizeof_HWND_array(const HWND *val, uint32_t count)
+ {
+-    return npt_sizeof_uint64_t_array((const uint64_t *)val, count);
++    return npt_sizeof_HANDLE_array((const HANDLE *)val, count);
+ }
+ 
+ static inline void
+ npt_encode_HWND_array(struct npt_cs_encoder *enc,
+                              const HWND *val, uint32_t count)
+ {
+-    npt_encode_uint64_t_array(enc, (const uint64_t *)val, count);
++    npt_encode_HANDLE_array(enc, (const HANDLE *)val, count);
+ }
+ 
+ static inline void
+ npt_decode_HWND_array(struct npt_cs_decoder *dec,
+                              HWND *val, uint32_t count)
+ {
+-    npt_decode_uint64_t_array(dec, (uint64_t *)val, count);
++    npt_decode_HANDLE_array(dec, (HANDLE *)val, count);
+ }
+ 
+-/* HMODULE (alias for uint64_t) */
++/* HMODULE uses the same fixed-width wire representation as HANDLE. */
+ 
+ static inline size_t
+ npt_sizeof_HMODULE(const HMODULE *val, int max_mode)
+ {
+-    return npt_sizeof_uint64_t((const uint64_t *)val, max_mode);
++    return npt_sizeof_HANDLE((const HANDLE *)val, max_mode);
+ }
+ 
+ static inline void
+ npt_encode_HMODULE(struct npt_cs_encoder *enc, const HMODULE *val)
+ {
+-    npt_encode_uint64_t(enc, (const uint64_t *)val);
++    npt_encode_HANDLE(enc, (const HANDLE *)val);
+ }
+ 
+ static inline void
+ npt_decode_HMODULE(struct npt_cs_decoder *dec, HMODULE *val)
+ {
+-    npt_decode_uint64_t(dec, (uint64_t *)val);
++    npt_decode_HANDLE(dec, (HANDLE *)val);
+ }
+ 
+ static inline size_t
+ npt_sizeof_HMODULE_array(const HMODULE *val, uint32_t count)
+ {
+-    return npt_sizeof_uint64_t_array((const uint64_t *)val, count);
++    return npt_sizeof_HANDLE_array((const HANDLE *)val, count);
+ }
+ 
+ static inline void
+ npt_encode_HMODULE_array(struct npt_cs_encoder *enc,
+                              const HMODULE *val, uint32_t count)
+ {
+-    npt_encode_uint64_t_array(enc, (const uint64_t *)val, count);
++    npt_encode_HANDLE_array(enc, (const HANDLE *)val, count);
+ }
+ 
+ static inline void
+ npt_decode_HMODULE_array(struct npt_cs_decoder *dec,
+                              HMODULE *val, uint32_t count)
+ {
+-    npt_decode_uint64_t_array(dec, (uint64_t *)val, count);
++    npt_decode_HANDLE_array(dec, (HANDLE *)val, count);
+ }
+ 
+ 
+diff --git a/src/virtio/neptune/neptune-protocol/npt_protocol_defs.h b/src/virtio/neptune/neptune-protocol/npt_protocol_defs.h
+index 8106f44..f150df2 100644
+--- a/src/virtio/neptune/neptune-protocol/npt_protocol_defs.h
++++ b/src/virtio/neptune/neptune-protocol/npt_protocol_defs.h
+@@ -63,7 +63,7 @@ struct npt_reply_header {
+  * virgl_renderer_capset_neptune.wire_format_version; the guest compares
+  * against its own copy and refuses to attach on mismatch.  Bump the
+  * JSON's version when an incompatible wire change lands. */
+-#define NPT_PROTOCOL_WIRE_VERSION 1u
++#define NPT_PROTOCOL_WIRE_VERSION 2u
+ 
+ /* ================================================================== */
+ /* Interface IIDs                                                      */
+diff --git a/src/virtio/neptune/npt_com.c b/src/virtio/neptune/npt_com.c
+index 87ca89f..33acb47 100644
+--- a/src/virtio/neptune/npt_com.c
++++ b/src/virtio/neptune/npt_com.c
+@@ -466,12 +466,12 @@ npt_com_default_query_interface_chain(void *self, const GUID *riid,
+    return NPT_E_NOINTERFACE;
+ }
+ 
+-void
++bool
+ npt_com_send_release(struct npt_device *dev, uint64_t host_id)
+ {
+    if (npt_com_id_is_guest_fab(host_id))
+-      return;
+-   npt_ring_send_com_release(dev, host_id);
++      return true;
++   return npt_ring_send_com_release(dev, host_id);
+ }
+ 
+ HRESULT
+diff --git a/src/virtio/neptune/npt_com.h b/src/virtio/neptune/npt_com.h
+index fb671a5..3396af2 100644
+--- a/src/virtio/neptune/npt_com.h
++++ b/src/virtio/neptune/npt_com.h
+@@ -232,7 +232,7 @@ npt_com_assert_overridden(const char *iid_name, const char *method_name);
+ void
+ npt_com_init(void);
+ 
+-void
++bool
+ npt_com_send_release(struct npt_device *dev, uint64_t host_id);
+ 
+ /* Caller pre-allocates `guest_id` and builds the wrapper before
+diff --git a/src/virtio/neptune/npt_common.h b/src/virtio/neptune/npt_common.h
+index 32dbeb5..5fa1e77 100644
+--- a/src/virtio/neptune/npt_common.h
++++ b/src/virtio/neptune/npt_common.h
+@@ -97,7 +97,7 @@ struct npt_capset {
+    uint32_t pad[14];
+ };
+ 
+-#ifdef __WINE__
++#if defined(_WIN32)
+ void npt_log_impl(const char *fmt, ...);
+ #define npt_log(fmt, ...) npt_log_impl("neptune: " fmt "\n", ##__VA_ARGS__)
+ #define npt_debug(fmt, ...) npt_log_impl("neptune: " fmt "\n", ##__VA_ARGS__)
+diff --git a/src/virtio/neptune/npt_dispatch.c b/src/virtio/neptune/npt_dispatch.c
+index 514e221..1167849 100644
+--- a/src/virtio/neptune/npt_dispatch.c
++++ b/src/virtio/neptune/npt_dispatch.c
+@@ -5,12 +5,14 @@
+ 
+ #include "npt_dispatch.h"
+ 
++#include "npt_com.h"
+ #include "npt_renderer.h"
+ #include "npt_ring.h"
+ #include "npt_transport_defs.h"
+ 
+ #include "neptune-protocol/npt_protocol_defs.h"
+ 
++#include <stdlib.h>
+ #include <string.h>
+ 
+ /* ==========================================================================
+@@ -207,6 +209,95 @@ npt_dispatch_resource_update(struct npt_ring *ring, uint64_t resource_host_id,
+                                            data, copy_size, payload_aligned);
+ }
+ 
++/* ==========================================================================
++ * CLEAR
++ * ========================================================================== */
++
++HRESULT
++npt_dispatch_clear_depth_stencil_rects(void *context, void *dsv,
++                                       uint32_t clear_flags, float depth,
++                                       uint8_t stencil, uint32_t rect_count,
++                                       const int32_t *rect_ltrb)
++{
++   if (!context || !dsv || !rect_ltrb || !rect_count ||
++       !(clear_flags & (NPT_CLEAR_DEPTH_BIT | NPT_CLEAR_STENCIL_BIT)) ||
++       (clear_flags & ~(NPT_CLEAR_DEPTH_BIT | NPT_CLEAR_STENCIL_BIT)) ||
++       ((clear_flags & NPT_CLEAR_DEPTH_BIT) &&
++        (!(depth >= 0.0f) || depth > 1.0f)))
++      return NPT_E_INVALIDARG;
++
++   struct npt_ring *ring = npt_com_self_ring(context);
++   const uint64_t context_id = npt_com_self_id(context);
++   const uint64_t dsv_id = npt_com_self_id(dsv);
++   if (!ring || !context_id || !dsv_id)
++      return NPT_E_INVALIDARG;
++
++   uint32_t submitted = 0;
++   while (submitted < rect_count) {
++      const uint32_t batch_count =
++         rect_count - submitted > NPT_CLEAR_DEPTH_STENCIL_MAX_RECTS
++            ? NPT_CLEAR_DEPTH_STENCIL_MAX_RECTS
++            : rect_count - submitted;
++      const size_t rect_bytes =
++         (size_t)batch_count * sizeof(struct npt_clear_rect);
++      const size_t cmd_size =
++         sizeof(struct npt_cmd_clear_depth_stencil_rects) + rect_bytes;
++      struct npt_cmd_clear_depth_stencil_rects *cmd = malloc(cmd_size);
++      if (!cmd)
++         return NPT_E_OUTOFMEMORY;
++      memset(cmd, 0, sizeof(*cmd));
++      cmd->header.cmd_type =
++         NPT_TRANSPORT_CMD_TYPE(NPT_TRANSPORT_SUBGROUP_CLEAR,
++                                NPT_TRANSPORT_CLEAR_DEPTH_STENCIL_RECTS);
++      cmd->header.cmd_flags = NPT_CMD_FLAG_REPLY;
++      cmd->header.cmd_size = (uint32_t)cmd_size;
++      cmd->context_id = context_id;
++      cmd->dsv_id = dsv_id;
++      cmd->clear_flags = clear_flags;
++      cmd->depth = depth;
++      cmd->rect_count = batch_count;
++      cmd->stencil = stencil;
++
++      struct npt_clear_rect *wire_rects =
++         (struct npt_clear_rect *)((uint8_t *)cmd + sizeof(*cmd));
++      const int32_t *batch_rects = rect_ltrb + (size_t)submitted * 4u;
++      for (uint32_t i = 0; i < batch_count; ++i) {
++         wire_rects[i].left = batch_rects[i * 4u + 0u];
++         wire_rects[i].top = batch_rects[i * 4u + 1u];
++         wire_rects[i].right = batch_rects[i * 4u + 2u];
++         wire_rects[i].bottom = batch_rects[i * 4u + 3u];
++      }
++
++      const uint32_t expected_type = cmd->header.cmd_type;
++      struct npt_ring_submit_command submit;
++      memset(&submit, 0, sizeof(submit));
++      struct npt_cs_encoder *enc = npt_ring_submit_command_init(
++         ring, &submit, cmd, cmd_size,
++         sizeof(struct npt_cmd_clear_depth_stencil_rects_reply));
++      if (enc)
++         enc->cur = (uint8_t *)cmd + cmd_size;
++      npt_ring_submit_command(ring, &submit);
++      free(cmd);
++
++      struct npt_cs_decoder *dec = npt_ring_get_command_reply(ring, &submit);
++      HRESULT hr = NPT_E_FAIL;
++      if (dec && dec->cur && dec->end &&
++          (size_t)(dec->end - dec->cur) >=
++             sizeof(struct npt_cmd_clear_depth_stencil_rects_reply)) {
++         const struct npt_cmd_clear_depth_stencil_rects_reply *reply =
++            (const struct npt_cmd_clear_depth_stencil_rects_reply *)dec->cur;
++         if (reply->header.cmd_type == expected_type)
++            hr = (HRESULT)reply->header.cmd_return;
++      }
++      if (dec)
++         npt_ring_free_command_reply(ring, &submit);
++      if (NPT_FAILED(hr))
++         return hr;
++      submitted += batch_count;
++   }
++   return NPT_S_OK;
++}
++
+ /* ==========================================================================
+  * SHARED
+  * ========================================================================== */
+diff --git a/src/virtio/neptune/npt_dispatch.h b/src/virtio/neptune/npt_dispatch.h
+index 5a7adbd..d5e2ea8 100644
+--- a/src/virtio/neptune/npt_dispatch.h
++++ b/src/virtio/neptune/npt_dispatch.h
+@@ -89,6 +89,14 @@ bool npt_dispatch_resource_update(struct npt_ring *ring,
+                                   uint32_t byte_size,
+                                   uint32_t copy_size);
+ 
++/* ==========================================================================
++ * CLEAR
++ * ========================================================================== */
++
++HRESULT npt_dispatch_clear_depth_stencil_rects(
++    void *context, void *dsv, uint32_t clear_flags, float depth,
++    uint8_t stencil, uint32_t rect_count, const int32_t *rect_ltrb);
++
+ /* ==========================================================================
+  * SHARED
+  * ========================================================================== */
+diff --git a/src/virtio/neptune/npt_entry_d3d11.c b/src/virtio/neptune/npt_entry_d3d11.c
+index 27baaa5..86735b9 100644
+--- a/src/virtio/neptune/npt_entry_d3d11.c
++++ b/src/virtio/neptune/npt_entry_d3d11.c
+@@ -327,6 +327,7 @@ npt_d3d11_create_device_and_swap_chain_internal(IDXGIAdapter *pAdapter,
+  * factory through the Windows runtime's DLL lookup.  Triton statically
+  * links the *_internal helpers above and does not go through these. */
+ 
++#ifndef NPT_NO_D3D11_ENTRYPOINTS
+ HRESULT NPT_API
+ D3D11CreateDevice(IDXGIAdapter *pAdapter,
+                   D3D_DRIVER_TYPE DriverType,
+@@ -384,3 +385,4 @@ D3D11CreateDeviceAndSwapChain(IDXGIAdapter *pAdapter,
+       SDKVersion, pSwapChainDesc, ppSwapChain, ppDevice, pFeatureLevel,
+       ppImmediateContext);
+ }
++#endif /* NPT_NO_D3D11_ENTRYPOINTS */
+diff --git a/src/virtio/neptune/npt_overrides_d3d11_fence.c b/src/virtio/neptune/npt_overrides_d3d11_fence.c
+index eaa0507..ef648a5 100644
+--- a/src/virtio/neptune/npt_overrides_d3d11_fence.c
++++ b/src/virtio/neptune/npt_overrides_d3d11_fence.c
+@@ -107,8 +107,12 @@ npt_d3d11_fence_finalize_create(struct npt_device *dev, void *wrapper,
+ 
+    /* Fresh shmem requires a roundtrip so REGISTER_FENCE_FEEDBACK's
+     * res_id has been registered when the host ring thread reads it. */
+-   if (fresh)
+-      npt_ring_force_roundtrip(dev->ring);
++   if (fresh && !npt_ring_force_roundtrip(dev->ring)) {
++      npt_renderer_shmem_unref(dev->renderer, shmem);
++      aux->base.fb_shmem = NULL;
++      aux->base.fb_offset = 0;
++      return;
++   }
+ 
+    if (npt_dispatch_feedback_register_fence(dev->ring, com->base.id,
+                                             shmem->res_id, fb_offset))
+diff --git a/src/virtio/neptune/npt_overrides_d3d11_query.c b/src/virtio/neptune/npt_overrides_d3d11_query.c
+index 5323f91..c7d48e7 100644
+--- a/src/virtio/neptune/npt_overrides_d3d11_query.c
++++ b/src/virtio/neptune/npt_overrides_d3d11_query.c
+@@ -140,8 +140,13 @@ npt_d3d11_query_finalize_create(struct npt_device *dev, void *wrapper,
+ 
+    /* Fresh shmem requires a roundtrip so REGISTER_QUERY_FEEDBACK's
+     * res_id is registered when the host ring thread reads it. */
+-   if (fresh)
+-      npt_ring_force_roundtrip(dev->ring);
++   if (fresh && !npt_ring_force_roundtrip(dev->ring)) {
++      npt_renderer_shmem_unref(dev->renderer, shmem);
++      aux->base.fb_shmem = NULL;
++      aux->base.fb_offset = 0;
++      aux->query_data_size = 0;
++      return;
++   }
+ 
+    if (npt_dispatch_feedback_register_query(dev->ring, com->base.id,
+                                             shmem->res_id, fb_offset, data_size))
+diff --git a/src/virtio/neptune/npt_renderer.h b/src/virtio/neptune/npt_renderer.h
+index ccff0f9..5bd45f4 100644
+--- a/src/virtio/neptune/npt_renderer.h
++++ b/src/virtio/neptune/npt_renderer.h
+@@ -115,7 +115,7 @@ struct npt_renderer_ops {
+    bool (*import_res)(struct npt_renderer *renderer, uint32_t res_id,
+                       uint64_t size,
+                       uint32_t *out_alloc, uint32_t *out_res_kmt);
+-   void (*release_import_res)(struct npt_renderer *renderer,
++   bool (*release_import_res)(struct npt_renderer *renderer,
+                               uint32_t alloc, uint32_t res_kmt);
+ 
+    /* Implementation takes ownership (dups) the FDs.
+@@ -249,12 +249,13 @@ npt_renderer_import_res(struct npt_renderer *renderer, uint32_t res_id,
+    return false;
+ }
+ 
+-static inline void
++static inline bool
+ npt_renderer_release_import_res(struct npt_renderer *renderer,
+                                 uint32_t alloc, uint32_t res_kmt)
+ {
+    if (renderer && renderer->ops.release_import_res)
+-      renderer->ops.release_import_res(renderer, alloc, res_kmt);
++      return renderer->ops.release_import_res(renderer, alloc, res_kmt);
++   return false;
+ }
+ 
+ static inline bool
+diff --git a/src/virtio/neptune/npt_renderer_virtgpu_win32.c b/src/virtio/neptune/npt_renderer_virtgpu_win32.c
+index 5a88372..24651f1 100644
+--- a/src/virtio/neptune/npt_renderer_virtgpu_win32.c
++++ b/src/virtio/neptune/npt_renderer_virtgpu_win32.c
+@@ -18,6 +18,7 @@
+ #include <windows.h>
+ #undef WIN32_NO_STATUS
+ 
++#include <limits.h>
+ #include <winnt.h>
+ #include <ntstatus.h>
+ #include <winternl.h>
+@@ -30,9 +31,31 @@
+ #include "neptune-protocol/npt_protocol_defs.h"
+ #include "npt_renderer.h"
+ 
+-#define VIRTGPU_PCI_VENDOR_ID 0x1af4
+-#define VIRTGPU_PCI_DEVICE_ID 0x1050
+-#define VIRTGPU_WIN_DEVICE_ID "PCI\\VEN_1AF4&DEV_1050"
++#if defined(NPT_D3D9_RUNTIME_DDI)
++/* The generated Neptune protocol header has already supplied the public
++ * D3DCOLORVALUE layout.  Keep MinGW's d3d9types.h from declaring its private
++ * _D3DCOLORVALUE version before d3dumddi.h consumes the D3D9 API types. */
++#ifndef D3DCOLORVALUE_DEFINED
++#define D3DCOLORVALUE_DEFINED
++#endif
++#include <d3d9types.h>
++#include <d3dumddi.h>
++#endif
++
++// Do not use INFINITE here.  Vista has no D3DKMT CPU-event enqueue API, so
++// this private marker is also the point at which a lost/reset device must
++// become observable to the UMD rather than hanging DWM forever.
++#define VIRTGPU_RENDER_EVENT_TIMEOUT_MS 15000
++
++/* Vista predates the VULKAN client hint and can reject that enum value in
++ * D3DKMTCreateContext before the miniport callback runs.  The transport is a
++ * private 3D command stream, so the DX9 hint is the closest valid WDDM 1.0
++ * classification.  Keep the modern hint for normal Triton builds. */
++#if defined(_WIN32_WINNT) && _WIN32_WINNT <= 0x0600
++#define NPT_D3DKMT_CLIENT_HINT D3DKMT_CLIENTHINT_DX9
++#else
++#define NPT_D3DKMT_CLIENT_HINT D3DKMT_CLIENTHINT_VULKAN
++#endif
+ 
+ struct npt_virtgpu_shmem {
+    struct npt_renderer_shmem base;
+@@ -53,7 +76,6 @@ struct npt_virtgpu {
+       PFND3DKMT_QUERYADAPTERINFO queryAdapterInfo;
+       PFND3DKMT_ESCAPE escape;
+       PFND3DKMT_RENDER render;
+-      PFND3DKMT_SIGNALSYNCHRONIZATIONOBJECT2 signalSynchronizationObject2;
+       PFND3DKMT_CREATECONTEXT createContext;
+       PFND3DKMT_DESTROYCONTEXT destroyContext;
+       PFND3DKMT_CREATEALLOCATION createAllocation;
+@@ -62,6 +84,7 @@ struct npt_virtgpu {
+       PFND3DKMT_UNLOCK unlock;
+       PFND3DKMT_CREATEDEVICE createDevice;
+       PFND3DKMT_DESTROYDEVICE destroyDevice;
++      PFND3DKMT_GETDEVICESTATE getDeviceState;
+       PFND3DKMT_OPENADAPTERFROMHDC openAdapterFromHdc;
+       PFND3DKMT_CLOSEADAPTER closeAdapter;
+    } cb;
+@@ -71,6 +94,19 @@ struct npt_virtgpu {
+    D3DKMT_HANDLE context;
+    LUID luid;
+ 
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   /* A D3D UMD already owns a runtime/KMD device.  Reopening the adapter and
++    * calling D3DKMTCreateDevice from inside its CreateDevice callback
++    * deadlocks Vista's graphics runtime.  Use the callbacks that belong to
++    * that outer device instead. */
++   bool use_runtime_ddi;
++   HANDLE h_rt_adapter;
++   HANDLE h_rt_device;
++   HANDLE h_ddi_context;
++   D3DDDI_ADAPTERCALLBACKS adapter_callbacks;
++   D3DDDI_DEVICECALLBACKS device_callbacks;
++#endif
++
+    /* Kernel-mapped command buffer + alloc/patch lists, returned by
+     * D3DKMTCreateContext and rotated by D3DKMTRender. */
+    void *cmd_buf;
+@@ -81,70 +117,287 @@ struct npt_virtgpu {
+    UINT patch_size;
+ };
+ 
+-static inline uint64_t
+-npt_align64(uint64_t v, uint64_t a)
++#if defined(NPT_D3D9_RUNTIME_DDI)
++struct npt_d3d9_runtime_binding {
++   bool valid;
++   HANDLE h_rt_adapter;
++   HANDLE h_rt_device;
++   UINT interface_version;
++   UINT runtime_version;
++   D3DDDI_ADAPTERCALLBACKS adapter_callbacks;
++   D3DDDI_DEVICECALLBACKS device_callbacks;
++};
++
++/* D3D9 serializes device creation.  triton9CreateDevice publishes this
++ * binding immediately before the synchronous Neptune-device acquire that
++ * constructs the renderer.  Copy the callback tables: the argument tables
++ * themselves are runtime-owned and need not remain at the same address. */
++static struct npt_d3d9_runtime_binding g_d3d9_runtime_binding;
++
++void npt_renderer_bind_d3d9_runtime(
++   HANDLE h_rt_adapter, HANDLE h_rt_device,
++   UINT interface_version, UINT runtime_version,
++   const D3DDDI_ADAPTERCALLBACKS *adapter_callbacks,
++   const D3DDDI_DEVICECALLBACKS *device_callbacks);
++
++enum npt_d3d9_runtime_callback_bits {
++   NPT_D3D9_CB_QUERY_ADAPTER_INFO = 1u << 0,
++   NPT_D3D9_CB_ESCAPE             = 1u << 1,
++   NPT_D3D9_CB_RENDER             = 1u << 2,
++   NPT_D3D9_CB_CREATE_CONTEXT     = 1u << 3,
++   NPT_D3D9_CB_DESTROY_CONTEXT    = 1u << 4,
++   NPT_D3D9_CB_ALLOCATE           = 1u << 5,
++   NPT_D3D9_CB_DEALLOCATE         = 1u << 6,
++   NPT_D3D9_CB_LOCK               = 1u << 7,
++   NPT_D3D9_CB_UNLOCK             = 1u << 8,
++};
++
++#define NPT_D3D9_REQUIRED_CALLBACKS \
++   (NPT_D3D9_CB_QUERY_ADAPTER_INFO | NPT_D3D9_CB_ESCAPE | \
++    NPT_D3D9_CB_RENDER | NPT_D3D9_CB_CREATE_CONTEXT | \
++    NPT_D3D9_CB_DESTROY_CONTEXT | NPT_D3D9_CB_ALLOCATE | \
++    NPT_D3D9_CB_DEALLOCATE | NPT_D3D9_CB_LOCK | NPT_D3D9_CB_UNLOCK)
++
++static UINT
++npt_d3d9_runtime_callback_mask(
++   const D3DDDI_ADAPTERCALLBACKS *adapter_callbacks,
++   const D3DDDI_DEVICECALLBACKS *device_callbacks)
++{
++   UINT mask = 0;
++
++   if (!adapter_callbacks || !device_callbacks)
++      return mask;
++   if (adapter_callbacks->pfnQueryAdapterInfoCb)
++      mask |= NPT_D3D9_CB_QUERY_ADAPTER_INFO;
++   if (device_callbacks->pfnEscapeCb)
++      mask |= NPT_D3D9_CB_ESCAPE;
++   if (device_callbacks->pfnRenderCb)
++      mask |= NPT_D3D9_CB_RENDER;
++   if (device_callbacks->pfnCreateContextCb)
++      mask |= NPT_D3D9_CB_CREATE_CONTEXT;
++   if (device_callbacks->pfnDestroyContextCb)
++      mask |= NPT_D3D9_CB_DESTROY_CONTEXT;
++   if (device_callbacks->pfnAllocateCb)
++      mask |= NPT_D3D9_CB_ALLOCATE;
++   if (device_callbacks->pfnDeallocateCb)
++      mask |= NPT_D3D9_CB_DEALLOCATE;
++   if (device_callbacks->pfnLockCb)
++      mask |= NPT_D3D9_CB_LOCK;
++   if (device_callbacks->pfnUnlockCb)
++      mask |= NPT_D3D9_CB_UNLOCK;
++   return mask;
++}
++
++void
++npt_renderer_bind_d3d9_runtime(HANDLE h_rt_adapter, HANDLE h_rt_device,
++                               UINT interface_version, UINT runtime_version,
++                               const D3DDDI_ADAPTERCALLBACKS *adapter_callbacks,
++                               const D3DDDI_DEVICECALLBACKS *device_callbacks)
++{
++   memset(&g_d3d9_runtime_binding, 0, sizeof(g_d3d9_runtime_binding));
++   if (!h_rt_adapter || !h_rt_device || !adapter_callbacks ||
++       !device_callbacks)
++      return;
++
++   g_d3d9_runtime_binding.h_rt_adapter = h_rt_adapter;
++   g_d3d9_runtime_binding.h_rt_device = h_rt_device;
++   g_d3d9_runtime_binding.interface_version = interface_version;
++   g_d3d9_runtime_binding.runtime_version = runtime_version;
++   g_d3d9_runtime_binding.adapter_callbacks = *adapter_callbacks;
++   g_d3d9_runtime_binding.device_callbacks = *device_callbacks;
++   g_d3d9_runtime_binding.valid = true;
++
++   npt_log("virtgpu: D3D9 runtime binding interface=0x%x version=0x%x callbacks=0x%03x",
++           interface_version, runtime_version,
++           npt_d3d9_runtime_callback_mask(adapter_callbacks, device_callbacks));
++}
++
++static NTSTATUS
++virtgpu_status_from_hresult(HRESULT hr)
++{
++   /* HRESULT and NTSTATUS are both signed 32-bit status values.  Preserve the
++    * exact runtime callback failure so callers and logs do not collapse device
++    * removal, invalid input, and allocation failure into one generic code. */
++   return SUCCEEDED(hr) ? STATUS_SUCCESS : (NTSTATUS)hr;
++}
++#endif
++
++static bool
++virtgpu_has_context(const struct npt_virtgpu *gpu)
++{
++   if (!gpu)
++      return false;
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi)
++      return gpu->h_ddi_context != NULL;
++#endif
++   return gpu->context != 0;
++}
++
++static NTSTATUS
++virtgpu_send_cmd_locked(struct npt_virtgpu *gpu, UINT type, UINT flags,
++                        UINT ring_idx, const void *payload, size_t payload_size,
++                        UINT alloc_count);
++static NTSTATUS
++virtgpu_unlock(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc);
++
++static bool
++npt_align64_checked(uint64_t value, uint64_t alignment, uint64_t *out)
+ {
+-   return (v + a - 1) & ~(a - 1);
++   if (!out || !alignment || (alignment & (alignment - 1)) ||
++       value > UINT64_MAX - (alignment - 1))
++      return false;
++
++   *out = (value + alignment - 1) & ~(alignment - 1);
++   return true;
+ }
+ 
+ static NTSTATUS
+ virtgpu_render(struct npt_virtgpu *gpu, UINT cmd_offset, UINT cmd_length,
+                UINT alloc_count)
+ {
+-   D3DKMT_RENDER render = {
+-      .hContext = gpu->context,
+-      .CommandOffset = cmd_offset,
+-      .CommandLength = cmd_length,
+-      .AllocationCount = alloc_count,
+-      .PatchLocationCount = alloc_count,
+-   };
++   if (!gpu || !virtgpu_has_context(gpu) || !gpu->cmd_buf ||
++       cmd_offset > gpu->cmd_size || cmd_length > gpu->cmd_size - cmd_offset ||
++       alloc_count > gpu->alloc_size || alloc_count > gpu->patch_size ||
++       (alloc_count && (!gpu->alloc_list || !gpu->patch_list)))
++      return STATUS_INVALID_PARAMETER;
++
++   NTSTATUS status;
++   void *new_cmd_buf;
++   UINT new_cmd_size;
++   D3DDDI_ALLOCATIONLIST *new_alloc_list;
++   UINT new_alloc_size;
++   D3DDDI_PATCHLOCATIONLIST *new_patch_list;
++   UINT new_patch_size;
++
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi) {
++      if (!gpu->device_callbacks.pfnRenderCb)
++         return STATUS_INVALID_PARAMETER;
++      D3DDDICB_RENDER render = {
++         .CommandLength = cmd_length,
++         .CommandOffset = cmd_offset,
++         .NumAllocations = alloc_count,
++         .NumPatchLocations = alloc_count,
++         .hContext = gpu->h_ddi_context,
++      };
++      status = virtgpu_status_from_hresult(
++         gpu->device_callbacks.pfnRenderCb(gpu->h_rt_device, &render));
++      new_cmd_buf = render.pNewCommandBuffer;
++      new_cmd_size = render.NewCommandBufferSize;
++      new_alloc_list = render.pNewAllocationList;
++      new_alloc_size = render.NewAllocationListSize;
++      new_patch_list = render.pNewPatchLocationList;
++      new_patch_size = render.NewPatchLocationListSize;
++   } else
++#endif
++   {
++      if (!gpu->cb.render || !gpu->context)
++         return STATUS_INVALID_PARAMETER;
++      D3DKMT_RENDER render = {
++         .hContext = gpu->context,
++         .CommandOffset = cmd_offset,
++         .CommandLength = cmd_length,
++         .AllocationCount = alloc_count,
++         .PatchLocationCount = alloc_count,
++      };
++      status = gpu->cb.render(&render);
++      new_cmd_buf = render.pNewCommandBuffer;
++      new_cmd_size = render.NewCommandBufferSize;
++      new_alloc_list = render.pNewAllocationList;
++      new_alloc_size = render.NewAllocationListSize;
++      new_patch_list = render.pNewPatchLocationList;
++      new_patch_size = render.NewPatchLocationListSize;
++   }
++   if (!NT_SUCCESS(status))
++      return status;
+ 
+-   NTSTATUS status = gpu->cb.render(&render);
++   /* The kernel may rotate the buffers each call; pick up the new pointers
++    * so the next render targets the current backing. */
++   if (!new_cmd_buf || new_cmd_size < sizeof(VIOGPU_COMMAND_HDR) ||
++       !new_alloc_list || !new_alloc_size ||
++       !new_patch_list || !new_patch_size) {
++      npt_log("virtgpu: render returned incomplete replacement buffers");
++      gpu->cmd_buf = NULL;
++      gpu->cmd_size = 0;
++      gpu->alloc_list = NULL;
++      gpu->alloc_size = 0;
++      gpu->patch_list = NULL;
++      gpu->patch_size = 0;
++      return STATUS_INVALID_PARAMETER;
++   }
+ 
+-   /* The kernel may rotate the buffers each call; pick up the new
+-    * pointers so the next render targets the current backing. */
+-   gpu->cmd_buf = render.pNewCommandBuffer;
+-   gpu->cmd_size = render.NewCommandBufferSize;
+-   gpu->alloc_list = render.pNewAllocationList;
+-   gpu->alloc_size = render.NewAllocationListSize;
+-   gpu->patch_list = render.pNewPatchLocationList;
+-   gpu->patch_size = render.NewPatchLocationListSize;
++   gpu->cmd_buf = new_cmd_buf;
++   gpu->cmd_size = new_cmd_size;
++   gpu->alloc_list = new_alloc_list;
++   gpu->alloc_size = new_alloc_size;
++   gpu->patch_list = new_patch_list;
++   gpu->patch_size = new_patch_size;
+ 
+    return status;
+ }
+ 
++/* Submits a terminal private event packet on the current D3DKMT render
++ * stream.  viogpu3d references the handle in DxgkDdiRender, then signals its
++ * referenced PKEVENT only after all preceding host work retires. */
+ static NTSTATUS
+-virtgpu_signal_event(struct npt_virtgpu *gpu, HANDLE event)
+-{
+-   D3DKMT_SIGNALSYNCHRONIZATIONOBJECT2 signal = {
+-      .hContext = gpu->context,
+-      .ObjectCount = 0,
+-      .BroadcastContextCount = 0,
+-      .Flags = { .EnqueueCpuEvent = TRUE },
+-      .CpuEventHandle = event,
+-   };
+-   return gpu->cb.signalSynchronizationObject2(&signal);
++virtgpu_submit_render_event_locked(struct npt_virtgpu *gpu, HANDLE event)
++{
++   VIOGPU_SIGNAL_EVENT_CMD cmd = { .Event = VioGpuUmHandle(event) };
++   return virtgpu_send_cmd_locked(gpu, VIOGPU_CMD_SIGNAL_EVENT, 0, 0,
++                                  &cmd, sizeof(cmd), 0);
+ }
+ 
+-/* Submits a CPU-event signal on the current queue and blocks until the
+- * KMD scheduler retires it, draining any pending work. */
++/* Drain pending work without D3DKMTSignalSynchronizationObject2, which is
++ * unavailable on Vista.  A finite timeout turns reset/removal into a normal
++ * renderer failure instead of an unbounded compositor stall. */
+ static bool
+ virtgpu_drain(struct npt_virtgpu *gpu)
+ {
+-   HANDLE event = CreateEventA(NULL, TRUE, FALSE, NULL);
++   if (!virtgpu_has_context(gpu))
++      return false;
++
++   HANDLE event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!event)
+       return false;
+ 
+-   NTSTATUS status = virtgpu_signal_event(gpu, event);
++   EnterCriticalSection(&gpu->cs);
++   NTSTATUS status = virtgpu_submit_render_event_locked(gpu, event);
++   LeaveCriticalSection(&gpu->cs);
+    if (!NT_SUCCESS(status)) {
+-      npt_log("virtgpu drain: signal failed 0x%lx", status);
++      npt_log("virtgpu drain: render-event submit failed 0x%lx", status);
+       CloseHandle(event);
+       return false;
+    }
+-   DWORD wr = WaitForSingleObject(event, INFINITE);
++   DWORD wr = WaitForSingleObject(event, VIRTGPU_RENDER_EVENT_TIMEOUT_MS);
+    CloseHandle(event);
+    if (wr != WAIT_OBJECT_0) {
+-      npt_log("virtgpu drain: wait returned %lu", wr);
++      npt_log("virtgpu drain: render-event wait returned %lu (gle=%lu)",
++              wr, wr == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS);
++      return false;
++   }
++
++   /* ResetFromTimeout and device removal must wake the event so teardown does
++    * not strand DWM. A wake alone is therefore not proof of successful GPU
++    * retirement. D3DKMTGetDeviceState is present on Vista and distinguishes a
++    * normal completion from RESET/HUNG/STOPPED without changing the private
++    * event packet ABI. */
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   /* Vista has no device-state query in D3DDDI_DEVICECALLBACKS.  Reset and
++    * removal wake the private event, then the outer D3D9 runtime propagates
++    * the device-lost result on the next callback. */
++   if (gpu->use_runtime_ddi)
++      return true;
++#endif
++   D3DKMT_GETDEVICESTATE device_state = {
++      .hDevice = gpu->device,
++      .StateType = D3DKMT_DEVICESTATE_EXECUTION,
++   };
++   NTSTATUS state_status = gpu->cb.getDeviceState(&device_state);
++   if (!NT_SUCCESS(state_status) ||
++       device_state.ExecutionState != D3DKMT_DEVICEEXECUTION_ACTIVE) {
++      npt_log("virtgpu drain: device state query returned 0x%lx state=%u",
++              state_status, (unsigned)device_state.ExecutionState);
+       return false;
+    }
+    return true;
+@@ -153,6 +406,27 @@ virtgpu_drain(struct npt_virtgpu *gpu)
+ static NTSTATUS
+ virtgpu_escape(struct npt_virtgpu *gpu, VIOGPU_ESCAPE *priv)
+ {
++   if (!gpu || !priv)
++      return STATUS_INVALID_PARAMETER;
++
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi) {
++      if (!gpu->device_callbacks.pfnEscapeCb || !gpu->h_rt_adapter ||
++          !gpu->h_rt_device)
++         return STATUS_INVALID_PARAMETER;
++      D3DDDICB_ESCAPE escape = {
++         .hDevice = gpu->h_rt_device,
++         .pPrivateDriverData = priv,
++         .PrivateDriverDataSize = sizeof(*priv),
++         .hContext = gpu->h_ddi_context,
++      };
++      return virtgpu_status_from_hresult(
++         gpu->device_callbacks.pfnEscapeCb(gpu->h_rt_adapter, &escape));
++   }
++#endif
++   if (!gpu->cb.escape || !gpu->adapter || !gpu->device)
++      return STATUS_INVALID_PARAMETER;
++
+    D3DKMT_ESCAPE escape = {
+       .hAdapter = gpu->adapter,
+       .hDevice = gpu->device,
+@@ -183,6 +457,25 @@ static NTSTATUS
+ virtgpu_query_adapter_info(struct npt_virtgpu *gpu, void *priv,
+                            UINT priv_size)
+ {
++   if (!gpu || !priv || !priv_size)
++      return STATUS_INVALID_PARAMETER;
++
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi) {
++      if (!gpu->adapter_callbacks.pfnQueryAdapterInfoCb || !gpu->h_rt_adapter)
++         return STATUS_INVALID_PARAMETER;
++      D3DDDICB_QUERYADAPTERINFO query = {
++         .pPrivateDriverData = priv,
++         .PrivateDriverDataSize = priv_size,
++      };
++      return virtgpu_status_from_hresult(
++         gpu->adapter_callbacks.pfnQueryAdapterInfoCb(gpu->h_rt_adapter,
++                                                       &query));
++   }
++#endif
++   if (!gpu->cb.queryAdapterInfo || !gpu->adapter)
++      return STATUS_INVALID_PARAMETER;
++
+    D3DKMT_QUERYADAPTERINFO query = {
+       .hAdapter = gpu->adapter,
+       .Type = KMTQAITYPE_UMDRIVERPRIVATE,
+@@ -199,8 +492,17 @@ virtgpu_send_cmd_locked(struct npt_virtgpu *gpu, UINT type, UINT flags,
+                         UINT ring_idx, const void *payload, size_t payload_size,
+                         UINT alloc_count)
+ {
++   if (!gpu || !virtgpu_has_context(gpu) || !gpu->cmd_buf ||
++       gpu->cmd_size < sizeof(VIOGPU_COMMAND_HDR) ||
++       payload_size > UINT_MAX ||
++       payload_size > SIZE_MAX - sizeof(VIOGPU_COMMAND_HDR) ||
++       (payload_size && !payload) ||
++       alloc_count > gpu->alloc_size || alloc_count > gpu->patch_size ||
++       (alloc_count && (!gpu->alloc_list || !gpu->patch_list)))
++      return STATUS_INVALID_PARAMETER;
++
+    const size_t total = sizeof(VIOGPU_COMMAND_HDR) + payload_size;
+-   if (total > gpu->cmd_size) {
++   if (total > UINT_MAX || total > gpu->cmd_size) {
+       npt_log("virtgpu: cmd %u too large for kernel buffer (%zu > %u)",
+               type, total, gpu->cmd_size);
+       return STATUS_BUFFER_TOO_SMALL;
+@@ -212,7 +514,7 @@ virtgpu_send_cmd_locked(struct npt_virtgpu *gpu, UINT type, UINT flags,
+    hdr->flags = flags;
+    hdr->ring_idx = ring_idx;
+ 
+-   if (payload_size && payload)
++   if (payload_size)
+       memcpy(hdr + 1, payload, payload_size);
+ 
+    return virtgpu_render(gpu, 0, (UINT)total, alloc_count);
+@@ -223,7 +525,19 @@ virtgpu_send_cmd_locked(struct npt_virtgpu *gpu, UINT type, UINT flags,
+ static NTSTATUS
+ virtgpu_map_blob_op(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc, UINT type)
+ {
++   if (!gpu || !alloc ||
++       (type != VIOGPU_CMD_MAP_BLOB && type != VIOGPU_CMD_UNMAP_BLOB))
++      return STATUS_INVALID_PARAMETER;
++
+    EnterCriticalSection(&gpu->cs);
++   if (!gpu->alloc_list || !gpu->patch_list ||
++       gpu->alloc_size < 1 || gpu->patch_size < 1) {
++      LeaveCriticalSection(&gpu->cs);
++      return STATUS_INVALID_PARAMETER;
++   }
++
++   memset(&gpu->alloc_list[0], 0, sizeof(gpu->alloc_list[0]));
++   memset(&gpu->patch_list[0], 0, sizeof(gpu->patch_list[0]));
+    gpu->alloc_list[0].hAllocation = alloc;
+    gpu->patch_list[0].AllocationIndex = 0;
+ 
+@@ -240,6 +554,33 @@ virtgpu_map_blob_op(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc, UINT type)
+ static NTSTATUS
+ virtgpu_lock(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc, void **out_ptr)
+ {
++   if (!gpu || !alloc || !out_ptr)
++      return STATUS_INVALID_PARAMETER;
++   *out_ptr = NULL;
++
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi) {
++      if (!gpu->device_callbacks.pfnLockCb || !gpu->h_rt_device)
++         return STATUS_INVALID_PARAMETER;
++      D3DDDICB_LOCK lock = {
++         .hAllocation = alloc,
++         .Flags = { .LockEntire = 1 },
++      };
++      NTSTATUS status = virtgpu_status_from_hresult(
++         gpu->device_callbacks.pfnLockCb(gpu->h_rt_device, &lock));
++      if (!NT_SUCCESS(status))
++         return status;
++      if (!lock.pData) {
++         virtgpu_unlock(gpu, alloc);
++         return STATUS_INVALID_PARAMETER;
++      }
++      *out_ptr = lock.pData;
++      return STATUS_SUCCESS;
++   }
++#endif
++   if (!gpu->cb.lock || !gpu->device)
++      return STATUS_INVALID_PARAMETER;
++
+    D3DKMT_LOCK lock = {
+       .hDevice = gpu->device,
+       .hAllocation = alloc,
+@@ -248,6 +589,10 @@ virtgpu_lock(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc, void **out_ptr)
+    NTSTATUS status = gpu->cb.lock(&lock);
+    if (!NT_SUCCESS(status))
+       return status;
++   if (!lock.pData) {
++      virtgpu_unlock(gpu, alloc);
++      return STATUS_INVALID_PARAMETER;
++   }
+    *out_ptr = lock.pData;
+    return STATUS_SUCCESS;
+ }
+@@ -255,6 +600,24 @@ virtgpu_lock(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc, void **out_ptr)
+ static NTSTATUS
+ virtgpu_unlock(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc)
+ {
++   if (!gpu || !alloc)
++      return STATUS_INVALID_PARAMETER;
++
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi) {
++      if (!gpu->device_callbacks.pfnUnlockCb || !gpu->h_rt_device)
++         return STATUS_INVALID_PARAMETER;
++      D3DDDICB_UNLOCK unlock = {
++         .NumAllocations = 1,
++         .phAllocations = &alloc,
++      };
++      return virtgpu_status_from_hresult(
++         gpu->device_callbacks.pfnUnlockCb(gpu->h_rt_device, &unlock));
++   }
++#endif
++   if (!gpu->cb.unlock || !gpu->device)
++      return STATUS_INVALID_PARAMETER;
++
+    D3DKMT_UNLOCK unlock = {
+       .hDevice = gpu->device,
+       .NumAllocations = 1,
+@@ -266,6 +629,59 @@ virtgpu_unlock(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc)
+ static NTSTATUS
+ virtgpu_resource_destroy_blob(struct npt_virtgpu *gpu,
+                              D3DKMT_HANDLE alloc, D3DKMT_HANDLE res_kmt);
++bool npt_vgw32_release_import_res_checked(struct npt_renderer *renderer,
++                                          uint32_t alloc, uint32_t res_kmt);
++
++static NTSTATUS
++virtgpu_create_allocation(struct npt_virtgpu *gpu,
++                          VIOGPU_CREATE_RESOURCE_EXCHANGE *res_priv,
++                          D3DDDI_ALLOCATIONINFO *alloc_info,
++                          bool is_shareable,
++                          D3DKMT_HANDLE *out_res_kmt)
++{
++   if (!gpu || !res_priv || !alloc_info || !out_res_kmt)
++      return STATUS_INVALID_PARAMETER;
++
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi) {
++      if (!gpu->device_callbacks.pfnAllocateCb || !gpu->h_rt_device)
++         return STATUS_INVALID_PARAMETER;
++      /* These are Neptune transport allocations, not D3D9 API resources.
++       * A NULL runtime-resource handle asks dxgkrnl to create a driver-private
++       * resource on the already-open D3D9 device. */
++      D3DDDICB_ALLOCATE alloc = {
++         .pPrivateDriverData = res_priv,
++         .PrivateDriverDataSize = sizeof(*res_priv),
++         .hResource = NULL,
++         .NumAllocations = 1,
++         .pAllocationInfo = alloc_info,
++      };
++      NTSTATUS status = virtgpu_status_from_hresult(
++         gpu->device_callbacks.pfnAllocateCb(gpu->h_rt_device, &alloc));
++      if (NT_SUCCESS(status))
++         *out_res_kmt = alloc.hKMResource;
++      return status;
++   }
++#endif
++
++   if (!gpu->cb.createAllocation || !gpu->device)
++      return STATUS_INVALID_PARAMETER;
++   D3DKMT_CREATEALLOCATION alloc = {
++      .hDevice = gpu->device,
++      .pPrivateDriverData = res_priv,
++      .PrivateDriverDataSize = sizeof(*res_priv),
++      .NumAllocations = 1,
++      .pAllocationInfo = alloc_info,
++      .Flags = {
++         .CreateResource = 1,
++         .CreateShared = is_shareable,
++      },
++   };
++   NTSTATUS status = gpu->cb.createAllocation(&alloc);
++   if (NT_SUCCESS(status))
++      *out_res_kmt = alloc.hResource;
++   return status;
++}
+ 
+ /* Create a virtio blob via D3DKMTCreateAllocation, look up the host
+  * res_id via the RES_INFO escape, and (for mappable blobs) issue the
+@@ -279,7 +695,19 @@ virtgpu_resource_create_blob(struct npt_virtgpu *gpu, uint32_t blob_mem,
+                              D3DKMT_HANDLE *out_alloc,
+                              D3DKMT_HANDLE *out_res_kmt)
+ {
+-   blob_size = (size_t)npt_align64(blob_size, 4096);
++   if (!gpu || !out_res_id || !out_alloc || !out_res_kmt)
++      return STATUS_INVALID_PARAMETER;
++
++   *out_res_id = 0;
++   *out_alloc = 0;
++   *out_res_kmt = 0;
++
++   uint64_t aligned_size = 0;
++   if (!blob_size ||
++       !npt_align64_checked((uint64_t)blob_size, 4096, &aligned_size) ||
++       aligned_size > (uint64_t)SIZE_MAX)
++      return STATUS_INVALID_PARAMETER;
++   blob_size = (size_t)aligned_size;
+ 
+    VIOGPU_CREATE_ALLOCATION_EXCHANGE alloc_priv = {
+       .Type = VIOGPU_RESOURCE_TYPE_BLOB,
+@@ -302,25 +730,18 @@ virtgpu_resource_create_blob(struct npt_virtgpu *gpu, uint32_t blob_mem,
+    if (!virtgpu_drain(gpu))
+       return STATUS_UNSUCCESSFUL;
+ 
+-   D3DKMT_CREATEALLOCATION alloc = {
+-      .hDevice = gpu->device,
+-      .pPrivateDriverData = &res_priv,
+-      .PrivateDriverDataSize = sizeof(res_priv),
+-      .NumAllocations = 1,
+-      .pAllocationInfo = &alloc_info,
+-      .Flags = {
+-         .CreateResource = 1,
+-         .CreateShared = is_shareable,
+-      },
+-   };
+-   NTSTATUS status = gpu->cb.createAllocation(&alloc);
++   NTSTATUS status = virtgpu_create_allocation(gpu, &res_priv, &alloc_info,
++                                                is_shareable, out_res_kmt);
+    if (!NT_SUCCESS(status)) {
+-      npt_log("virtgpu: D3DKMTCreateAllocation failed 0x%lx", status);
++      npt_log("virtgpu: create allocation failed 0x%lx", status);
+       return status;
+    }
+ 
++   if (!alloc_info.hAllocation) {
++      npt_log("virtgpu: allocation callback returned no allocation handle");
++      return STATUS_UNSUCCESSFUL;
++   }
+    *out_alloc = alloc_info.hAllocation;
+-   *out_res_kmt = alloc.hResource;
+ 
+    if (!virtgpu_drain(gpu)) {
+       status = STATUS_UNSUCCESSFUL;
+@@ -337,7 +758,8 @@ virtgpu_resource_create_blob(struct npt_virtgpu *gpu, uint32_t blob_mem,
+       npt_log("virtgpu: RES_INFO escape failed 0x%lx", status);
+       goto fail_destroy;
+    }
+-   if (!res_info.ResourceInfo.IsBlob || !res_info.ResourceInfo.IsCreated) {
++   if (!res_info.ResourceInfo.IsBlob || !res_info.ResourceInfo.IsCreated ||
++       !res_info.ResourceInfo.Id) {
+       npt_log("virtgpu: RES_INFO reports blob not created");
+       status = STATUS_INVALID_PARAMETER;
+       goto fail_destroy;
+@@ -362,21 +784,80 @@ static NTSTATUS
+ virtgpu_resource_destroy_blob(struct npt_virtgpu *gpu,
+                               D3DKMT_HANDLE alloc, D3DKMT_HANDLE res_kmt)
+ {
+-   if (!virtgpu_drain(gpu))
++   if (!gpu || (!alloc && !res_kmt))
++      return STATUS_INVALID_PARAMETER;
++
++   if (!virtgpu_drain(gpu)) {
++      /* The host can still reference this allocation.  Preserve it rather
++       * than turning an unproven drain into a use-after-free. */
++      npt_log("virtgpu: pre-destroy drain failed; allocation preserved");
+       return STATUS_UNSUCCESSFUL;
++   }
+ 
+-   D3DKMT_DESTROYALLOCATION destroy = {
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   NTSTATUS status;
++   if (gpu->use_runtime_ddi) {
++      if (!gpu->device_callbacks.pfnDeallocateCb || !gpu->h_rt_device)
++         return STATUS_INVALID_PARAMETER;
++      D3DDDICB_DEALLOCATE destroy = {
++         .hResource = NULL,
++         .NumAllocations = 1,
++         .HandleList = &alloc,
++      };
++      status = virtgpu_status_from_hresult(
++         gpu->device_callbacks.pfnDeallocateCb(gpu->h_rt_device, &destroy));
++   } else
++#endif
++   {
++      if (!gpu->cb.destroyAllocation || !gpu->device)
++         return STATUS_INVALID_PARAMETER;
++      D3DKMT_DESTROYALLOCATION destroy = {
+       .hDevice = gpu->device,
+       .hResource = res_kmt,
+       .AllocationCount = res_kmt == 0 ? 1 : 0,
+       .phAllocationList = res_kmt == 0 ? &alloc : NULL,
+-   };
+-   NTSTATUS status = gpu->cb.destroyAllocation(&destroy);
++      };
++      status = gpu->cb.destroyAllocation(&destroy);
++   }
+    if (!NT_SUCCESS(status)) {
+       npt_log("virtgpu: D3DKMTDestroyAllocation failed 0x%lx", status);
+       return status;
+    }
+-   return virtgpu_drain(gpu) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
++   /* A successful WDDM deallocation callback ends this UMD's ownership.  The
++    * pre-destroy drain already retired every user of the allocation.  A second
++    * drain would create an ambiguous result: failure after successful
++    * deallocation cannot be retried without double-destroying the handle. */
++   return STATUS_SUCCESS;
++}
++
++/* Clean up a mapped transport blob in strict lifetime order.  If any step
++ * fails, keep the remaining backing alive because the host or dxgkrnl can
++ * still reference it. */
++static void
++virtgpu_cleanup_mapped_blob(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc,
++                            D3DKMT_HANDLE res_kmt, bool is_locked)
++{
++   NTSTATUS status;
++
++   if (!gpu || !alloc)
++      return;
++   if (is_locked) {
++      status = virtgpu_unlock(gpu, alloc);
++      if (!NT_SUCCESS(status)) {
++         npt_log("virtgpu: cleanup unlock failed 0x%lx; backing preserved",
++                 status);
++         return;
++      }
++   }
++   status = virtgpu_map_blob_op(gpu, alloc, VIOGPU_CMD_UNMAP_BLOB);
++   if (!NT_SUCCESS(status)) {
++      npt_log("virtgpu: cleanup unmap failed 0x%lx; backing preserved", status);
++      return;
++   }
++   status = virtgpu_resource_destroy_blob(gpu, alloc, res_kmt);
++   if (!NT_SUCCESS(status))
++      npt_log("virtgpu: cleanup destroy failed 0x%lx; backing preserved",
++              status);
+ }
+ 
+ /* Attach an existing VM-global virtio resource to this transport
+@@ -389,12 +870,22 @@ npt_vgw32_import_res(struct npt_renderer *r, uint32_t res_id, uint64_t size,
+ {
+    struct npt_virtgpu *gpu = (struct npt_virtgpu *)r;
+ 
++   if (!gpu || !res_id || !out_alloc || !out_res_kmt)
++      return false;
++   *out_alloc = 0;
++   *out_res_kmt = 0;
++
++   uint64_t aligned_size = 0;
++   if (!npt_align64_checked(size ? size : 4096, 4096, &aligned_size) ||
++       aligned_size > (uint64_t)SIZE_MAX)
++      return false;
++
+    VIOGPU_CREATE_ALLOCATION_EXCHANGE alloc_priv = {
+       .Type = VIOGPU_RESOURCE_TYPE_IMPORT,
+       .OptionsImport = {
+          .res_id = res_id,
+       },
+-      .Size = npt_align64(size ? size : 4096, 4096),
++      .Size = aligned_size,
+    };
+    VIOGPU_CREATE_RESOURCE_EXCHANGE res_priv = { 0 };
+    D3DDDI_ALLOCATIONINFO alloc_info = {
+@@ -405,44 +896,57 @@ npt_vgw32_import_res(struct npt_renderer *r, uint32_t res_id, uint64_t size,
+    if (!virtgpu_drain(gpu))
+       return false;
+ 
+-   D3DKMT_CREATEALLOCATION alloc = {
+-      .hDevice = gpu->device,
+-      .pPrivateDriverData = &res_priv,
+-      .PrivateDriverDataSize = sizeof(res_priv),
+-      .NumAllocations = 1,
+-      .pAllocationInfo = &alloc_info,
+-      .Flags = {
+-         .CreateResource = 1,
+-      },
+-   };
+-   NTSTATUS status = gpu->cb.createAllocation(&alloc);
++   NTSTATUS status = virtgpu_create_allocation(gpu, &res_priv, &alloc_info,
++                                                false, out_res_kmt);
+    if (!NT_SUCCESS(status)) {
+       npt_log("virtgpu: import_res res_id=%u failed 0x%lx", res_id, status);
+       return false;
+    }
+ 
++   if (!alloc_info.hAllocation) {
++      npt_log("virtgpu: import_res returned no allocation handle");
++      return false;
++   }
+    *out_alloc = alloc_info.hAllocation;
+-   *out_res_kmt = alloc.hResource;
+ 
+    /* Flush so the KMD's CTX_ATTACH_RESOURCE reaches the host before
+     * the caller's ring command names the resource. */
+-   if (!virtgpu_drain(gpu))
++   if (!virtgpu_drain(gpu)) {
+       npt_log("virtgpu: import_res res_id=%u post-drain failed", res_id);
++      virtgpu_resource_destroy_blob(gpu, alloc_info.hAllocation,
++                                    *out_res_kmt);
++      *out_alloc = 0;
++      *out_res_kmt = 0;
++      return false;
++   }
+ 
+    npt_log("virtgpu: import_res res_id=%u alloc=0x%x", res_id,
+            alloc_info.hAllocation);
+    return true;
+ }
+ 
+-static void
+-npt_vgw32_release_import_res(struct npt_renderer *r, uint32_t alloc,
+-                             uint32_t res_kmt)
++bool
++npt_vgw32_release_import_res_checked(struct npt_renderer *r, uint32_t alloc,
++                                     uint32_t res_kmt)
+ {
+    struct npt_virtgpu *gpu = (struct npt_virtgpu *)r;
+    if (!alloc && !res_kmt)
+-      return;
+-   virtgpu_resource_destroy_blob(gpu, (D3DKMT_HANDLE)alloc,
+-                                 (D3DKMT_HANDLE)res_kmt);
++      return true;
++   NTSTATUS status = virtgpu_resource_destroy_blob(gpu, (D3DKMT_HANDLE)alloc,
++                                                   (D3DKMT_HANDLE)res_kmt);
++   if (!NT_SUCCESS(status)) {
++      npt_log("virtgpu: import release failed 0x%lx; allocation preserved",
++              status);
++      return false;
++   }
++   return true;
++}
++
++static bool
++npt_vgw32_release_import_res(struct npt_renderer *r, uint32_t alloc,
++                             uint32_t res_kmt)
++{
++   return npt_vgw32_release_import_res_checked(r, alloc, res_kmt);
+ }
+ 
+ static struct npt_renderer_shmem *
+@@ -450,7 +954,12 @@ npt_vgw32_shmem_create(struct npt_renderer *r, size_t size)
+ {
+    struct npt_virtgpu *gpu = (struct npt_virtgpu *)r;
+ 
+-   const size_t alloc_size = (size_t)npt_align64(size, 4096);
++   uint64_t aligned_size = 0;
++   if (!gpu || !size ||
++       !npt_align64_checked((uint64_t)size, 4096, &aligned_size) ||
++       aligned_size > (uint64_t)SIZE_MAX)
++      return NULL;
++   const size_t alloc_size = (size_t)aligned_size;
+ 
+    D3DKMT_HANDLE alloc = 0, res_kmt = 0;
+    uint32_t res_id = 0;
+@@ -465,16 +974,13 @@ npt_vgw32_shmem_create(struct npt_renderer *r, size_t size)
+    status = virtgpu_lock(gpu, alloc, &ptr);
+    if (!NT_SUCCESS(status)) {
+       npt_log("virtgpu: lock failed 0x%lx", status);
+-      virtgpu_map_blob_op(gpu, alloc, VIOGPU_CMD_UNMAP_BLOB);
+-      virtgpu_resource_destroy_blob(gpu, alloc, res_kmt);
++      virtgpu_cleanup_mapped_blob(gpu, alloc, res_kmt, false);
+       return NULL;
+    }
+ 
+    struct npt_virtgpu_shmem *s = npt_alloc(sizeof(*s));
+    if (!s) {
+-      virtgpu_unlock(gpu, alloc);
+-      virtgpu_map_blob_op(gpu, alloc, VIOGPU_CMD_UNMAP_BLOB);
+-      virtgpu_resource_destroy_blob(gpu, alloc, res_kmt);
++      virtgpu_cleanup_mapped_blob(gpu, alloc, res_kmt, true);
+       return NULL;
+    }
+    npt_refcount_init(&s->base.refcount);
+@@ -494,9 +1000,21 @@ npt_vgw32_shmem_destroy(struct npt_renderer *r, struct npt_renderer_shmem *_s)
+    if (!s)
+       return;
+ 
+-   virtgpu_unlock(gpu, s->alloc);
+-   virtgpu_map_blob_op(gpu, s->alloc, VIOGPU_CMD_UNMAP_BLOB);
+-   virtgpu_resource_destroy_blob(gpu, s->alloc, s->res_kmt);
++   NTSTATUS status = virtgpu_unlock(gpu, s->alloc);
++   if (!NT_SUCCESS(status)) {
++      npt_log("virtgpu: shmem unlock failed 0x%lx; backing preserved", status);
++      return;
++   }
++   status = virtgpu_map_blob_op(gpu, s->alloc, VIOGPU_CMD_UNMAP_BLOB);
++   if (!NT_SUCCESS(status)) {
++      npt_log("virtgpu: shmem unmap failed 0x%lx; backing preserved", status);
++      return;
++   }
++   status = virtgpu_resource_destroy_blob(gpu, s->alloc, s->res_kmt);
++   if (!NT_SUCCESS(status)) {
++      npt_log("virtgpu: shmem destroy failed 0x%lx; wrapper preserved", status);
++      return;
++   }
+    free(s);
+ }
+ 
+@@ -524,7 +1042,10 @@ npt_vgw32_submit_cmd_sync(struct npt_renderer *r, const void *data,
+ {
+    struct npt_virtgpu *gpu = (struct npt_virtgpu *)r;
+ 
+-   if (!npt_vgw32_submit_cmd(r, data, size))
++   /* A drain-only call submits its own terminal D3DKMT event packet. */
++   if (size && !npt_vgw32_submit_cmd(r, data, size))
++      return false;
++   if (!size && data)
+       return false;
+ 
+    return virtgpu_drain(gpu);
+@@ -546,6 +1067,11 @@ npt_vgw32_submit_present_fence(struct npt_renderer *r, uint32_t ring_idx)
+    HANDLE hWait = CreateEventW(NULL, /*bManualReset*/ FALSE, /*bInitial*/ FALSE, NULL);
+    if (!hWait)
+       return -1;
++   if ((uintptr_t)hWait > (uintptr_t)INT_MAX) {
++      npt_log("virtgpu: present-fence handle cannot fit signed renderer ABI");
++      CloseHandle(hWait);
++      return -1;
++   }
+    VIOGPU_ESCAPE esc = {
+       .Type = VIOGPU_SUBMIT_PRESENT_FENCE,
+       .DataLength = sizeof(esc.PresentFence),
+@@ -557,25 +1083,48 @@ npt_vgw32_submit_present_fence(struct npt_renderer *r, uint32_t ring_idx)
+       CloseHandle(hWait);
+       return -1;
+    }
+-   return (int)(intptr_t)hWait;
++   return (int)(uintptr_t)hWait;
+ }
+ 
+ static void
+ npt_vgw32_destroy(struct npt_renderer *r)
+ {
+    struct npt_virtgpu *gpu = (struct npt_virtgpu *)r;
++   if (!gpu)
++      return;
++
++   if (virtgpu_has_context(gpu) && !virtgpu_drain(gpu))
++      npt_log("virtgpu: final drain failed during renderer teardown");
+ 
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi && gpu->h_ddi_context &&
++       gpu->device_callbacks.pfnDestroyContextCb) {
++      D3DDDICB_DESTROYCONTEXT destroy = { .hContext = gpu->h_ddi_context };
++      NTSTATUS status = virtgpu_status_from_hresult(
++         gpu->device_callbacks.pfnDestroyContextCb(gpu->h_rt_device,
++                                                    &destroy));
++      if (!NT_SUCCESS(status))
++         npt_log("virtgpu: runtime DestroyContextCb failed 0x%lx", status);
++      gpu->h_ddi_context = NULL;
++   }
++#endif
+    if (gpu->context && gpu->cb.destroyContext) {
+       D3DKMT_DESTROYCONTEXT destroy = { .hContext = gpu->context };
+-      gpu->cb.destroyContext(&destroy);
++      NTSTATUS status = gpu->cb.destroyContext(&destroy);
++      if (!NT_SUCCESS(status))
++         npt_log("virtgpu: D3DKMTDestroyContext failed 0x%lx", status);
+    }
+    if (gpu->device && gpu->cb.destroyDevice) {
+       D3DKMT_DESTROYDEVICE destroy = { .hDevice = gpu->device };
+-      gpu->cb.destroyDevice(&destroy);
++      NTSTATUS status = gpu->cb.destroyDevice(&destroy);
++      if (!NT_SUCCESS(status))
++         npt_log("virtgpu: D3DKMTDestroyDevice failed 0x%lx", status);
+    }
+    if (gpu->adapter && gpu->cb.closeAdapter) {
+       D3DKMT_CLOSEADAPTER close = { .hAdapter = gpu->adapter };
+-      gpu->cb.closeAdapter(&close);
++      NTSTATUS status = gpu->cb.closeAdapter(&close);
++      if (!NT_SUCCESS(status))
++         npt_log("virtgpu: D3DKMTCloseAdapter failed 0x%lx", status);
+    }
+    if (gpu->gdi32)
+       FreeLibrary(gpu->gdi32);
+@@ -599,7 +1148,6 @@ virtgpu_load_d3dkmt(struct npt_virtgpu *gpu)
+    GETPROC(queryAdapterInfo, QueryAdapterInfo);
+    GETPROC(escape, Escape);
+    GETPROC(render, Render);
+-   GETPROC(signalSynchronizationObject2, SignalSynchronizationObject2);
+    GETPROC(createContext, CreateContext);
+    GETPROC(destroyContext, DestroyContext);
+    GETPROC(createAllocation, CreateAllocation);
+@@ -608,16 +1156,19 @@ virtgpu_load_d3dkmt(struct npt_virtgpu *gpu)
+    GETPROC(unlock, Unlock);
+    GETPROC(createDevice, CreateDevice);
+    GETPROC(destroyDevice, DestroyDevice);
++   GETPROC(getDeviceState, GetDeviceState);
+    GETPROC(openAdapterFromHdc, OpenAdapterFromHdc);
+    GETPROC(closeAdapter, CloseAdapter);
+ 
+ #undef GETPROC
+ 
+    if (!gpu->cb.queryAdapterInfo || !gpu->cb.escape || !gpu->cb.render ||
+-       !gpu->cb.signalSynchronizationObject2 || !gpu->cb.createContext ||
++       !gpu->cb.createContext || !gpu->cb.destroyContext ||
+        !gpu->cb.createAllocation || !gpu->cb.destroyAllocation ||
+        !gpu->cb.lock || !gpu->cb.unlock || !gpu->cb.createDevice ||
+-       !gpu->cb.openAdapterFromHdc || !gpu->cb.closeAdapter) {
++       !gpu->cb.destroyDevice || !gpu->cb.getDeviceState ||
++       !gpu->cb.openAdapterFromHdc ||
++       !gpu->cb.closeAdapter) {
+       npt_log("virtgpu: GDI32 missing required D3DKMT entry points");
+       return false;
+    }
+@@ -627,15 +1178,19 @@ virtgpu_load_d3dkmt(struct npt_virtgpu *gpu)
+ static bool
+ virtgpu_find_adapter(struct npt_virtgpu *gpu)
+ {
+-   DISPLAY_DEVICEA dev = { .cb = sizeof(dev) };
++   if (!gpu)
++      return false;
+ 
+-   for (DWORD i = 0; EnumDisplayDevicesA(NULL, i, (DISPLAY_DEVICE *)&dev, 0);
+-        i++) {
+-      if (_strnicmp(dev.DeviceID, VIRTGPU_WIN_DEVICE_ID,
+-                    strlen(VIRTGPU_WIN_DEVICE_ID)) != 0)
++   for (DWORD i = 0;; i++) {
++      DISPLAY_DEVICEA dev;
++      memset(&dev, 0, sizeof(dev));
++      dev.cb = sizeof(dev);
++      if (!EnumDisplayDevicesA(NULL, i, &dev, 0))
++         break;
++      if (!dev.DeviceName[0])
+          continue;
+ 
+-      HDC hdc = CreateDCA(NULL, dev.DeviceName, NULL, NULL);
++      HDC hdc = CreateDCA("DISPLAY", dev.DeviceName, NULL, NULL);
+       if (!hdc) {
+          npt_log("virtgpu: CreateDC failed for %s", dev.DeviceName);
+          continue;
+@@ -650,12 +1205,30 @@ virtgpu_find_adapter(struct npt_virtgpu *gpu)
+       }
+       gpu->adapter = open.hAdapter;
+       gpu->luid = open.AdapterLuid;
++
++      /* Vista does not reliably populate DISPLAY_DEVICE.DeviceID for every
++       * display adapter.  Identify Triton through its private KMD ABI after
++       * opening the HDC instead of rejecting the correct adapter on an empty
++       * or vendor-rewritten PnP string. */
++      VIOGPU_ADAPTERINFO info = { 0 };
++      status = virtgpu_query_adapter_info(gpu, &info, sizeof(info));
++      if (!NT_SUCCESS(status) || info.IamVioGPU != VIOGPU_IAM ||
++          !info.Flags.Supports3d) {
++         D3DKMT_CLOSEADAPTER close = { .hAdapter = gpu->adapter };
++         NTSTATUS close_status = gpu->cb.closeAdapter(&close);
++         if (!NT_SUCCESS(close_status))
++            npt_log("virtgpu: CloseAdapter failed 0x%lx for %s",
++                    close_status, dev.DeviceName);
++         gpu->adapter = 0;
++         memset(&gpu->luid, 0, sizeof(gpu->luid));
++         continue;
++      }
+       npt_debug("virtgpu: opened adapter %s (LUID %lx-%lx)",
+                 dev.DeviceName, open.AdapterLuid.HighPart,
+                 open.AdapterLuid.LowPart);
+       return true;
+    }
+-   npt_log("virtgpu: no PCI device matching %s", VIRTGPU_WIN_DEVICE_ID);
++   npt_log("virtgpu: no display adapter exposes the Triton private ABI");
+    return false;
+ }
+ 
+@@ -675,15 +1248,65 @@ virtgpu_create_device(struct npt_virtgpu *gpu)
+ static bool
+ virtgpu_create_context(struct npt_virtgpu *gpu)
+ {
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (gpu->use_runtime_ddi) {
++      if (!gpu->device_callbacks.pfnCreateContextCb || !gpu->h_rt_device)
++         return false;
++      D3DDDICB_CREATECONTEXT create = { 0 };
++      NTSTATUS status = virtgpu_status_from_hresult(
++         gpu->device_callbacks.pfnCreateContextCb(gpu->h_rt_device, &create));
++      if (!NT_SUCCESS(status)) {
++         npt_log("virtgpu: runtime CreateContextCb failed 0x%lx", status);
++         return false;
++      }
++      if (!create.hContext || !create.pCommandBuffer ||
++          create.CommandBufferSize < sizeof(VIOGPU_COMMAND_HDR) ||
++          !create.pAllocationList || !create.AllocationListSize ||
++          !create.pPatchLocationList || !create.PatchLocationListSize) {
++         npt_log("virtgpu: runtime CreateContextCb returned incomplete buffers");
++         if (create.hContext && gpu->device_callbacks.pfnDestroyContextCb) {
++            D3DDDICB_DESTROYCONTEXT destroy = { .hContext = create.hContext };
++            HRESULT cleanup_hr = gpu->device_callbacks.pfnDestroyContextCb(
++               gpu->h_rt_device, &destroy);
++            if (FAILED(cleanup_hr))
++               npt_log("virtgpu: cleanup DestroyContextCb failed 0x%lx",
++                       cleanup_hr);
++         }
++         return false;
++      }
++      gpu->h_ddi_context = create.hContext;
++      gpu->cmd_buf = create.pCommandBuffer;
++      gpu->cmd_size = create.CommandBufferSize;
++      gpu->alloc_list = create.pAllocationList;
++      gpu->alloc_size = create.AllocationListSize;
++      gpu->patch_list = create.pPatchLocationList;
++      gpu->patch_size = create.PatchLocationListSize;
++      return true;
++   }
++#endif
++
+    D3DKMT_CREATECONTEXT create = {
+       .hDevice = gpu->device,
+-      .ClientHint = D3DKMT_CLIENTHINT_VULKAN,
++      .ClientHint = NPT_D3DKMT_CLIENT_HINT,
+    };
+    NTSTATUS status = gpu->cb.createContext(&create);
+    if (!NT_SUCCESS(status)) {
+       npt_log("virtgpu: D3DKMTCreateContext failed 0x%lx", status);
+       return false;
+    }
++   if (!create.hContext || !create.pCommandBuffer ||
++       create.CommandBufferSize < sizeof(VIOGPU_COMMAND_HDR) ||
++       !create.pAllocationList || !create.AllocationListSize ||
++       !create.pPatchLocationList || !create.PatchLocationListSize) {
++      npt_log("virtgpu: D3DKMTCreateContext returned incomplete buffers");
++      if (create.hContext) {
++         D3DKMT_DESTROYCONTEXT destroy = { .hContext = create.hContext };
++         status = gpu->cb.destroyContext(&destroy);
++         if (!NT_SUCCESS(status))
++            npt_log("virtgpu: cleanup DestroyContext failed 0x%lx", status);
++      }
++      return false;
++   }
+    gpu->context = create.hContext;
+    gpu->cmd_buf = create.pCommandBuffer;
+    gpu->cmd_size = create.CommandBufferSize;
+@@ -702,27 +1325,59 @@ npt_renderer_create_virtgpu(void)
+       return NULL;
+    InitializeCriticalSection(&gpu->cs);
+ 
++#if defined(NPT_D3D9_RUNTIME_DDI)
++   if (g_d3d9_runtime_binding.valid) {
++      gpu->use_runtime_ddi = true;
++      gpu->h_rt_adapter = g_d3d9_runtime_binding.h_rt_adapter;
++      gpu->h_rt_device = g_d3d9_runtime_binding.h_rt_device;
++      gpu->adapter_callbacks = g_d3d9_runtime_binding.adapter_callbacks;
++      gpu->device_callbacks = g_d3d9_runtime_binding.device_callbacks;
++   }
++   if (gpu->use_runtime_ddi) {
++      const UINT callback_mask = npt_d3d9_runtime_callback_mask(
++         &gpu->adapter_callbacks, &gpu->device_callbacks);
++      if ((callback_mask & NPT_D3D9_REQUIRED_CALLBACKS) !=
++          NPT_D3D9_REQUIRED_CALLBACKS) {
++         npt_log("virtgpu: D3D9 runtime callbacks incomplete interface=0x%x version=0x%x have=0x%03x need=0x%03x missing=0x%03x",
++                 g_d3d9_runtime_binding.interface_version,
++                 g_d3d9_runtime_binding.runtime_version, callback_mask,
++                 NPT_D3D9_REQUIRED_CALLBACKS,
++                 NPT_D3D9_REQUIRED_CALLBACKS & ~callback_mask);
++         goto fail;
++      }
++   } else
++#endif
++   {
+    if (!virtgpu_load_d3dkmt(gpu))
+       goto fail;
+    if (!virtgpu_find_adapter(gpu))
+       goto fail;
+    if (!virtgpu_create_device(gpu))
+       goto fail;
++   }
+ 
+-   VIOGPU_ADAPTERINFO info = { 0 };
++   VIOGPU_ADAPTERINFO_V2 info = { 0 };
+    NTSTATUS status = virtgpu_query_adapter_info(gpu, &info, sizeof(info));
+    if (!NT_SUCCESS(status)) {
+       npt_log("virtgpu: QueryAdapterInfo failed 0x%lx", status);
+       goto fail;
+    }
+-   if (info.IamVioGPU != VIOGPU_IAM || !info.Flags.Supports3d ||
+-       !info.Flags.HasShmem) {
+-      npt_log("virtgpu: KMD reports no 3D/shmem support (iam=0x%llx flags=0x%x)",
+-              (unsigned long long)info.IamVioGPU,
+-              *(unsigned *)&info.Flags);
++   if (info.V1.IamVioGPU != VIOGPU_IAM || !info.V1.Flags.Supports3d ||
++       !info.V1.Flags.HasShmem) {
++      npt_log("virtgpu: KMD reports no 3D/shmem support (iam=0x%llx 3d=%u shmem=%u)",
++              (unsigned long long)info.V1.IamVioGPU,
++              info.V1.Flags.Supports3d, info.V1.Flags.HasShmem);
++      goto fail;
++   }
++   if (info.StructureSize < sizeof(info) ||
++       info.PrivateAbiVersion < VIOGPU_PRIVATE_ABI_VERSION_V2 ||
++       !(info.FeatureBits & VIOGPU_FEATURE_RENDER_EVENT)) {
++      npt_log("virtgpu: KMD lacks required render-event ABI (size=%lu version=%lu features=0x%llx)",
++              info.StructureSize, info.PrivateAbiVersion,
++              (unsigned long long)info.FeatureBits);
+       goto fail;
+    }
+-   if (!(info.SupportedCapsetIDs & (1ull << NPT_CAPSET_ID))) {
++   if (!(info.V1.SupportedCapsetIDs & (1ull << NPT_CAPSET_ID))) {
+       npt_log("virtgpu: KMD does not advertise Neptune capset");
+       goto fail;
+    }
+diff --git a/src/virtio/neptune/npt_ring.c b/src/virtio/neptune/npt_ring.c
+index 243e12b..7655852 100644
+--- a/src/virtio/neptune/npt_ring.c
++++ b/src/virtio/neptune/npt_ring.c
+@@ -21,10 +21,10 @@
+ #include <cpuid.h> /* __cpuid: detect x86-on-non-x86 translators (FEX/TCG) */
+ #endif
+ 
+-static_assert(ATOMIC_INT_LOCK_FREE >= 1 && sizeof(atomic_uint) == 4,
+-              "npt_ring requires lock-free 32-bit atomic_uint");
++static_assert(ATOMIC_INT_LOCK_FREE == 2 && sizeof(atomic_uint) == 4,
++              "npt_ring requires always-lock-free 32-bit atomic_uint");
+ 
+-static void
++static bool
+ npt_ring_notify(struct npt_ring *ring);
+ 
+ #define NPT_RING_IDLE_TIMEOUT_NS (1000000) /* 1ms */
+@@ -42,6 +42,69 @@ npt_ring_notify(struct npt_ring *ring);
+ /* Grows on demand. */
+ #define NPT_RING_REPLY_POOL_MIN_SIZE (1u << 20)
+ 
++/* No guest caller can wait forever for a host that has failed or disappeared. */
++#define NPT_RING_WAIT_TIMEOUT_MS 15000u
++
++static uint64_t
++npt_ring_monotonic_ms(void)
++{
++#ifdef _WIN32
++   return (uint64_t)GetTickCount64();
++#else
++   return (uint64_t)(os_time_get_nano() / 1000000);
++#endif
++}
++
++static bool
++npt_ring_mark_failed(struct npt_ring *ring, const char *reason)
++{
++   if (!ring)
++      return false;
++   if (!atomic_exchange_explicit(&ring->failed, true, memory_order_acq_rel))
++      npt_log("ring %llu failed: %s", (unsigned long long)ring->id,
++              reason ? reason : "unknown transport failure");
++   return false;
++}
++
++static bool
++npt_ring_is_failed(struct npt_ring *ring)
++{
++   if (!ring)
++      return true;
++   if (atomic_load_explicit(&ring->failed, memory_order_acquire))
++      return true;
++   if (ring->status &&
++       (atomic_load_explicit(ring->status, memory_order_acquire) &
++        NPT_RING_STATUS_FATAL_BIT)) {
++      npt_ring_mark_failed(ring, "host reported fatal status");
++      return true;
++   }
++   return false;
++}
++
++bool
++npt_ring_is_healthy(struct npt_ring *ring)
++{
++   return !npt_ring_is_failed(ring);
++}
++
++/* A failed CREATE or DESTROY acknowledgement leaves the host's access to the
++ * shared mappings uncertain.  Leak those mappings, but remove and free the
++ * guest-only ring record so profile walks and later device teardown cannot
++ * dereference a stale renderer or device pointer. */
++static void
++npt_ring_abandon_local_record(struct npt_ring *ring)
++{
++   if (!ring)
++       return;
++   npt_profile_unregister_ring(ring);
++   /* Preserve every host-visible shmem reference, but retire both guest-only
++    * mutexes before freeing their containing record. */
++   mtx_destroy(&ring->reply_pool.mutex);
++   mtx_destroy(&ring->mutex);
++   free(ring);
++}
++
+ /*
+  * Whether an atomic read-modify-write works on the ring's write-combining
+  * shmem.  ARM LSE atomics (ldclral) take a Data Abort on WC / Normal
+@@ -152,11 +215,11 @@ npt_ring_relax(struct npt_ring *ring, uint32_t *iter)
+              * advances multiple call sites is observable. */
+             const uint32_t head =
+                atomic_load_explicit(ring->head, memory_order_acquire);
+-            const uint32_t tail =
++            const uint32_t published =
+                atomic_load_explicit(ring->tail, memory_order_acquire);
+-            npt_log("watchdog: ring %llu wedged after %u iters, head=%u tail=%u cur=%u "
++            npt_log("watchdog: ring %llu wedged after %u iters, head=%u tail=%u "
+                     "status=0x%x is_tls=%d",
+-                    (unsigned long long)ring->id, *iter, head, tail, ring->cur, status,
++                    (unsigned long long)ring->id, *iter, head, published, status,
+                     (int)ring->is_tls_ring);
+             ring->watchdog_misses = 0;
+          }
+@@ -250,18 +313,24 @@ npt_ring_has_space(const struct npt_ring *ring, uint32_t size)
+    return ring->cur + size - head <= ring->buffer_size;
+ }
+ 
+-static void
++static bool
+ npt_ring_wait_space(struct npt_ring *ring, uint32_t size)
+ {
+-   assert(size <= ring->buffer_size);
++   if (!ring || !size || size > ring->buffer_size || npt_ring_is_failed(ring))
++      return false;
+ 
+    if (likely(npt_ring_has_space(ring, size)))
+-      return;
++      return true;
+ 
+    /* Wait with adaptive backoff -- raw thrd_yield burns CPU when the
+     * host falls behind. */
+    uint32_t iter = 0;
++   const uint64_t start = npt_ring_monotonic_ms();
+    while (!npt_ring_has_space(ring, size)) {
++      if (npt_ring_is_failed(ring))
++         return false;
++      if (npt_ring_monotonic_ms() - start >= NPT_RING_WAIT_TIMEOUT_MS)
++         return npt_ring_mark_failed(ring, "wait for ring space timed out");
+       if (iter && (iter & 0x7fff) == 0) {
+          const uint32_t head =
+             atomic_load_explicit(ring->head, memory_order_acquire);
+@@ -274,6 +343,7 @@ npt_ring_wait_space(struct npt_ring *ring, uint32_t size)
+    }
+ 
+    npt_profile_record_full_wait(&ring->profile, iter);
++   return true;
+ }
+ 
+ /* Wrap-aware write of `size` bytes from `data` starting at `cur`.
+@@ -306,14 +376,14 @@ static bool
+ npt_ring_submit_locked(struct npt_ring *ring,
+                        const void *data, uint32_t size)
+ {
+-   npt_ring_wait_space(ring, size);
++   if (!ring || !data || !size || !npt_ring_wait_space(ring, size))
++      return false;
+    npt_ring_write_buffer(ring, data, size);
+    npt_ring_store_tail(ring);
+ 
+    const uint32_t status = npt_ring_load_status(ring);
+    if (unlikely(status & NPT_RING_STATUS_FATAL_BIT)) {
+-      npt_log("ring fatal error");
+-      return false;
++      return npt_ring_mark_failed(ring, "fatal status after submit");
+    }
+ 
+    if (status & NPT_RING_STATUS_IDLE_BIT) {
+@@ -322,10 +392,12 @@ npt_ring_submit_locked(struct npt_ring *ring,
+       if (os_time_timeout(ring->last_notify, ring->next_notify, now)) {
+          ring->last_notify = now;
+          ring->next_notify = now + NPT_RING_IDLE_TIMEOUT_NS;
+-         npt_ring_notify(ring);
++         if (!npt_ring_notify(ring))
++            return false;
+       }
+ #else
+-      npt_ring_notify(ring);
++      if (!npt_ring_notify(ring))
++         return false;
+ #endif
+    }
+ 
+@@ -346,12 +418,14 @@ npt_ring_submit_dispatch_locked(struct npt_ring *ring, const void *data,
+  * (holding it across long TLS-ring waits would serialize every other
+  * primary path and starve the watchdog) and re-acquire before return.
+  */
+-static void
++static bool
+ npt_ring_drain_peer_rings_unlocked(struct npt_ring *primary)
+ {
+    struct npt_device *dev = primary->device;
+    if (!dev || primary != dev->ring)
+-      return;
++      return true;
++
++   bool ok = true;
+ 
+    mtx_unlock(&primary->mutex);
+ 
+@@ -361,7 +435,7 @@ npt_ring_drain_peer_rings_unlocked(struct npt_ring *primary)
+       struct npt_ring *tr_ring =
+          atomic_load_explicit(&tr->ring, memory_order_acquire);
+       if (tr_ring && tr_ring != primary)
+-         npt_ring_wait_all(tr_ring);
++         ok = npt_ring_wait_all(tr_ring) && ok;
+       mtx_unlock(&tr->mutex);
+    }
+    mtx_unlock(&dev->tls_rings_mutex);
+@@ -370,25 +444,31 @@ npt_ring_drain_peer_rings_unlocked(struct npt_ring *primary)
+    list_for_each_entry(struct npt_ring, ir, &dev->instance_rings,
+                        instance_head) {
+       if (ir != primary)
+-         npt_ring_wait_all(ir);
++         ok = npt_ring_wait_all(ir) && ok;
+    }
+    mtx_unlock(&dev->instance_rings_mutex);
+ 
+    mtx_lock(&primary->mutex);
++   if (!ok)
++      return npt_ring_mark_failed(primary, "peer-ring drain failed");
++   return true;
+ }
+ 
+-void
++bool
+ npt_ring_send_com_release(struct npt_device *dev, uint64_t host_id)
+ {
+    if (!dev || !dev->ring || !host_id)
+-      return;
++      return false;
+ 
+    /* Drain peer rings before the release crosses the wire so an
+     * in-flight async use of host_id on a TLS / instance ring is
+     * fully observed by the host before the release. */
+    struct npt_ring *primary = dev->ring;
+    mtx_lock(&primary->mutex);
+-   npt_ring_drain_peer_rings_unlocked(primary);
++   if (!npt_ring_drain_peer_rings_unlocked(primary)) {
++      mtx_unlock(&primary->mutex);
++      return false;
++   }
+ 
+    struct npt_cmd_com_release cmd;
+    memset(&cmd, 0, sizeof(cmd));
+@@ -397,11 +477,12 @@ npt_ring_send_com_release(struct npt_device *dev, uint64_t host_id)
+                              NPT_TRANSPORT_COM_RELEASE);
+    cmd.header.cmd_size = sizeof(cmd);
+    cmd.header.object_id = host_id;
+-   npt_ring_submit_dispatch_locked(primary, &cmd, sizeof(cmd));
++   const bool ok = npt_ring_submit_dispatch_locked(primary, &cmd, sizeof(cmd));
+    mtx_unlock(&primary->mutex);
++   return ok;
+ }
+ 
+-static void
++static bool
+ npt_ring_notify(struct npt_ring *ring)
+ {
+    struct npt_cmd_notify_ring cmd;
+@@ -412,7 +493,9 @@ npt_ring_notify(struct npt_ring *ring)
+    cmd.ring_id = ring->id;
+ 
+    npt_profile_record_notify(&ring->profile);
+-   npt_renderer_submit_cmd(ring->renderer, &cmd, sizeof(cmd));
++   if (!npt_renderer_submit_cmd(ring->renderer, &cmd, sizeof(cmd)))
++      return npt_ring_mark_failed(ring, "ring notification submit failed");
++   return true;
+ }
+ 
+ static inline bool
+@@ -425,44 +508,57 @@ npt_ring_seqno_status(const struct npt_ring *ring, uint32_t seqno)
+     * invariant (head lags the write pointer by at most buffer_size):
+     * if the unsigned distance from seqno to cur is one buffer's
+     * worth, head has unconditionally passed it. */
+-   /* Relaxed read of a non-atomic field: volatile suppresses MSVC's
+-    * load-hoisting without requiring full atomic semantics. */
+-   const uint32_t cur = *(const volatile uint32_t *)&ring->cur;
+-   if ((uint32_t)(cur - seqno) >= ring->buffer_size)
++   /* The published atomic tail is the producer progress visible to peer
++    * threads.  Reading non-atomic cur here was a C data race. */
++   const uint32_t published =
++      atomic_load_explicit(ring->tail, memory_order_acquire);
++   if ((uint32_t)(published - seqno) >= ring->buffer_size)
+       return true;
+    return (int32_t)(npt_ring_load_head(ring) - seqno) >= 0;
+ }
+ 
+-void
++bool
+ npt_ring_wait_all(struct npt_ring *ring)
+ {
+-   /* Use ring->tail (acquire) not ring->cur to pick up any publish
+-    * from a peer under ring->mutex.  Pass NULL to npt_ring_relax to
+-    * disable the ALIVE watchdog: a deep host dispatch (batch of
+-    * draws) can legitimately blow past the 3-miss threshold, and the
+-    * submitter's own sync-reply wait still gets watchdog coverage. */
++   return npt_ring_wait_all_timeout(ring, NPT_RING_WAIT_TIMEOUT_MS);
++}
++
++bool
++npt_ring_wait_all_timeout(struct npt_ring *ring, uint32_t timeout_ms)
++{
++   if (!ring || !timeout_ms || npt_ring_is_failed(ring))
++      return false;
++
++   /* Snapshot the published tail.  Commands submitted after this point do
++    * not belong to this drain.  The caller serializes its own command stream
++    * before it takes this snapshot. */
+    const uint32_t target =
+       atomic_load_explicit(ring->tail, memory_order_acquire);
++   const uint64_t start = npt_ring_monotonic_ms();
+    uint32_t iter = 0;
++
+    while (!npt_ring_seqno_status(ring, target)) {
+       const uint32_t status = npt_ring_load_status(ring);
+-      if (status & NPT_RING_STATUS_FATAL_BIT)
+-         return;
+-      /* The watchdog is disabled on this wait, so report progress here
+-       * instead; a set IDLE bit while still stuck is the fingerprint of a
+-       * missed notify (host parked with work already published). */
+-      if (iter && (iter & 0x7fff) == 0) {
++      if (status & NPT_RING_STATUS_FATAL_BIT) {
++         npt_log("wait_all_timeout: ring %llu became fatal at target=%u",
++                 (unsigned long long)ring->id, target);
++         return npt_ring_mark_failed(ring, "fatal status during ring drain");
++      }
++      if ((npt_ring_monotonic_ms() - start) >= timeout_ms) {
+          const uint32_t head =
+             atomic_load_explicit(ring->head, memory_order_acquire);
+-         npt_log("wait_all: ring %llu target=%u head=%u cur=%u status=0x%x "
+-                 "iter=%u%s",
+-                 (unsigned long long)ring->id, target, head, ring->cur,
+-                 status, iter,
+-                 (status & NPT_RING_STATUS_IDLE_BIT)
+-                    ? " HOST-IDLE (missed notify?)" : "");
++         const uint32_t published =
++            atomic_load_explicit(ring->tail, memory_order_acquire);
++         npt_log("wait_all_timeout: ring %llu timed out after %u ms "
++                 "target=%u head=%u tail=%u status=0x%x",
++                 (unsigned long long)ring->id, timeout_ms, target, head,
++                 published, status);
++         return npt_ring_mark_failed(ring, "ring drain timed out");
+       }
+       npt_ring_relax(NULL, &iter);
+    }
++
++   return true;
+ }
+ 
+ uint32_t
+@@ -472,10 +568,17 @@ npt_ring_wait_seqno(struct npt_ring *ring, uint32_t seqno)
+     * bookkeeping that reconciles the guest VMA with the host memfd
+     * pages -- without that, reads after head-advance can see stale
+     * bytes. */
++   if (npt_ring_is_failed(ring))
++      return UINT32_MAX;
+    uint32_t iter = 0;
++   const uint64_t start = npt_ring_monotonic_ms();
+    while (!npt_ring_seqno_status(ring, seqno)) {
+-      if (npt_ring_load_status(ring) & NPT_RING_STATUS_FATAL_BIT)
+-         return iter;
++      if (npt_ring_is_failed(ring))
++         return UINT32_MAX;
++      if (npt_ring_monotonic_ms() - start >= NPT_RING_WAIT_TIMEOUT_MS) {
++         npt_ring_mark_failed(ring, "sequence wait timed out");
++         return UINT32_MAX;
++      }
+       /* Log once per ~32k iters so a wedged caller's target seqno is
+        * recoverable from the log alongside the ring's own watchdog. */
+       if (iter && (iter & 0x7fff) == 0) {
+@@ -483,8 +586,8 @@ npt_ring_wait_seqno(struct npt_ring *ring, uint32_t seqno)
+             atomic_load_explicit(ring->head, memory_order_acquire);
+          const uint32_t tail =
+             atomic_load_explicit(ring->tail, memory_order_acquire);
+-         npt_log("wait_seqno: ring %llu target=%u head=%u tail=%u cur=%u iter=%u",
+-                 (unsigned long long)ring->id, seqno, head, tail, ring->cur, iter);
++         npt_log("wait_seqno: ring %llu target=%u head=%u tail=%u iter=%u",
++                 (unsigned long long)ring->id, seqno, head, tail, iter);
+       }
+       npt_ring_relax(ring, &iter);
+    }
+@@ -493,10 +596,10 @@ npt_ring_wait_seqno(struct npt_ring *ring, uint32_t seqno)
+ 
+ /* Wait for the host to consume past the last EXECUTE on this ring
+  * (i.e. done reading upload_shmem).  Caller holds ring->mutex. */
+-static void
++static bool
+ npt_ring_wait_upload_drained_locked(struct npt_ring *ring)
+ {
+-   npt_ring_wait_seqno(ring, ring->upload_horizon_seqno);
++   return npt_ring_wait_seqno(ring, ring->upload_horizon_seqno) != UINT32_MAX;
+ }
+ 
+ /* Caller holds ring->mutex.  *out_fresh = a new upload_shmem was
+@@ -506,19 +609,29 @@ static bool
+ npt_ring_upload_reserve_locked(struct npt_ring *ring, uint32_t size,
+                                uint32_t *out_offset, bool *out_fresh)
+ {
+-   const uint32_t aligned = (size + 7u) & ~7u;
++   uint32_t aligned;
++
++   if (!ring || !size || !out_offset || !out_fresh ||
++       size > UINT32_MAX - 7u || npt_ring_is_failed(ring))
++      return false;
++   aligned = (size + 7u) & ~7u;
+    *out_fresh = false;
+ 
+    if (!ring->upload_shmem || aligned > ring->upload_size) {
+       if (ring->upload_shmem) {
+-         npt_ring_wait_upload_drained_locked(ring);
++         if (!npt_ring_wait_upload_drained_locked(ring))
++            return false;
+          npt_renderer_shmem_unref(ring->renderer, ring->upload_shmem);
+          ring->upload_shmem = NULL;
+       }
+       uint32_t new_size = ring->upload_size ? ring->upload_size
+                                             : NPT_RING_UPLOAD_INITIAL_SIZE;
+-      while (new_size < aligned)
++      while (new_size < aligned) {
++         if (new_size > UINT32_MAX / 2u)
++            return npt_ring_mark_failed(ring,
++                                        "upload allocation size overflow");
+          new_size <<= 1;
++      }
+       ring->upload_shmem = npt_renderer_shmem_create(ring->renderer, new_size);
+       if (!ring->upload_shmem) {
+          ring->upload_size = 0;
+@@ -528,9 +641,11 @@ npt_ring_upload_reserve_locked(struct npt_ring *ring, uint32_t size,
+       ring->upload_size = new_size;
+       ring->upload_used = 0;
+       *out_fresh = true;
+-   } else if (ring->upload_used + aligned > ring->upload_size) {
++   } else if (ring->upload_used > ring->upload_size ||
++              aligned > ring->upload_size - ring->upload_used) {
+       /* Wrap: wait for indirect commands to retire, then reset. */
+-      npt_ring_wait_upload_drained_locked(ring);
++      if (!npt_ring_wait_upload_drained_locked(ring))
++         return false;
+       ring->upload_used = 0;
+    }
+ 
+@@ -548,9 +663,11 @@ npt_ring_upload_reserve_locked(struct npt_ring *ring, uint32_t size,
+  * SET_REPLY_STREAM that references the fresh res_id.  Caller holds
+  * ring->mutex.
+  */
+-static void
++static bool
+ npt_ring_roundtrip_locked(struct npt_ring *ring)
+ {
++   if (!ring || npt_ring_is_failed(ring))
++      return false;
+    const uint64_t seqno = ++ring->roundtrip_next;
+ 
+    npt_profile_record_roundtrip(&ring->profile);
+@@ -563,8 +680,9 @@ npt_ring_roundtrip_locked(struct npt_ring *ring)
+    submit_cmd.header.cmd_size = sizeof(submit_cmd);
+    submit_cmd.ring_id = ring->id;
+    submit_cmd.seqno = seqno;
+-   npt_renderer_submit_cmd_sync(ring->renderer, &submit_cmd,
+-                                sizeof(submit_cmd));
++   if (!npt_renderer_submit_cmd_sync(ring->renderer, &submit_cmd,
++                                     sizeof(submit_cmd)))
++      return npt_ring_mark_failed(ring, "roundtrip sync submit failed");
+ 
+    struct npt_cmd_wait_virtqueue_seqno wait_cmd;
+    memset(&wait_cmd, 0, sizeof(wait_cmd));
+@@ -574,7 +692,9 @@ npt_ring_roundtrip_locked(struct npt_ring *ring)
+    wait_cmd.header.cmd_size = sizeof(wait_cmd);
+    wait_cmd.ring_id = ring->id;
+    wait_cmd.seqno = seqno;
+-   npt_ring_submit_locked(ring, &wait_cmd, sizeof(wait_cmd));
++   if (!npt_ring_submit_locked(ring, &wait_cmd, sizeof(wait_cmd)))
++      return npt_ring_mark_failed(ring, "roundtrip wait submit failed");
++   return true;
+ }
+ 
+ /*
+@@ -595,8 +715,8 @@ npt_ring_submit_indirect_locked(struct npt_ring *ring, const void *data,
+ 
+    memcpy((uint8_t *)ring->upload_shmem->mmap_ptr + offset, data, size);
+ 
+-   if (upload_fresh)
+-      npt_ring_roundtrip_locked(ring);
++   if (upload_fresh && !npt_ring_roundtrip_locked(ring))
++      return false;
+ 
+    struct npt_cmd_execute_command_stream cmd;
+    memset(&cmd, 0, sizeof(cmd));
+@@ -640,8 +760,13 @@ npt_ring_submit_locked_split(struct npt_ring *ring,
+                              const void *payload, uint32_t payload_size,
+                              uint32_t payload_padded_size)
+ {
+-   const uint32_t total = header_size + payload_padded_size;
+-   npt_ring_wait_space(ring, total);
++   uint32_t total;
++   if (!ring || !header || !header_size ||
++       payload_padded_size > UINT32_MAX - header_size)
++      return false;
++   total = header_size + payload_padded_size;
++   if (!npt_ring_wait_space(ring, total))
++      return false;
+    const uint32_t cur = ring->cur;
+    npt_ring_write_buffer_at(ring, cur,               header,  header_size);
+    if (payload_size)
+@@ -651,8 +776,7 @@ npt_ring_submit_locked_split(struct npt_ring *ring,
+ 
+    const uint32_t status = npt_ring_load_status(ring);
+    if (unlikely(status & NPT_RING_STATUS_FATAL_BIT)) {
+-      npt_log("ring fatal error");
+-      return false;
++      return npt_ring_mark_failed(ring, "fatal status after split submit");
+    }
+    if (status & NPT_RING_STATUS_IDLE_BIT) {
+ #ifndef _WIN32
+@@ -660,10 +784,12 @@ npt_ring_submit_locked_split(struct npt_ring *ring,
+       if (os_time_timeout(ring->last_notify, ring->next_notify, now)) {
+          ring->last_notify = now;
+          ring->next_notify = now + NPT_RING_IDLE_TIMEOUT_NS;
+-         npt_ring_notify(ring);
++         if (!npt_ring_notify(ring))
++            return false;
+       }
+ #else
+-      npt_ring_notify(ring);
++      if (!npt_ring_notify(ring))
++         return false;
+ #endif
+    }
+    return true;
+@@ -678,7 +804,11 @@ npt_ring_submit_indirect_locked_split(struct npt_ring *ring,
+                                       const void *payload, uint32_t payload_size,
+                                       uint32_t payload_padded_size)
+ {
+-   const uint32_t total = header_size + payload_padded_size;
++   uint32_t total;
++   if (!ring || !header || !header_size ||
++       payload_padded_size > UINT32_MAX - header_size)
++      return false;
++   total = header_size + payload_padded_size;
+    uint32_t offset = 0;
+    bool upload_fresh = false;
+    if (!npt_ring_upload_reserve_locked(ring, total, &offset, &upload_fresh))
+@@ -689,8 +819,8 @@ npt_ring_submit_indirect_locked_split(struct npt_ring *ring,
+    if (payload_size)
+       memcpy(dst + header_size, payload, payload_size);
+ 
+-   if (upload_fresh)
+-      npt_ring_roundtrip_locked(ring);
++   if (upload_fresh && !npt_ring_roundtrip_locked(ring))
++      return false;
+ 
+    struct npt_cmd_execute_command_stream cmd;
+    memset(&cmd, 0, sizeof(cmd));
+@@ -722,6 +852,8 @@ npt_ring_submit_raw_with_payload(struct npt_ring *ring,
+    if (payload_size > payload_padded_size)
+       return false;
+ 
++   if (payload_padded_size > UINT32_MAX - header_size)
++      return false;
+    const uint32_t total = header_size + payload_padded_size;
+    mtx_lock(&ring->mutex);
+    bool ok;
+@@ -738,26 +870,29 @@ npt_ring_submit_raw_with_payload(struct npt_ring *ring,
+    return ok;
+ }
+ 
+-void
++bool
+ npt_ring_force_roundtrip(struct npt_ring *ring)
+ {
+    if (!ring)
+-      return;
++      return false;
+    mtx_lock(&ring->mutex);
+-   npt_ring_roundtrip_locked(ring);
++   const bool ok = npt_ring_roundtrip_locked(ring);
+    mtx_unlock(&ring->mutex);
++   return ok;
+ }
+ 
+ bool
+ npt_ring_submit_raw_seqno(struct npt_ring *ring, const void *data,
+                           uint32_t size, uint32_t *out_seqno)
+ {
+-   if (!ring || !data || !size)
++   if (out_seqno)
++      *out_seqno = 0;
++   if (!ring || !data || !size || npt_ring_is_failed(ring))
+       return false;
+ 
+    mtx_lock(&ring->mutex);
+    const bool ok = npt_ring_submit_dispatch_locked(ring, data, size);
+-   if (out_seqno)
++   if (ok && out_seqno)
+       *out_seqno = ring->cur;
+    mtx_unlock(&ring->mutex);
+    return ok;
+@@ -769,17 +904,17 @@ npt_ring_submit_command_init(struct npt_ring *ring,
+                              void *cmd_data, size_t cmd_size,
+                              size_t reply_size)
+ {
+-   (void)ring;
++   if (!submit)
++      return NULL;
++   memset(submit, 0, sizeof(*submit));
++   if (!ring || !cmd_data || !cmd_size || cmd_size > UINT32_MAX ||
++       reply_size > UINT32_MAX || npt_ring_is_failed(ring))
++      return NULL;
+    submit->cmd_data = cmd_data;
+    submit->cmd_size = cmd_size;
+    submit->reply_size = reply_size;
+    submit->enc.cur = (uint8_t *)cmd_data;
+    submit->enc.end = (uint8_t *)cmd_data + cmd_size;
+-   memset(&submit->dec, 0, sizeof(submit->dec));
+-   submit->reply_shmem = NULL;
+-   submit->reply_offset = 0;
+-   submit->seqno = 0;
+-   submit->prof_cmd_type = 0;
+    return &submit->enc;
+ }
+ 
+@@ -787,7 +922,9 @@ void
+ npt_ring_submit_command(struct npt_ring *ring,
+                         struct npt_ring_submit_command *submit)
+ {
+-   if (!submit->cmd_size || !submit->cmd_data)
++   if (!ring || !submit || !submit->cmd_size || !submit->cmd_data ||
++       submit->cmd_size > UINT32_MAX || submit->reply_size > UINT32_MAX ||
++       npt_ring_is_failed(ring))
+       return;
+ 
+    /* prof_cmd_type stashes cmd_type so get_command_reply can attribute
+@@ -808,6 +945,14 @@ npt_ring_submit_command(struct npt_ring *ring,
+                  submit->reply_size);
+          return;
+       }
++      if (off > UINT32_MAX || submit->reply_size > submit->reply_shmem->size ||
++          off > submit->reply_shmem->size - submit->reply_size) {
++         npt_log("submit_command: invalid reply window off=%zu size=%zu backing=%zu",
++                 off, submit->reply_size, submit->reply_shmem->size);
++         npt_renderer_shmem_unref(ring->renderer, submit->reply_shmem);
++         submit->reply_shmem = NULL;
++         return;
++      }
+       submit->reply_offset = (uint32_t)off;
+    }
+ 
+@@ -816,8 +961,13 @@ npt_ring_submit_command(struct npt_ring *ring,
+    /* Fresh shmem: roundtrip so the virtqueue dispatcher's
+     * RESOURCE_CREATE_BLOB lands before the ring thread reads
+     * SET_REPLY_STREAM and finds no resource for our res_id. */
+-   if (shmem_fresh)
+-      npt_ring_roundtrip_locked(ring);
++   if (shmem_fresh && !npt_ring_roundtrip_locked(ring)) {
++      mtx_unlock(&ring->mutex);
++      /* Resource creation can have reached the host even when its sync
++       * acknowledgement failed.  Preserve this reference instead of freeing
++       * memory the host can still access. */
++      return;
++   }
+ 
+    if (submit->reply_size) {
+       struct npt_cmd_set_reply_stream set_cmd;
+@@ -829,7 +979,10 @@ npt_ring_submit_command(struct npt_ring *ring,
+       set_cmd.res_id = submit->reply_shmem->res_id;
+       set_cmd.offset = submit->reply_offset;
+       set_cmd.size = (uint32_t)submit->reply_size;
+-      npt_ring_submit_locked(ring, &set_cmd, sizeof(set_cmd));
++      if (!npt_ring_submit_locked(ring, &set_cmd, sizeof(set_cmd))) {
++         mtx_unlock(&ring->mutex);
++         return;
++      }
+    }
+ 
+    /* SET_REPLY + (EXECUTE_)CMD stay back-to-back under ring->mutex,
+@@ -837,11 +990,11 @@ npt_ring_submit_command(struct npt_ring *ring,
+     * SET_REPLY can re-target the stream. */
+    if (!npt_ring_submit_dispatch_locked(ring, submit->cmd_data,
+                                         (uint32_t)submit->cmd_size)) {
++      npt_ring_mark_failed(ring, "command submission failed");
+       mtx_unlock(&ring->mutex);
+-      if (submit->reply_shmem) {
+-         npt_renderer_shmem_unref(ring->renderer, submit->reply_shmem);
+-         submit->reply_shmem = NULL;
+-      }
++      /* SET_REPLY_STREAM can already be visible to the host.  Keep its shmem
++       * alive on an uncertain submit failure; get_command_reply returns NULL
++       * because the ring is poisoned. */
+       return;
+    }
+ 
+@@ -856,7 +1009,7 @@ struct npt_cs_decoder *
+ npt_ring_get_command_reply(struct npt_ring *ring,
+                            struct npt_ring_submit_command *submit)
+ {
+-   if (!submit->reply_size)
++   if (!ring || !submit || !submit->reply_size || npt_ring_is_failed(ring))
+       return NULL;
+ 
+    if (!submit->reply_shmem)
+@@ -867,6 +1020,8 @@ npt_ring_get_command_reply(struct npt_ring *ring,
+    const bool prof_was_ready =
+       prof_enabled && npt_ring_seqno_status(ring, submit->seqno);
+    const uint32_t wait_iters = npt_ring_wait_seqno(ring, submit->seqno);
++   if (wait_iters == UINT32_MAX || npt_ring_is_failed(ring))
++      return NULL;
+    if (prof_enabled) {
+       const uint64_t prof_wait_ns = npt_profile_now_ns() - prof_t0;
+       ring->profile.total_reply_ns += prof_wait_ns;
+@@ -877,8 +1032,10 @@ npt_ring_get_command_reply(struct npt_ring *ring,
+       npt_profile_record_reply_ns(submit->prof_cmd_type, prof_wait_ns);
+       npt_profile_record_thread_reply_ns(prof_wait_ns);
+    }
+-   if (npt_ring_load_status(ring) & NPT_RING_STATUS_FATAL_BIT) {
+-      npt_log("ring fatal while waiting for reply");
++   if (submit->reply_offset > submit->reply_shmem->size ||
++       submit->reply_size >
++          submit->reply_shmem->size - submit->reply_offset) {
++      npt_ring_mark_failed(ring, "reply window exceeds backing allocation");
+       return NULL;
+    }
+ 
+@@ -893,6 +1050,8 @@ void
+ npt_ring_free_command_reply(struct npt_ring *ring,
+                             struct npt_ring_submit_command *submit)
+ {
++   if (!ring || !submit)
++      return;
+    npt_cs_decoder_fini_temp_pool(&submit->dec);
+    submit->dec.cur = NULL;
+    submit->dec.end = NULL;
+@@ -909,6 +1068,26 @@ npt_ring_create(struct npt_device *device,
+                 uint64_t ring_id,
+                 bool is_tls_ring)
+ {
++   if (!device || !device->renderer || !layout || !layout->buffer_size ||
++       layout->buffer_size > UINT32_MAX ||
++       !util_is_power_of_two_nonzero(layout->buffer_size) ||
++       layout->buffer_size < (1u << NPT_RING_DIRECT_ORDER) ||
++       layout->head_offset != 0 || layout->tail_offset != 64 ||
++       layout->status_offset != 128 || layout->buffer_offset != 192 ||
++       layout->buffer_size > SIZE_MAX - layout->buffer_offset ||
++       layout->extra_offset != layout->buffer_offset + layout->buffer_size ||
++       layout->shmem_size < NPT_RING_WORKAROUND_OFFSET + sizeof(uint32_t) ||
++       layout->buffer_size > layout->shmem_size ||
++       layout->buffer_offset > layout->shmem_size - layout->buffer_size ||
++       layout->extra_offset > layout->shmem_size ||
++       layout->extra_size > layout->shmem_size - layout->extra_offset)
++      return NULL;
++   /* A secondary ring must not become an apparent recovery from a failed
++    * primary ring.  Its callers can fall back to primary; that poisoned ring
++    * will then reject the next submission honestly. */
++   if (device->ring && npt_ring_is_failed(device->ring))
++      return NULL;
++
+    struct npt_ring *ring = npt_alloc(sizeof(*ring));
+    if (!ring)
+       return NULL;
+@@ -921,7 +1100,10 @@ npt_ring_create(struct npt_device *device,
+    list_inithead(&ring->instance_head);
+ 
+    ring->shmem = npt_renderer_shmem_create(renderer, layout->shmem_size);
+-   if (!ring->shmem) {
++   if (!ring->shmem || !ring->shmem->mmap_ptr || !ring->shmem->res_id ||
++       ring->shmem->size < layout->shmem_size) {
++      if (ring->shmem)
++         npt_renderer_shmem_unref(renderer, ring->shmem);
+       free(ring);
+       return NULL;
+    }
+@@ -938,6 +1120,7 @@ npt_ring_create(struct npt_device *device,
+    ring->buffer_size = layout->buffer_size;
+    ring->buffer_mask = layout->buffer_size - 1;
+    ring->cur = 0;
++   atomic_init(&ring->failed, false);
+    ring->direct_size = layout->buffer_size >> NPT_RING_DIRECT_ORDER;
+    assert(ring->direct_size);
+ 
+@@ -955,7 +1138,11 @@ npt_ring_create(struct npt_device *device,
+                  : "no -- watchdog ALIVE-clear disabled");
+    }
+ 
+-   mtx_init(&ring->mutex, mtx_plain);
++   if (mtx_init(&ring->mutex, mtx_plain) != thrd_success) {
++      npt_renderer_shmem_unref(renderer, ring->shmem);
++      free(ring);
++      return NULL;
++   }
+ 
+    npt_shmem_pool_init(&ring->reply_pool, NPT_RING_REPLY_POOL_MIN_SIZE);
+ 
+@@ -1002,10 +1189,17 @@ npt_ring_create(struct npt_device *device,
+    /* TLS rings use SYNC so the ring thread is polling before the
+     * caller can submit; primary stays async (device init masks the
+     * latency). */
+-   if (is_tls_ring)
+-      npt_renderer_submit_cmd_sync(renderer, &create_cmd, sizeof(create_cmd));
+-   else
+-      npt_renderer_submit_cmd(renderer, &create_cmd, sizeof(create_cmd));
++   const bool create_ok = is_tls_ring
++      ? npt_renderer_submit_cmd_sync(renderer, &create_cmd, sizeof(create_cmd))
++      : npt_renderer_submit_cmd(renderer, &create_cmd, sizeof(create_cmd));
++   if (!create_ok) {
++      /* Submission failure can be an acknowledgement failure after the host
++       * observed CREATE_RING.  Leak the host-visible mapping intentionally;
++       * freeing it here would create a use-after-free. */
++      npt_ring_mark_failed(ring, "ring creation submit failed");
++      npt_ring_abandon_local_record(ring);
++      return NULL;
++   }
+ 
+    return ring;
+ }
+@@ -1029,7 +1223,13 @@ npt_ring_destroy(struct npt_ring *ring)
+                                                    NPT_TRANSPORT_RING_DESTROY);
+       cmd.header.cmd_size = sizeof(cmd);
+       cmd.ring_id = ring->id;
+-      npt_renderer_submit_cmd_sync(ring->renderer, &cmd, sizeof(cmd));
++      if (!npt_renderer_submit_cmd_sync(ring->renderer, &cmd, sizeof(cmd))) {
++         npt_ring_mark_failed(ring, "ring destruction submit failed");
++         /* The host can still read every mapping owned by this ring.  Keep
++          * those backing objects, but discard the guest-only record. */
++         npt_ring_abandon_local_record(ring);
++         return;
++      }
+ 
+       npt_renderer_shmem_unref(ring->renderer, ring->shmem);
+    }
+diff --git a/src/virtio/neptune/npt_ring.h b/src/virtio/neptune/npt_ring.h
+index 60b1ddd..c08aa3e 100644
+--- a/src/virtio/neptune/npt_ring.h
++++ b/src/virtio/neptune/npt_ring.h
+@@ -69,6 +69,11 @@ struct npt_ring {
+ 
+    uint32_t cur;
+ 
++   /* A renderer-submit failure, fatal host status, or bounded-wait timeout
++    * poisons the ring.  No later command may turn that asynchronous failure
++    * into apparent success. */
++   atomic_bool failed;
++
+    mtx_t mutex;
+ 
+    /* Rate-limit idle notifications: only notify if
+@@ -124,9 +129,19 @@ npt_ring_destroy(struct npt_ring *ring);
+ 
+ /* Block until the host has advanced `head` past `cur` (no
+  * un-dispatched bytes). */
+-void
++bool
+ npt_ring_wait_all(struct npt_ring *ring);
+ 
++/* Wait until the host has consumed every command published before this call.
++ * This variant lets the caller select the hard deadline.  Both wait functions
++ * report a fatal ring or timeout to the caller. */
++bool
++npt_ring_wait_all_timeout(struct npt_ring *ring, uint32_t timeout_ms);
++
++/* Report poison or a fatal host status without submitting more work. */
++bool
++npt_ring_is_healthy(struct npt_ring *ring);
++
+ /* Used for transport commands that must stay ordered with ring
+  * commands (notably RESOURCE_UPDATE, which must precede any Draw
+  * that reads the buffer); going via submit_cmd would race the ring
+@@ -163,12 +178,11 @@ npt_ring_submit_raw_with_payload(struct npt_ring *ring,
+  * (e.g. REGISTER_QUERY_FEEDBACK), otherwise the ring thread races
+  * the resource-table register.
+  */
+-void
++bool
+ npt_ring_force_roundtrip(struct npt_ring *ring);
+ 
+-/* Yield-heavy poll until head is past seqno.  Returns the relax-
+- * iteration count (sync-reply path feeds it to the profiler).
+- * Callers may ignore the return value. */
++/* Yield-heavy poll until head is past seqno.  Returns the relax-iteration
++ * count.  UINT32_MAX reports a fatal ring or timeout. */
+ uint32_t
+ npt_ring_wait_seqno(struct npt_ring *ring, uint32_t seqno);
+ 
+@@ -180,7 +194,7 @@ npt_ring_wait_seqno(struct npt_ring *ring, uint32_t seqno);
+  * a release here could race a pending async use of host_id on
+  * another thread's ring.
+  */
+-void
++bool
+ npt_ring_send_com_release(struct npt_device *dev, uint64_t host_id);
+ 
+ #endif /* NPT_RING_H */
+diff --git a/src/virtio/neptune/npt_shared_texture.c b/src/virtio/neptune/npt_shared_texture.c
+index a578772..9e84a86 100644
+--- a/src/virtio/neptune/npt_shared_texture.c
++++ b/src/virtio/neptune/npt_shared_texture.c
+@@ -27,7 +27,21 @@ bool
+ npt_shared_texture_export_blob(void *texture_wrapper,
+                                struct npt_shared_texture_desc *desc)
+ {
+-   if (!texture_wrapper || !desc)
++   if (!desc)
++      return false;
++
++   /* Never leave an old export identity in a caller-owned description when
++    * this attempt fails.  The D3D11 fields below planes[] remain owned by the
++    * caller. */
++   desc->blob_id = 0;
++   desc->create_ctx_id = 0;
++   desc->plane_count = 0;
++   desc->texture_layout = 0;
++   desc->modifier = 0;
++   desc->allocation_size = 0;
++   memset(desc->planes, 0, sizeof(desc->planes));
++
++   if (!texture_wrapper)
+       return false;
+ 
+    struct npt_device *dev = npt_com_self_device(texture_wrapper);
+@@ -48,6 +62,12 @@ npt_shared_texture_export_blob(void *texture_wrapper,
+                             &info_off);
+    if (!shm)
+       return false;
++   if (info_off > UINT32_MAX) {
++      npt_log("shared texture: export reply offset is too large (%" PRIu64 ")",
++              (uint64_t)info_off);
++      npt_renderer_shmem_unref(renderer, shm);
++      return false;
++   }
+    memset((uint8_t *)shm->mmap_ptr + info_off, 0,
+           sizeof(struct npt_blob_export_info));
+ 
+@@ -62,9 +82,13 @@ npt_shared_texture_export_blob(void *texture_wrapper,
+       const struct npt_blob_export_info *info =
+          (const struct npt_blob_export_info *)
+             ((uint8_t *)shm->mmap_ptr + info_off);
+-      if (info->plane_count >= 1 &&
+-          info->plane_count <= NPT_BLOB_EXPORT_MAX_PLANES &&
+-          info->allocation_size) {
++      if (info->plane_count == 1 &&
++          info->allocation_size &&
++          info->planes[0].pitch &&
++          info->planes[0].offset < info->allocation_size &&
++          !info->planes[1].offset && !info->planes[1].pitch &&
++          !info->planes[2].offset && !info->planes[2].pitch &&
++          !info->planes[3].offset && !info->planes[3].pitch) {
+          desc->blob_id = texture_id;
+          desc->create_ctx_id = renderer->info.virtio_ctx_id;
+          desc->plane_count = info->plane_count;
+@@ -113,9 +137,9 @@ npt_shared_texture_virgl_format(uint32_t dxgi_format)
+    case DXGI_FORMAT_B8G8R8X8_UNORM: return 2;  /* VIRGL_FORMAT_B8G8R8X8_UNORM */
+    case DXGI_FORMAT_R8G8B8A8_UNORM: return 67; /* VIRGL_FORMAT_R8G8B8A8_UNORM */
+    default:
+-      npt_log("shared texture: unmapped DXGI format %u, assuming BGRA8",
++      npt_log("shared texture: DXGI format %u is not scanout-capable",
+               dxgi_format);
+-      return 1;
++      return 0;
+    }
+ }
+ 
+@@ -124,7 +148,8 @@ npt_shared_texture_create_exportable(void *device_wrapper,
+                                      uint32_t width, uint32_t height,
+                                      uint32_t dxgi_format)
+ {
+-   if (!device_wrapper || !width || !height)
++   if (!device_wrapper || !width || !height || width > UINT32_MAX / 4 ||
++       !npt_shared_texture_virgl_format(dxgi_format))
+       return NULL;
+ 
+    /* MISC_SHARED gives the texture exportable dedicated storage; the
+diff --git a/src/virtio/neptune/npt_shared_texture.h b/src/virtio/neptune/npt_shared_texture.h
+index 862ffb5..57ed756 100644
+--- a/src/virtio/neptune/npt_shared_texture.h
++++ b/src/virtio/neptune/npt_shared_texture.h
+@@ -74,9 +74,8 @@ bool npt_shared_texture_export_blob(void *texture_wrapper,
+ uint32_t npt_shared_texture_host_format(uint32_t dxgi_format);
+ 
+ /* DXGI B8G8R8A8/R8G8B8A8-family formats -> enum virgl_formats (the
+- * wire namespace SET_SCANOUT_BLOB and the WSI backend consume).  Only
+- * the scanout-capable subset is mapped; anything else falls back to
+- * B8G8R8A8 with a log. */
++ * wire namespace SET_SCANOUT_BLOB and the WSI backend consume).  Returns
++ * zero for a format that this scanout path cannot represent. */
+ uint32_t npt_shared_texture_virgl_format(uint32_t dxgi_format);
+ 
+ /* Create a width x height, mips=1, RENDER_TARGET|SHADER_RESOURCE,
+diff --git a/src/virtio/neptune/npt_tls.c b/src/virtio/neptune/npt_tls.c
+index 41c3ffe..df9d469 100644
+--- a/src/virtio/neptune/npt_tls.c
++++ b/src/virtio/neptune/npt_tls.c
+@@ -111,7 +111,8 @@ npt_tls_get_ring(struct npt_device *dev)
+ 
+    /* Cache miss: drain primary so prior primary work commits before
+     * this thread's first TLS submission. */
+-   npt_ring_wait_all(dev->ring);
++   if (!npt_ring_wait_all(dev->ring))
++      return dev->ring;
+ 
+    struct npt_tls_ring *tr = calloc(1, sizeof(*tr));
+    if (!tr)
+diff --git a/src/virtio/neptune/npt_transport_defs.h b/src/virtio/neptune/npt_transport_defs.h
+index 3f20b83..6387be8 100644
+--- a/src/virtio/neptune/npt_transport_defs.h
++++ b/src/virtio/neptune/npt_transport_defs.h
+@@ -24,6 +24,7 @@
+ #define NPT_TRANSPORT_SUBGROUP_SHARED   4u  /* shared / presentable textures*/
+ #define NPT_TRANSPORT_SUBGROUP_EVENT    5u  /* Win32 event bridge           */
+ #define NPT_TRANSPORT_SUBGROUP_FEEDBACK 6u  /* shmem feedback (query, fence)*/
++#define NPT_TRANSPORT_SUBGROUP_CLEAR    7u  /* private synchronized clears  */
+ 
+ #define NPT_TRANSPORT_CMD_TYPE(subgroup, method) \
+    NPT_CMD_TYPE_TOPLEVEL(NPT_TRANSPORT_GROUP, \
+@@ -285,6 +286,52 @@ struct npt_cmd_unmap_resource_reply {
+    /* header.cmd_return = 0 on success */
+ };
+ 
++/* ====================================================================== */
++/* CLEAR                                                                  */
++/* ====================================================================== */
++
++#define NPT_TRANSPORT_CLEAR_DEPTH_STENCIL_RECTS 0u
++#define NPT_CLEAR_DEPTH_STENCIL_MAX_RECTS 4096u
++#define NPT_CLEAR_DEPTH_BIT   0x1u
++#define NPT_CLEAR_STENCIL_BIT 0x2u
++
++struct npt_clear_rect {
++   int32_t left;
++   int32_t top;
++   int32_t right;
++   int32_t bottom;
++};
++
++/* Synchronous private command for partial clears of a depth/stencil view.
++ * Standard ID3D11DeviceContext1::ClearView stays unchanged.  The rectangle
++ * array follows this fixed body and contains rect_count npt_clear_rect items. */
++struct npt_cmd_clear_depth_stencil_rects {
++   struct npt_command_header header;
++   uint64_t context_id;
++   uint64_t dsv_id;
++   uint32_t clear_flags;
++   float depth;
++   uint32_t rect_count;
++   uint8_t stencil;
++   uint8_t reserved[3];
++};
++
++struct npt_cmd_clear_depth_stencil_rects_reply {
++   struct npt_reply_header header; /* header.cmd_return = HRESULT */
++};
++
++#ifdef __cplusplus
++static_assert(sizeof(struct npt_clear_rect) == 16,
++              "clear rectangle wire size changed");
++static_assert(sizeof(struct npt_cmd_clear_depth_stencil_rects) == 56,
++              "clear command wire size changed");
++#else
++_Static_assert(sizeof(struct npt_clear_rect) == 16,
++               "clear rectangle wire size changed");
++_Static_assert(sizeof(struct npt_cmd_clear_depth_stencil_rects) == 56,
++               "clear command wire size changed");
++#endif
++
+ /* Indirect submission: the guest parks an oversized command in a
+  * SHM blob and writes only this reference into the ring.
+  * Fire-and-forget. */
+diff --git a/src/virtio/neptune/triton/tritonDxbc.c b/src/virtio/neptune/triton/tritonDxbc.c
+index 064557a..0b74b92 100644
+--- a/src/virtio/neptune/triton/tritonDxbc.c
++++ b/src/virtio/neptune/triton/tritonDxbc.c
+@@ -28,6 +28,8 @@
+ 
+ #include "triton_log.h"
+ #include "npt_workaround.h"  /* npt_host_workaround_flags() + NPT_WA_* bits */
++#include "tritonDxbc.h"
++#include "tritonDxbcSignature.h"
+ 
+ /* ---------- DXBC container format ----------
+  * Field offsets verified by _Static_assert at the bottom of this file. */
+@@ -466,29 +468,10 @@ static int tritonTokIterNext(TritonTokIter *it, UINT *pOpcode,
+  * (4), Mask (1 + 3 B pad). The 20-byte form appends
+  * RegisterComponentType (4) and MinPrecision (4);
+  * D3D11_1DDIARG_SIGNATURE_ENTRY2 additionally carries a Stream byte in
+- * the padding after Mask. One reader handles all of them via raw
+- * offsets. */
+-
+-typedef struct DdiSig {
+-    UINT  systemValue;     /* D3D10_SB_NAME */
+-    UINT  registerIdx;
+-    BYTE  mask;            /* lower 4 bits = xyzw */
+-    BYTE  stream;          /* ENTRY2 only; possibly stale pad bytes on
+-                            * runtimes predating it, validate before use */
+-    UINT  componentType;   /* 0 if not provided (10.x DDI) */
+-    UINT  minPrecision;    /* D3D11_SB_OPERAND_MIN_PRECISION; 0 = full */
+-} DdiSig;
+-
+-static void readDdiSig(const void *base, UINT stride, UINT i, DdiSig *out)
+-{
+-    const BYTE *p = (const BYTE *)base + (size_t)i * stride;
+-    out->systemValue   = *(const UINT *)(p + 0);
+-    out->registerIdx   = *(const UINT *)(p + 4);
+-    out->mask          = *(const BYTE *)(p + 8);
+-    out->stream        = (stride >= 20) ? *(const BYTE *)(p + 9)  : 0;
+-    out->componentType = (stride >= 20) ? *(const UINT *)(p + 12) : 0;
+-    out->minPrecision  = (stride >= 20) ? *(const UINT *)(p + 16) : 0;
+-}
++ * the padding after Mask. The Vista D3D9 bridge supplies the normalized
++ * TRITON_DXBC_SIGNATURE form when semantic names are available. */
++
++typedef TRITON_DXBC_SIGNATURE DdiSig;
+ 
+ /* ---------- IOSGN blob writer ----------
+  *
+@@ -776,7 +759,8 @@ static UINT tritonCollectSigEntries(const void *pDdi, UINT cDdi, UINT stride,
+ 
+     for (UINT i = 0; i < cDdi; ++i) {
+         DdiSig d;
+-        readDdiSig(pDdi, stride, i, &d);
++        if (!tritonDxbcSignatureFromDdi(pDdi, stride, i, &d))
++            continue;
+         TritonSigEntry *e = &pOut[n++];
+         e->sysval     = d.systemValue;
+         e->reg        = d.registerIdx;
+@@ -784,9 +768,9 @@ static UINT tritonCollectSigEntries(const void *pDdi, UINT cDdi, UINT stride,
+         e->compType   = d.componentType;
+         e->minPrec    = d.minPrecision;
+         e->stream     = 0;
+-        e->name       = NULL;
++        e->name       = d.semanticName;
+         e->dxSysValue = 0;
+-        e->semIdx     = 0xFFFFFFFFu;
++        e->semIdx     = d.semanticName ? d.semanticIndex : 0xFFFFFFFFu;
+         /* Multi-stream signatures need every entry attributed to a stream,
+          * but the ENTRY2 stream byte occupies what older runtimes treated as
+          * padding (and the 12-byte form has none at all).  Keep a DDI entry
+@@ -852,7 +836,8 @@ static UINT tritonCollectSigEntries(const void *pDdi, UINT cDdi, UINT stride,
+         UINT synthCompType = 0, synthMinPrec = 0;
+         for (UINT k = 0; k < cDdi; ++k) {
+             DdiSig d;
+-            readDdiSig(pDdi, stride, k, &d);
++            if (!tritonDxbcSignatureFromDdi(pDdi, stride, k, &d))
++                continue;
+             if (d.registerIdx != pDecl[i].reg)
+                 continue;
+             if (pDecl[i].mask && (d.mask & 0x0Fu) &&
+@@ -921,8 +906,9 @@ static UINT tritonAssignSemantics(TritonSigEntry *a, UINT n,
+     for (UINT i = 0; i < n; ++i) {
+         TritonSigEntry *e = &a[i];
+         const SemanticInfo *info = pickSemanticInfo(e->sysval, blobType, progType);
+-        e->name       = info->name;
+-        e->dxSysValue = info->dxSysValue;
++        if (!e->name)
++            e->name = info->name;
++        e->dxSysValue = e->sysval ? info->dxSysValue : 0;
+ 
+         if (fPSOut && info == &g_semPSOutput) {
+             if (e->reg != 0xFFFFFFFFu) {
+@@ -1239,8 +1225,9 @@ void *tritonBuildDxbc(const UINT *pTokens, SIZE_T cbTokens,
+                (const void *)pTokens, (size_t)cbTokens, (const void *)pcbOut);
+         return NULL;
+     }
+-    if (entryStride != 12 && entryStride != 20) {
+-        TR_LOG("tritonBuildDxbc: bad entryStride=%u (expected 12 or 20)", entryStride);
++    if (entryStride != 12 && entryStride != 20 &&
++        entryStride != sizeof(TRITON_DXBC_SIGNATURE)) {
++        TR_LOG("tritonBuildDxbc: bad entryStride=%u", entryStride);
+         return NULL;
+     }
+ 
+diff --git a/src/virtio/neptune/triton/tritonResource.c b/src/virtio/neptune/triton/tritonResource.c
+index c4387f3..94400de 100644
+--- a/src/virtio/neptune/triton/tritonResource.c
++++ b/src/virtio/neptune/triton/tritonResource.c
+@@ -468,10 +468,15 @@ tritonDestroyResource(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hResource)
+     /* Consumer: drop the transport-context attach rig before the host
+      * texture; the imported texture keeps the dmabuf alive on its own. */
+     if ((r->hImportAlloc || r->hImportResKmt) && pD && pD->pDev1) {
+-        tritonSharedBridgeReleaseImportRes(pD->pDev1, r->hImportAlloc,
+-                                           r->hImportResKmt);
+-        r->hImportAlloc = 0;
+-        r->hImportResKmt = 0;
++        if (tritonSharedBridgeReleaseImportRes(pD->pDev1, r->hImportAlloc,
++                                               r->hImportResKmt)) {
++            r->hImportAlloc = 0;
++            r->hImportResKmt = 0;
++        } else {
++            TR_LOG("shared: import release failed alloc=%u resource=%u",
++                   r->hImportAlloc, r->hImportResKmt);
++            tritonSetError(pD, E_FAIL);
++        }
+     }
+ 
+     if (r->pResource) {
+@@ -643,10 +648,15 @@ tritonOpenResource(D3D10DDI_HDEVICE hDevice, const D3D10DDIARG_OPENRESOURCE *pAr
+     if (!imported) {
+         TR_LOG("shared: open res_id=%u failed", res_id);
+         if (r->hImportAlloc || r->hImportResKmt) {
+-            tritonSharedBridgeReleaseImportRes(pD->pDev1, r->hImportAlloc,
+-                                               r->hImportResKmt);
+-            r->hImportAlloc = 0;
+-            r->hImportResKmt = 0;
++            if (tritonSharedBridgeReleaseImportRes(pD->pDev1,
++                                                   r->hImportAlloc,
++                                                   r->hImportResKmt)) {
++                r->hImportAlloc = 0;
++                r->hImportResKmt = 0;
++            } else {
++                TR_LOG("shared: failed-open import release failed alloc=%u resource=%u",
++                       r->hImportAlloc, r->hImportResKmt);
++            }
+         }
+         tritonSetError(pD, E_FAIL);
+         return;
+diff --git a/src/virtio/neptune/triton/tritonShader.c b/src/virtio/neptune/triton/tritonShader.c
+index e327737..311215c 100644
+--- a/src/virtio/neptune/triton/tritonShader.c
++++ b/src/virtio/neptune/triton/tritonShader.c
+@@ -13,30 +13,12 @@
+ 
+ #include "triton.h"
+ #include "triton_log.h"
++#include "tritonDxbc.h"
+ #include "npt_workaround.h"  /* npt_host_workaround_flags() + NPT_WA_* bits */
+ 
+ /* Declared early so tritonVsSetShader can call it. */
+ void tritonResolveInputLayout(PTRITON_DEVICE pD);
+ 
+-/* DXBC wrapper from tritonDxbc.c. */
+-void *tritonBuildDxbc(const UINT *pTokens, SIZE_T cbTokens,
+-                                  const void *pInEntries,    UINT cInSigs,
+-                                  const void *pOutEntries,   UINT cOutSigs,
+-                                  const void *pPatchEntries, UINT cPatchSigs,
+-                                  UINT entryStride,
+-                                  SIZE_T *pcbOut);
+-
+-/* Synthetic ISGN-only container builder from tritonDxbc.c. */
+-void *tritonBuildInputSigDxbc(const char *const *pNames,
+-                              const UINT *pSemanticIndices,
+-                              const UINT *pRegisters,
+-                              UINT cEntries, SIZE_T *pcbOut);
+-
+-/* VS input-signature reconciler from tritonDxbc.c (see there for rationale). */
+-void *tritonReconcileVsInputSig(const void *pDxbc, SIZE_T cbDxbc,
+-                                const unsigned char compReg[32],
+-                                SIZE_T *pcbOut);
+-
+ static SIZE_T tritonShaderTokenBytes(const UINT *pShaderCode)
+ {
+     return (SIZE_T)pShaderCode[1] * sizeof(UINT);
+diff --git a/src/virtio/neptune/triton/tritonSharedBridge.c b/src/virtio/neptune/triton/tritonSharedBridge.c
+index 52bf350..0a2fa63 100644
+--- a/src/virtio/neptune/triton/tritonSharedBridge.c
++++ b/src/virtio/neptune/triton/tritonSharedBridge.c
+@@ -16,6 +16,7 @@
+ #include "npt_device.h"
+ #include "npt_dispatch.h"
+ #include "npt_renderer.h"
++#include "npt_ring.h"
+ #include "npt_shared_texture.h"
+ #include "npt_transport_defs.h"
+ 
+@@ -26,6 +27,83 @@
+ _Static_assert(TRITON_SHARED_MAX_PLANES == NPT_SHARED_TEXTURE_MAX_PLANES,
+                "shared texture plane count mismatch");
+ 
++/* The Vista D3D9 declaration lives in triton9.h.  Keep this transport unit
++ * independent of Windows DDI headers while satisfying prototype checking. */
++bool triton9DrainPrimaryTransport(void *pWrapper, uint32_t timeout_ms);
++bool triton9ReleaseImportTransport(void *pWrapper, uint32_t alloc,
++                                   uint32_t res_kmt);
++bool triton9TransportHealthy(void *pWrapper);
++bool npt_vgw32_release_import_res_checked(struct npt_renderer *renderer,
++                                          uint32_t alloc, uint32_t res_kmt);
++
++bool
++tritonSharedBridgeDrain(void *pWrapper, uint32_t timeout_ms)
++{
++   struct npt_device *dev;
++   struct npt_ring *ring;
++
++   if (!pWrapper || !timeout_ms)
++      return false;
++   dev = npt_com_self_device(pWrapper);
++   ring = npt_com_self_ring(pWrapper);
++   if (!dev || !dev->renderer || !ring)
++      return false;
++
++   /* Ring-head completion means that the host dispatcher has consumed all
++    * preceding D3D11 proxy calls.  The synchronous empty renderer submit is
++    * ordered after them and retires only when their GPU work has completed. */
++   if (!npt_ring_wait_all_timeout(ring, timeout_ms))
++      return false;
++   return npt_renderer_submit_cmd_sync(dev->renderer, NULL, 0);
++}
++
++bool
++triton9DrainPrimaryTransport(void *pWrapper, uint32_t timeout_ms)
++{
++   struct npt_device *dev;
++
++   if (!pWrapper || !timeout_ms)
++      return false;
++   dev = npt_com_self_device(pWrapper);
++   if (!dev || !dev->renderer || !dev->ring)
++      return false;
++
++   /* npt_com_send_release always uses dev->ring.  Do not derive this drain
++    * from the caller's TLS ring, because that can retire an unrelated tail. */
++   if (!npt_ring_wait_all_timeout(dev->ring, timeout_ms))
++      return false;
++   return npt_renderer_submit_cmd_sync(dev->renderer, NULL, 0);
++}
++
++bool
++triton9ReleaseImportTransport(void *pWrapper, uint32_t alloc,
++                              uint32_t res_kmt)
++{
++   struct npt_device *dev;
++
++   if (!pWrapper || (!alloc && !res_kmt))
++      return false;
++   dev = npt_com_self_device(pWrapper);
++   if (!dev || !dev->renderer)
++      return false;
++   return npt_vgw32_release_import_res_checked(dev->renderer, alloc, res_kmt);
++}
++
++bool
++triton9TransportHealthy(void *pWrapper)
++{
++   struct npt_device *dev;
++   struct npt_ring *ring;
++
++   if (!pWrapper)
++      return false;
++   dev = npt_com_self_device(pWrapper);
++   ring = npt_com_self_ring(pWrapper);
++   if (!dev || !dev->renderer || !dev->ring || !ring)
++      return false;
++   return npt_ring_is_healthy(dev->ring) && npt_ring_is_healthy(ring);
++}
++
+ bool
+ tritonSharedBridgeExportBlob(void *pResourceWrapper,
+                              struct triton_shared_texture_desc *opts)
+@@ -68,16 +146,16 @@ tritonSharedBridgeImportRes(void *pDeviceWrapper, uint32_t res_id,
+                                   out_alloc, out_res_kmt);
+ }
+ 
+-void
++bool
+ tritonSharedBridgeReleaseImportRes(void *pDeviceWrapper, uint32_t alloc,
+                                    uint32_t res_kmt)
+ {
+    if (!pDeviceWrapper)
+-      return;
++      return false;
+    struct npt_device *dev = npt_com_self_device(pDeviceWrapper);
+    if (!dev || !dev->renderer)
+-      return;
+-   npt_renderer_release_import_res(dev->renderer, alloc, res_kmt);
++      return false;
++   return npt_renderer_release_import_res(dev->renderer, alloc, res_kmt);
+ }
+ 
+ void *
+@@ -87,7 +165,7 @@ tritonSharedBridgeOpenRes(void *pDeviceWrapper, uint32_t res_id,
+    if (!pDeviceWrapper || !res_id || !opts)
+       return NULL;
+    struct npt_device *dev = npt_com_self_device(pDeviceWrapper);
+-   if (!dev)
++   if (!dev || !dev->renderer || !npt_com_self_ring(pDeviceWrapper))
+       return NULL;
+    if (opts->plane_count < 1 ||
+        opts->plane_count > NPT_BLOB_EXPORT_MAX_PLANES)
+@@ -129,6 +207,7 @@ tritonSharedBridgeOpenRes(void *pDeviceWrapper, uint32_t res_id,
+       return NULL;
+    }
+ 
+-   return npt_com_get_or_wrap(dev, &NPT_IID_ID3D11Texture2D, mint,
+-                              (struct npt_com_base *)pDeviceWrapper);
++   return npt_com_get_or_wrap_or_release(
++      dev, &NPT_IID_ID3D11Texture2D, mint,
++      (struct npt_com_base *)pDeviceWrapper);
+ }
+diff --git a/src/virtio/neptune/triton/tritonSharedBridge.h b/src/virtio/neptune/triton/tritonSharedBridge.h
+index 433e37d..794d6e8 100644
+--- a/src/virtio/neptune/triton/tritonSharedBridge.h
++++ b/src/virtio/neptune/triton/tritonSharedBridge.h
+@@ -65,7 +65,7 @@ bool tritonSharedBridgeImportRes(void *pDeviceWrapper, uint32_t res_id,
+                                  uint64_t size, uint32_t *out_alloc,
+                                  uint32_t *out_res_kmt);
+ 
+-void tritonSharedBridgeReleaseImportRes(void *pDeviceWrapper, uint32_t alloc,
++bool tritonSharedBridgeReleaseImportRes(void *pDeviceWrapper, uint32_t alloc,
+                                         uint32_t res_kmt);
+ 
+ /* Consumer: import the texture backed by \p res_id on the device
+@@ -75,6 +75,11 @@ void tritonSharedBridgeReleaseImportRes(void *pDeviceWrapper, uint32_t alloc,
+ void *tritonSharedBridgeOpenRes(void *pDeviceWrapper, uint32_t res_id,
+                                 const struct triton_shared_texture_desc *desc);
+ 
++/* Drain the wrapper's Neptune ring, then submit an ordered renderer marker.
++ * This is the D3D9 present boundary: success means all host GPU work emitted
++ * before the call has retired. */
++bool tritonSharedBridgeDrain(void *pWrapper, uint32_t timeout_ms);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/src/virtio/virtio-gpu/wddm_hw.h b/src/virtio/virtio-gpu/wddm_hw.h
+index 4c065ea..6c93a89 100644
+--- a/src/virtio/virtio-gpu/wddm_hw.h
++++ b/src/virtio/virtio-gpu/wddm_hw.h
+@@ -29,6 +29,7 @@
+ 
+ #pragma once
+ 
++#include <stddef.h>
+ #include <d3dkmthk.h>
+ 
+ // ================= UMD <-> KMD POINTER/HANDLE TRANSPORT
+@@ -108,6 +109,19 @@ typedef struct _VIOGPU_ADAPTERINFO
+     LUID AdapterLuid;
+ } VIOGPU_ADAPTERINFO;
+ 
++/* V1 is an immutable prefix.  Supplying a V2-sized private-data buffer is
++ * the explicit opt-in for new guest-only KMD/UMD features. */
++#define VIOGPU_PRIVATE_ABI_VERSION_V2 2u
++#define VIOGPU_FEATURE_RENDER_EVENT   (1ull << 0)
++
++typedef struct _VIOGPU_ADAPTERINFO_V2
++{
++    VIOGPU_ADAPTERINFO V1;
++    ULONG StructureSize;
++    ULONG PrivateAbiVersion;
++    ULONGLONG FeatureBits;
++} VIOGPU_ADAPTERINFO_V2;
++
+ // ================= ESCAPES
+ #define VIOGPU_GET_DEVICE_ID         0x000
+ #define VIOGPU_GET_CUSTOM_RESOLUTION 0x001
+@@ -116,7 +130,6 @@ typedef struct _VIOGPU_ADAPTERINFO
+ 
+ #define VIOGPU_RES_INFO              0x100
+ #define VIOGPU_RES_BUSY              0x101
+-
+ #define VIOGPU_CTX_INIT              0x200
+ 
+ #define VIOGPU_BLIT_INIT             0x300
+@@ -221,30 +234,6 @@ typedef struct _VIOGPU_PRESENT_FENCE_REQ
+ } VIOGPU_PRESENT_FENCE_REQ;
+ #pragma pack()
+ 
+-#pragma pack(1)
+-typedef struct _VIOGPU_ESCAPE
+-{
+-    USHORT Type;
+-    USHORT DataLength;
+-    union {
+-        ULONG Id;
+-        VIOGPU_DISP_MODE Resolution;
+-        VIOGPU_PARAM_REQ Parameter;
+-        VIOGPU_CAPSET_REQ Capset;
+-        VIOGPU_PCI_INFO_REQ PciInfo;
+-
+-        VIOGPU_RES_INFO_REQ ResourceInfo;
+-        VIOGPU_RES_BUSY_REQ ResourceBusy;
+-
+-        VIOGPU_CTX_INIT_REQ CtxInit;
+-
+-        VIOGPU_BLIT_INIT_REQ BlitInit;
+-
+-        VIOGPU_PRESENT_FENCE_REQ PresentFence;
+-    } DUMMYUNIONNAME;
+-} VIOGPU_ESCAPE, *PVIOGPU_ESCAPE;
+-#pragma pack()
+-
+ // ================= CreateResource
+ #pragma pack(1)
+ typedef struct _VIOGPU_RESOURCE_3D_OPTIONS
+@@ -262,6 +251,11 @@ typedef struct _VIOGPU_RESOURCE_3D_OPTIONS
+ } VIOGPU_RESOURCE_3D_OPTIONS;
+ #pragma pack()
+ 
++/* Private to the WDDM resource-allocation handshake.  It marks the legacy
++ * non-blob primary which backs Vista's display mode.  The KMD consumes this
++ * bit before issuing RESOURCE_CREATE_3D, so it never reaches the host. */
++#define VIOGPU_RESOURCE_FLAG_STANDARD_PRIMARY 0x80000000u
++
+ #define VIOGPU_BLOB_MEM_GUEST             0x0001
+ #define VIOGPU_BLOB_MEM_HOST3D            0x0002
+ #define VIOGPU_BLOB_MEM_HOST3D_GUEST      0x0003
+@@ -348,6 +342,7 @@ typedef struct _VIOGPU_RESOURCE_SHARED_TEXTURE_OPTIONS
+ #define VIOGPU_RESOURCE_TYPE_BLOB   1
+ #define VIOGPU_RESOURCE_TYPE_IMPORT 2
+ #define VIOGPU_RESOURCE_TYPE_SHARED 3
++
+ #pragma pack(1)
+ typedef struct _VIOGPU_CREATE_ALLOCATION_EXCHANGE
+ {
+@@ -362,6 +357,29 @@ typedef struct _VIOGPU_CREATE_ALLOCATION_EXCHANGE
+ } VIOGPU_CREATE_ALLOCATION_EXCHANGE;
+ #pragma pack()
+ 
++#pragma pack(1)
++typedef struct _VIOGPU_ESCAPE
++{
++    USHORT Type;
++    USHORT DataLength;
++    union {
++        ULONG Id;
++        VIOGPU_DISP_MODE Resolution;
++        VIOGPU_PARAM_REQ Parameter;
++        VIOGPU_CAPSET_REQ Capset;
++        VIOGPU_PCI_INFO_REQ PciInfo;
++
++        VIOGPU_RES_INFO_REQ ResourceInfo;
++        VIOGPU_RES_BUSY_REQ ResourceBusy;
++        VIOGPU_CTX_INIT_REQ CtxInit;
++
++        VIOGPU_BLIT_INIT_REQ BlitInit;
++
++        VIOGPU_PRESENT_FENCE_REQ PresentFence;
++    } DUMMYUNIONNAME;
++} VIOGPU_ESCAPE, *PVIOGPU_ESCAPE;
++#pragma pack()
++
+ // ================= BLIT
+ 
+ #pragma pack(1)
+@@ -386,6 +404,7 @@ struct _VIOGPU_BLIT_PRESENT
+ #define VIOGPU_CMD_TRANSFER_FROM_HOST 0x3 // Transfer resource to host
+ #define VIOGPU_CMD_MAP_BLOB           0x4 // Map blob resource
+ #define VIOGPU_CMD_UNMAP_BLOB         0x5 // Unmap blob resource
++#define VIOGPU_CMD_SIGNAL_EVENT        0x6
+ 
+ // #define VIOGPU_EXECBUF_FENCE_FD_IN  0x01
+ // #define VIOGPU_EXECBUF_FENCE_FD_OUT 0x02
+@@ -403,6 +422,30 @@ typedef struct _VIOGPU_COMMAND_HDR
+ } VIOGPU_COMMAND_HDR;
+ #pragma pack()
+ 
++/* Fixed-width on both native and WoW64 builds.  The KMD references Event in
++ * DxgkDdiRender and keeps only that object reference after the call returns. */
++#pragma pack(1)
++typedef struct _VIOGPU_SIGNAL_EVENT_CMD
++{
++    VIOGPU_UM_HANDLE Event;
++} VIOGPU_SIGNAL_EVENT_CMD;
++#pragma pack()
++
++#ifdef __cplusplus
++#define VIOGPU_STATIC_ASSERT(condition, message) static_assert(condition, message)
++#else
++#define VIOGPU_STATIC_ASSERT(condition, message) _Static_assert(condition, message)
++#endif
++
++VIOGPU_STATIC_ASSERT(sizeof(VIOGPU_ADAPTERINFO) == 32, "VIOGPU_ADAPTERINFO ABI");
++VIOGPU_STATIC_ASSERT(sizeof(VIOGPU_ADAPTERINFO_V2) == 48, "VIOGPU_ADAPTERINFO_V2 ABI");
++VIOGPU_STATIC_ASSERT(sizeof(VIOGPU_COMMAND_HDR) == 16, "VIOGPU_COMMAND_HDR ABI");
++VIOGPU_STATIC_ASSERT(sizeof(VIOGPU_SIGNAL_EVENT_CMD) == 8, "VIOGPU_SIGNAL_EVENT_CMD ABI");
++VIOGPU_STATIC_ASSERT(offsetof(VIOGPU_SIGNAL_EVENT_CMD, Event) == 0,
++                     "VIOGPU_SIGNAL_EVENT_CMD.Event ABI");
++
++#undef VIOGPU_STATIC_ASSERT
++
+ #pragma pack(1)
+ typedef struct _VIOGPU_TRANSFER_CMD
+ {

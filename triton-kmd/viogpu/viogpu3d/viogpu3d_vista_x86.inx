@@ -1,0 +1,67 @@
+; Vista SP2 x86 Aero package.  This is deliberately separate from the
+; modern INX: Vista must load only the D3D9 UMD, never Triton's D3D10/11 UMD.
+
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%RHEL%
+DriverVer=08/10/2026,7.14.1.0
+CatalogFile=viogpu3d-vista-x86.cat
+
+[ControlFlags]
+ExcludeFromSelect=*
+
+[DestinationDirs]
+VioGpu3D_Files.Driver = 12
+VioGpu3D_Files.Usermode = 11
+
+[SourceDisksNames]
+1 = %DiskId1%,,,""
+
+[SourceDisksFiles]
+viogpu3d.sys = 1
+neptune_d3d9.dll = 1
+
+[Manufacturer]
+%RHEL%=RHEL,NTx86
+
+[RHEL.NTx86]
+%VioGpu3D.DeviceDesc% = VioGpu3D_Inst,PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01,PCI\VEN_1AF4&DEV_1050
+
+[VioGpu3D_Files.Driver]
+viogpu3d.sys,,,2
+
+[VioGpu3D_Files.Usermode]
+neptune_d3d9.dll,,,0x00004000
+
+[VioGpu3D_Inst]
+Include=msdv.inf
+FeatureScore=F6
+CopyFiles=VioGpu3D_Files.Driver,VioGpu3D_Files.Usermode
+AddReg=VioGpu3D_DeviceSettings
+
+[VioGpu3D_Inst.Services]
+AddService=VioGpu3D,0x00000002,VioGpu3D_Service_Inst
+
+[VioGpu3D_Service_Inst]
+ServiceType=%SERVICE_KERNEL_DRIVER%
+StartType=%SERVICE_DEMAND_START%
+ErrorControl=%SERVICE_ERROR_NORMAL%
+ServiceBinary=%12%\viogpu3d.sys
+
+[VioGpu3D_DeviceSettings]
+HKR,,UserModeDriverName,%REG_MULTI_SZ%,neptune_d3d9.dll
+HKR,,InstalledDisplayDrivers,%REG_MULTI_SZ%,neptune_d3d9
+HKR,,VgaCompatible,%REG_DWORD%,0
+HKR,,CapabilityOverride,%REG_DWORD%,0x8
+
+[Strings]
+DiskId1="VirtIO GPU Vista Aero Installation Disk"
+VioGpu3D.DeviceDesc="VirtIO GPU 3D (Vista Aero)"
+RHEL="Red Hat, Inc."
+SERVICE_KERNEL_DRIVER=0x1
+SERVICE_DEMAND_START=0x3
+SERVICE_ERROR_NORMAL=0x1
+REG_MULTI_SZ=0x00010000
+REG_DWORD=0x00010001

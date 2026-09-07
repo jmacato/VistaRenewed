@@ -1,0 +1,8 @@
+# Appended to dxmt_native.exports only when d3d12 is built into the image.
+# src/d3d12/d3d12.def
+_D3D12CreateDevice
+_D3D12CreateRootSignatureDeserializer
+_D3D12CreateVersionedRootSignatureDeserializer
+_D3D12SerializeRootSignature
+_D3D12SerializeVersionedRootSignature
+_D3D12GetInterface

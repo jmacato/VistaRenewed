@@ -1,0 +1,1030 @@
+glx@glx_arb_sync_control@swapbuffersmsc-divisor-zero,Fail
+glx@glx-make-current,Fail
+glx@glx-multi-window-single-context,Fail
+glx@glx-swap-pixmap-bad,Fail
+shaders@glsl-max-varyings,Fail
+shaders@glsl-max-varyings >max_varying_components,Fail
+shaders@point-vertex-id divisor,Fail
+shaders@point-vertex-id gl_instanceid divisor,Fail
+shaders@point-vertex-id gl_instanceid,Fail
+shaders@point-vertex-id gl_vertexid divisor,Fail
+shaders@point-vertex-id gl_vertexid,Fail
+shaders@point-vertex-id gl_vertexid gl_instanceid divisor,Fail
+shaders@point-vertex-id gl_vertexid gl_instanceid,Fail
+spec@arb_base_instance@arb_base_instance-drawarrays,Fail
+spec@arb_point_sprite@arb_point_sprite-mipmap,Fail
+spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
+spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
+spec@arb_shader_texture_lod@execution@tex-miplevel-selection *gradarb 2drect,Crash
+spec@arb_shader_texture_lod@execution@tex-miplevel-selection *gradarb 2drectshadow,Crash
+spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drect,Crash
+spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drect_projvec4,Crash
+spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drectshadow,Crash
+spec@arb_texture_buffer_object@texture-buffer-size-clamp,Crash
+spec@arb_texture_float@fbo-alphatest-formats,Crash
+spec@arb_texture_float@fbo-blending-formats,Crash
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R16I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R16_SNORM,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R32I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R8I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R8_SNORM,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16F,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16_SNORM,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG32F,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG32I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG8I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG8_SNORM,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10_A2,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10_A2UI,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB16I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB16_SNORM,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB32I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB4,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB8,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB8I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB9_E5,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16F,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA32F,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA32I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA4,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA8,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA8I,Fail
+spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_SRGB8_ALPHA8,Fail
+spec@arb_texture_rectangle@tex-miplevel-selection gl2:texture() 2drect,Crash
+spec@arb_texture_rectangle@tex-miplevel-selection gl2:texture() 2drectshadow,Crash
+spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect,Crash
+spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect_projvec4,Crash
+spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drectshadow,Crash
+spec@arb_texture_rg@fbo-blending-formats,Fail
+spec@arb_texture_rg@fbo-blending-formats@GL_R8,Fail
+spec@arb_texture_rg@fbo-blending-formats@GL_RG8,Fail
+spec@arb_texture_rg@fbo-blending-formats@GL_RG,Fail
+spec@arb_transform_feedback_instanced@draw-auto instanced,Fail
+spec@egl 1.4@eglterminate then unbind context,Fail
+spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
+spec@egl_khr_surfaceless_context@viewport,Fail
+spec@egl_mesa_configless_context@basic,Fail
+spec@ext_base_instance@arb_base_instance-drawarrays_gles3,Fail
+spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
+spec@ext_framebuffer_object@fbo-blending-format-quirks,Fail
+spec@ext_framebuffer_object@fbo-blending-formats,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_ALPHA4,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_ALPHA8,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_ALPHA,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_INTENSITY4,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_INTENSITY8,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_INTENSITY,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE4_ALPHA4,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE4,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE8_ALPHA8,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE8,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE_ALPHA,Fail
+spec@ext_framebuffer_object@fbo-blending-formats@GL_LUMINANCE,Fail
+spec@ext_transform_feedback2@draw-auto,Fail
+spec@ext_transform_feedback@builtin-varyings gl_clipdistance,Fail
+spec@ext_transform_feedback@change-size base-shrink,Fail
+spec@ext_transform_feedback@change-size offset-shrink,Fail
+spec@ext_transform_feedback@change-size range-grow,Fail
+spec@ext_transform_feedback@change-size range-shrink,Fail
+spec@ext_transform_feedback@interleaved-attribs,Fail
+spec@ext_transform_feedback@intervening-read output,Fail
+spec@ext_transform_feedback@intervening-read prims_written,Fail
+spec@ext_transform_feedback@max-varyings,Fail
+spec@ext_transform_feedback@order elements lines,Fail
+spec@ext_transform_feedback@order elements points,Fail
+spec@ext_transform_feedback@order elements triangles,Fail
+spec@ext_transform_feedback@overflow-edge-cases,Fail
+spec@ext_transform_feedback@position-readback-bufferbase-discard,Fail
+spec@ext_transform_feedback@position-readback-bufferbase,Fail
+spec@ext_transform_feedback@position-readback-bufferoffset-discard,Fail
+spec@ext_transform_feedback@position-readback-bufferoffset,Fail
+spec@ext_transform_feedback@position-readback-bufferrange-discard,Fail
+spec@ext_transform_feedback@position-readback-bufferrange,Fail
+spec@ext_transform_feedback@position-render-bufferbase-discard,Fail
+spec@ext_transform_feedback@position-render-bufferbase,Fail
+spec@ext_transform_feedback@position-render-bufferoffset-discard,Fail
+spec@ext_transform_feedback@position-render-bufferoffset,Fail
+spec@ext_transform_feedback@position-render-bufferrange-discard,Fail
+spec@ext_transform_feedback@position-render-bufferrange,Fail
+spec@ext_transform_feedback@query-primitives_written-bufferrange-discard,Fail
+spec@ext_transform_feedback@query-primitives_written-bufferrange,Fail
+spec@ext_transform_feedback@separate-attribs,Fail
+spec@ext_transform_feedback@tessellation line_loop flat_first,Fail
+spec@ext_transform_feedback@tessellation line_loop flat_last,Fail
+spec@ext_transform_feedback@tessellation line_loop monochrome,Fail
+spec@ext_transform_feedback@tessellation line_loop smooth,Fail
+spec@ext_transform_feedback@tessellation line_strip flat_first,Fail
+spec@ext_transform_feedback@tessellation line_strip flat_last,Fail
+spec@ext_transform_feedback@tessellation line_strip monochrome,Fail
+spec@ext_transform_feedback@tessellation line_strip smooth,Fail
+spec@ext_transform_feedback@tessellation polygon monochrome,Fail
+spec@ext_transform_feedback@tessellation polygon smooth,Fail
+spec@ext_transform_feedback@tessellation quads flat_first,Fail
+spec@ext_transform_feedback@tessellation quads flat_last,Fail
+spec@ext_transform_feedback@tessellation quads monochrome,Fail
+spec@ext_transform_feedback@tessellation quads smooth,Fail
+spec@ext_transform_feedback@tessellation quad_strip flat_first,Fail
+spec@ext_transform_feedback@tessellation quad_strip flat_last,Fail
+spec@ext_transform_feedback@tessellation quad_strip monochrome,Fail
+spec@ext_transform_feedback@tessellation quad_strip smooth,Fail
+spec@ext_transform_feedback@tessellation quad_strip wireframe,Fail
+spec@ext_transform_feedback@tessellation quads wireframe,Fail
+spec@ext_transform_feedback@tessellation triangle_fan flat_first,Fail
+spec@ext_transform_feedback@tessellation triangle_fan flat_last,Fail
+spec@ext_transform_feedback@tessellation triangle_fan monochrome,Fail
+spec@ext_transform_feedback@tessellation triangle_fan smooth,Fail
+spec@ext_transform_feedback@tessellation triangle_fan wireframe,Fail
+spec@ext_transform_feedback@tessellation triangle_strip flat_first,Fail
+spec@ext_transform_feedback@tessellation triangle_strip flat_last,Fail
+spec@ext_transform_feedback@tessellation triangle_strip monochrome,Fail
+spec@ext_transform_feedback@tessellation triangle_strip smooth,Fail
+spec@ext_transform_feedback@tessellation triangle_strip wireframe,Fail
+spec@glsl-1.10@execution@varying-packing@simple float array,Fail
+spec@glsl-1.10@execution@varying-packing@simple float arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple float separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2x3 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2x3 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2x3 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2x4 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2x4 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat2x4 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3x2 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3x2 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3x2 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3x4 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3x4 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat3x4 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4x2 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4x2 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4x2 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4x3 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4x3 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple mat4x3 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec2 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec2 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec2 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec3 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec3 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec3 separate,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec4 array,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec4 arrays_of_arrays,Fail
+spec@glsl-1.10@execution@varying-packing@simple vec4 separate,Fail
+spec@glsl-1.30@execution@tex-miplevel-selection texture() 2drect,Crash
+spec@glsl-1.30@execution@tex-miplevel-selection texture() 2drectshadow,Crash
+spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
+spec@khr_texture_compression_astc@miptree-gles srgb-fp@sRGB decode full precision,Fail
+spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
+spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
+spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp,Fail
+spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp@sRGB decode full precision,Fail
+spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp,Fail
+spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full precision,Fail
+spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
+spec@!opengl 1.0@gl-1.0-edgeflag,Fail
+spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
+spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
+spec@!opengl 1.0@rasterpos,Crash
+spec@!opengl 1.1@linestipple@Factor 2x,Fail
+spec@!opengl 1.1@linestipple@Factor 3x,Fail
+spec@!opengl 1.1@linestipple,Fail
+spec@!opengl 1.1@linestipple@Line loop,Fail
+spec@!opengl 1.1@linestipple@Line strip,Fail
+spec@!opengl 1.1@linestipple@Restarting lines within a single Begin-End block,Fail
+spec@!opengl 1.1@line-smooth-stipple,Fail
+spec@!opengl 1.1@longprim,Crash
+spec@!opengl 1.1@polygon-mode-facing,Fail
+spec@!opengl 1.1@polygon-mode,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 0: Expected white pixel on bottom edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 0: Expected white pixel on left edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 0: Expected white pixel on right edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 0: Expected white pixel on top edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 1: Expected blue pixel in center,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 1: Expected white pixel on right edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 1: Expected white pixel on top edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 2: Expected blue pixel in center,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 2: Expected white pixel on right edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 2: Expected white pixel on top edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 3: Expected white pixel on bottom edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 3: Expected white pixel on left edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 3: Expected white pixel on right edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 3: Expected white pixel on top edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 4: Expected white pixel on bottom edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 4: Expected white pixel on left edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 4: Expected white pixel on right edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 4: Expected white pixel on top edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 5: Expected blue pixel in center,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 5: Expected white pixel on right edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 5: Expected white pixel on top edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 6: Expected blue pixel in center,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on right edge,Fail
+spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,Fail
+spec@!opengl 1.1@polygon-mode-offset,Fail
+spec@!opengl 2.0@gl-2.0-edgeflag,Fail
+spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
+spec@!opengl 2.1@pbo,Fail
+spec@!opengl 2.1@pbo@test_polygon_stip,Fail
+spec@!opengl 2.1@polygon-stipple-fs,Fail
+spec@!opengl 3.0@gl_vertexid used with glmultidrawarrays,Fail
+spec@!opengl 3.1@primitive-restart-xfb flush,Fail
+spec@!opengl 3.1@primitive-restart-xfb generated,Fail
+spec@!opengl 3.1@primitive-restart-xfb written,Fail
+spec@!opengl es 3.0@gles-3.0-transform-feedback-uniform-buffer-object,Fail
+
+afbcp-spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgradcube,Fail
+afbcp-spec@arb_shader_texture_lod@execution@arb_shader_texture_lod-texgrad,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *gradarb 2drect,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *gradarb 2drectshadow,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drect,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drect_projvec4,Fail
+afbcp-spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 2drectshadow,Fail
+afbcp-spec@arb_texture_buffer_object@texture-buffer-size-clamp,Crash
+afbcp-spec@arb_texture_float@fbo-alphatest-formats,Crash
+afbcp-spec@arb_texture_float@fbo-blending-formats,Crash
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R16I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R16_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R32I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R8I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_R8_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16F,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG16_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG32F,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG32I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG8I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RG8_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10_A2,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10_A2UI,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB10,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB16I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB16_SNORM,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB32I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB4,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB8,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB8I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGB9_E5,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16F,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA16I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA32F,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA32I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA4,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA8,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_RGBA8I,Fail
+afbcp-spec@arb_texture_multisample@arb_texture_multisample-dsa-texelfetch@Texture type: GL_SRGB8_ALPHA8,Fail
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:texture() 2drect,Fail
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:texture() 2drectshadow,Fail
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect,Crash
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect_projvec4,Crash
+afbcp-spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drectshadow,Crash
+afbcp-spec@arb_texture_rg@fbo-blending-formats,Fail
+afbcp-spec@arb_texture_rg@fbo-blending-formats@GL_R8,Fail
+afbcp-spec@arb_texture_rg@fbo-blending-formats@GL_RG8,Fail
+afbcp-spec@arb_texture_rg@fbo-blending-formats@GL_RG,Fail
+afbcp-spec@glsl-1.30@execution@tex-miplevel-selection texture() 2drect,Fail
+afbcp-spec@glsl-1.30@execution@tex-miplevel-selection texture() 2drectshadow,Fail
+afbcp-spec@khr_texture_compression_astc@miptree-gles srgb-fp,Fail
+afbcp-spec@khr_texture_compression_astc@miptree-gles srgb-fp@sRGB decode full precision,Fail
+afbcp-spec@khr_texture_compression_astc@miptree-gl srgb-fp,Fail
+afbcp-spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
+afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp,Fail
+afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gles srgb-fp@sRGB decode full precision,Fail
+afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp,Fail
+afbcp-spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full precision,Fail
+
+# uprev Piglit in Mesa
+afbcp-spec@arb_texture_view@tex-view,Fail
+afbcp-spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
+glx@glx-copy-sub-buffer,Fail
+spec@arb_texture_view@tex-view,Fail
+spec@ext_image_dma_buf_import@ext_image_dma_buf_import-refcount-multithread,Crash
+
+# Piglit tests require too much precision in alpha-to-coverage higher sample-counts
+spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 6,Fail
+spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 8,Fail
+spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 6,Fail
+spec@ext_framebuffer_multisample@alpha-to-coverage-no-draw-buffer-zero 8,Fail
+spec@ext_framebuffer_multisample@draw-buffers-alpha-to-coverage 6,Fail
+spec@ext_framebuffer_multisample@draw-buffers-alpha-to-coverage 8,Fail
+spec@ext_framebuffer_multisample@sample-alpha-to-coverage 6 color,Fail
+spec@ext_framebuffer_multisample@sample-alpha-to-coverage 8 color,Fail
+
+# physical device and device needs more robustness in allocation handling
+dEQP-VK.api.object_management.max_concurrent.device,Fail
+dEQP-VK.api.object_management.max_concurrent.device_group,Fail
+
+# CTS bug, works fine if Vulkan 1.1 is forced
+dEQP-VK.api.device_init.create_device_global_priority.basic,Fail
+dEQP-VK.api.device_init.create_device_global_priority_khr.basic,Fail
+dEQP-VK.api.device_init.create_device_global_priority_query.basic,Fail
+dEQP-VK.api.device_init.create_device_global_priority_query_khr.basic,Fail
+
+# New with vk_clear
+dEQP-VK.api.copy_and_blit.dedicated_allocation.resolve_image.whole_copy_before_resolving_no_cab.4_bit,Fail
+dEQP-VK.api.copy_and_blit.dedicated_allocation.resolve_image.copy_with_regions_before_resolving.4_bit,Fail
+dEQP-VK.api.copy_and_blit.core.resolve_image.whole_copy_before_resolving_no_cab.4_bit,Fail
+dEQP-VK.api.copy_and_blit.core.resolve_image.whole_copy_before_resolving_no_cab.4_bit_bind_offset,Fail
+dEQP-VK.api.copy_and_blit.core.resolve_image.copy_with_regions_before_resolving.4_bit,Fail
+dEQP-VK.api.copy_and_blit.core.resolve_image.copy_with_regions_before_resolving.4_bit_bind_offset,Fail
+dEQP-VK.api.copy_and_blit.copy_commands2.resolve_image.whole_copy_before_resolving_no_cab.4_bit,Fail
+dEQP-VK.api.copy_and_blit.copy_commands2.resolve_image.copy_with_regions_before_resolving.4_bit,Fail
+
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.2_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.2_secondary_2_primary_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.2_secondary_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.contents_2_primary_secondary_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.contents_2_secondary_2_primary_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.contents_2_secondary_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.contents_primary_secondary_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.contents_secondary_2_primary_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.contents_secondary_primary_cmdbuffers_resuming,Fail
+dEQP-VK.dynamic_rendering.primary_cmd_buff.basic.single_cmdbuffer_resuming,Fail
+
+dEQP-VK.rasterization.rasterization_order_attachment_access.depth.samples_1.multi_draw_barriers,Crash
+dEQP-VK.rasterization.rasterization_order_attachment_access.depth.samples_4.multi_draw_barriers,Crash
+dEQP-VK.rasterization.rasterization_order_attachment_access.stencil.samples_1.multi_draw_barriers,Crash
+dEQP-VK.rasterization.rasterization_order_attachment_access.stencil.samples_4.multi_draw_barriers,Crash
+
+# New fails in 1.4.3.3
+dEQP-VK.pipeline.fast_linked_library.empty_fs.masked_samples,Fail
+dEQP-VK.pipeline.monolithic.empty_fs.masked_samples,Fail
+dEQP-VK.pipeline.pipeline_library.empty_fs.masked_samples,Fail
+
+# New failures with VKCTS 1.4.4.0
+dEQP-VK.binding_model.unused_invalid_descriptor.write.invalid.combined_image_sampler,Crash
+dEQP-VK.binding_model.unused_invalid_descriptor.write.invalid.sampled_image,Crash
+dEQP-VK.info.device_mandatory_features,Fail
+dEQP-VK.pipeline.fast_linked_library.vertex_input.misc.unbound_input,Crash
+dEQP-VK.pipeline.fast_linked_library.vertex_input.misc.unbound_input_dynamic,Crash
+dEQP-VK.pipeline.monolithic.vertex_input.misc.unbound_input,Crash
+dEQP-VK.pipeline.monolithic.vertex_input.misc.unbound_input_dynamic,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.2_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.2_secondary_2_primary_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.2_secondary_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.contents_2_primary_secondary_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.contents_2_secondary_2_primary_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.contents_2_secondary_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.contents_primary_secondary_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.contents_secondary_2_primary_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.contents_secondary_primary_cmdbuffers_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.basic.single_cmdbuffer_resuming,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed0,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed0_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed10,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed10_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed11,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed11_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed12,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed12_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed13,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed13_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed14,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed14_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed15,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed15_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed16,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed16_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed17,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed17_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed18,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed18_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed19,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed19_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed1,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed1_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed20,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed20_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed21,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed21_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed22,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed22_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed23,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed23_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed24,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed24_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed25,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed25_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed26,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed26_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed27,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed27_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed28,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed28_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed29,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed29_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed2,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed2_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed30,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed30_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed31,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed31_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed32,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed32_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed33,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed33_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed34,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed34_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed35,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed35_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed36,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed36_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed37,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed37_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed38,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed38_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed39,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed39_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed3,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed3_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed40,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed40_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed41,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed41_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed42,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed42_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed43,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed43_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed44,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed44_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed45,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed45_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed46,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed46_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed47,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed47_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed48,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed48_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed49,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed49_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed4,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed4_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed50,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed50_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed51,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed51_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed52,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed52_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed53,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed53_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed54,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed54_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed55,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed55_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed56,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed56_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed57,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed57_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed58,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed58_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed59,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed59_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed5,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed5_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed60,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed60_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed61,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed61_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed62,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed62_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed63,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed63_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed64,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed64_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed65,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed65_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed66,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed66_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed67,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed67_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed68,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed68_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed69,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed69_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed6,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed6_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed70,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed70_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed71,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed71_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed72,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed72_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed73,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed73_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed74,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed74_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed75,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed75_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed76,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed76_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed77,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed77_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed78,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed78_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed79,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed79_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed7,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed7_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed80,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed80_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed81,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed81_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed82,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed82_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed83,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed83_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed84,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed84_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed85,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed85_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed86,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed86_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed87,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed87_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed88,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed88_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed89,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed89_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed8,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed8_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed90,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed90_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed91,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed91_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed92,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed92_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed93,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed93_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed94,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed94_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed95,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed95_multiview,Crash
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed96,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed96_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed97,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed97_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed98,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed98_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed99,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed99_multiview,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed9,Fail
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.random.seed9_multiview,Crash
+
+# Segfaults once we enabled dEQP-VK.wsi.direct_drm testing.
+dEQP-VK.wsi.direct_drm.colorspace.basic,Crash
+dEQP-VK.wsi.direct_drm.colorspace.extensions,Crash
+dEQP-VK.wsi.direct_drm.colorspace.hdr,Crash
+dEQP-VK.wsi.direct_drm.display_timing.fifo_latest_ready.display_timing,Crash
+dEQP-VK.wsi.direct_drm.display_timing.fifo_latest_ready.reference,Crash
+dEQP-VK.wsi.direct_drm.display_timing.fifo_relaxed.display_timing,Crash
+dEQP-VK.wsi.direct_drm.display_timing.fifo_relaxed.reference,Crash
+dEQP-VK.wsi.direct_drm.display_timing.fifo.display_timing,Crash
+dEQP-VK.wsi.direct_drm.display_timing.fifo.reference,Crash
+dEQP-VK.wsi.direct_drm.display_timing.immediate.display_timing,Crash
+dEQP-VK.wsi.direct_drm.display_timing.immediate.reference,Crash
+dEQP-VK.wsi.direct_drm.display_timing.mailbox.display_timing,Crash
+dEQP-VK.wsi.direct_drm.display_timing.mailbox.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror_rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.horizontal_mirror.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.identity.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.identity.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.identity.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.identity.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.identity.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.identity.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.identity.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.identity.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.inherit.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.inherit.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.inherit.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.inherit.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.inherit.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.inherit.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.inherit.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.inherit.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_latest_ready.rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror_rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.horizontal_mirror.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.identity.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.identity.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.identity.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.identity.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.identity.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.identity.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.identity.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.identity.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.inherit.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.inherit.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.inherit.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.inherit.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.inherit.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.inherit.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.inherit.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.inherit.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo_relaxed.rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror_rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.horizontal_mirror.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.identity.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.identity.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.identity.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.identity.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.identity.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.identity.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.identity.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.identity.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.inherit.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.inherit.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.inherit.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.inherit.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.inherit.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.inherit.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.inherit.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.inherit.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.fifo.rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror_rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.horizontal_mirror.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.identity.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.identity.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.identity.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.identity.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.identity.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.identity.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.identity.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.identity.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.inherit.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.inherit.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.inherit.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.inherit.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.inherit.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.inherit.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.inherit.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.inherit.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.immediate.rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror_rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.horizontal_mirror.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.identity.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.identity.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.identity.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.identity.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.identity.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.identity.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.identity.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.identity.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.inherit.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.inherit.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.inherit.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.inherit.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.inherit.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.inherit.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.inherit.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.inherit.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_180.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_180.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_180.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_180.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_180.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_180.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_180.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_180.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_270.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_270.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_270.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_270.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_270.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_270.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_270.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_270.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_90.inherit.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_90.inherit.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_90.opaque.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_90.opaque.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_90.post_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_90.post_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_90.pre_multiplied.incremental_present,Crash
+dEQP-VK.wsi.direct_drm.incremental_present.scale_none.mailbox.rotate_90.pre_multiplied.reference,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.id.increasing,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.id.interleaved,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.id.zero,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.id2.increasing,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.id2.interleaved,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.id2.zero,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.wait.future_frame,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.wait.no_frame_id,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.wait.no_frames,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.wait.past_no_timeout,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.wait.single_no_timeout,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.wait2.past_no_timeout,Crash
+dEQP-VK.wsi.direct_drm.present_id_wait.wait2.single_no_timeout,Crash
+dEQP-VK.wsi.direct_drm.surface.create_custom_allocator,Crash
+dEQP-VK.wsi.direct_drm.surface.create_simulate_oom,Crash
+dEQP-VK.wsi.direct_drm.surface.create,Crash
+dEQP-VK.wsi.direct_drm.surface.query_capabilities,Crash
+dEQP-VK.wsi.direct_drm.surface.query_capabilities2,Crash
+dEQP-VK.wsi.direct_drm.surface.query_devgroup_present_modes,Crash
+dEQP-VK.wsi.direct_drm.surface.query_formats,Crash
+dEQP-VK.wsi.direct_drm.surface.query_formats2,Crash
+dEQP-VK.wsi.direct_drm.surface.query_present_modes,Crash
+dEQP-VK.wsi.direct_drm.surface.query_present_modes2,Crash
+dEQP-VK.wsi.direct_drm.surface.query_support,Crash
+dEQP-VK.wsi.direct_drm.surface.query_surface_counters,Crash
+dEQP-VK.wsi.direct_drm.swapchain.acquire.too_many_timeout,Crash
+dEQP-VK.wsi.direct_drm.swapchain.acquire.too_many,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.clipped,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.composite_alpha,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.exclusive_nonzero_queues,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.image_array_layers,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.image_extent,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.image_format,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.image_sharing_mode,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.image_swapchain_create_info_concurrent,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.image_swapchain_create_info,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.image_usage,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.min_image_count,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.pre_transform,Crash
+dEQP-VK.wsi.direct_drm.swapchain.create.present_mode,Crash
+dEQP-VK.wsi.direct_drm.swapchain.destroy.null_handle,Crash
+dEQP-VK.wsi.direct_drm.swapchain.destroy.old_swapchain_acquired_image,Crash
+dEQP-VK.wsi.direct_drm.swapchain.destroy.old_swapchain,Crash
+dEQP-VK.wsi.direct_drm.swapchain.destroy.retired_swapchain_present,Crash
+dEQP-VK.wsi.direct_drm.swapchain.get_images.count,Crash
+dEQP-VK.wsi.direct_drm.swapchain.get_images.incomplete,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.clipped,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.composite_alpha,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.exclusive_nonzero_queues,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.image_array_layers,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.image_format,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.image_sharing_mode,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.image_usage,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.min_image_count,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.pre_transform,Crash
+dEQP-VK.wsi.direct_drm.swapchain.private_data.present_mode,Crash
+dEQP-VK.wsi.direct_drm.swapchain.render.basic,Crash
+dEQP-VK.wsi.direct_drm.swapchain.render.basic2,Crash
+dEQP-VK.wsi.direct_drm.swapchain.render.device_group,Crash
+dEQP-VK.wsi.direct_drm.swapchain.render.device_group2,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.clipped,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.composite_alpha,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.exclusive_nonzero_queues,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.image_array_layers,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.image_extent,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.image_format,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.image_sharing_mode,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.image_swapchain_create_info,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.image_swapchain_create_info_concurrent,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.image_usage,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.min_image_count,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.pre_transform,Crash
+dEQP-VK.wsi.direct_drm.swapchain.simulate_oom.present_mode,Crash

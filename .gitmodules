@@ -1,0 +1,3 @@
+[submodule "triton-dxvk"]
+	path = triton-dxvk
+	url = https://github.com/osy/dxvk.git

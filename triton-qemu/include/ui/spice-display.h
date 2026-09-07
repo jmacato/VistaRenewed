@@ -1,0 +1,239 @@
+/*
+ * Copyright (C) 2010 Red Hat, Inc.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License as
+ * published by the Free Software Foundation; either version 2 or
+ * (at your option) version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef UI_SPICE_DISPLAY_H
+#define UI_SPICE_DISPLAY_H
+
+#include <spice.h>
+#include <spice/ipc_ring.h>
+#include <spice/enums.h>
+#include <spice/qxl_dev.h>
+
+#include "qemu/thread.h"
+#include "ui/qemu-pixman.h"
+#include "ui/console.h"
+
+#if defined(CONFIG_IOSURFACE)
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOSurface/IOSurfaceRef.h>
+#endif
+
+#if defined(CONFIG_OPENGL)
+#  define HAVE_SPICE_GL 1
+#  include "ui/egl-helpers.h"
+#  include "ui/egl-context.h"
+#endif
+
+#define NUM_MEMSLOTS 8
+#define MEMSLOT_GENERATION_BITS 8
+#define MEMSLOT_SLOT_BITS 8
+
+#define MEMSLOT_GROUP_HOST  0
+#define MEMSLOT_GROUP_GUEST 1
+#define NUM_MEMSLOTS_GROUPS 2
+
+/*
+ * Internal enum to differentiate between options for
+ * io calls that have a sync (old) version and an _async (new)
+ * version:
+ *  QXL_SYNC: use the old version
+ *  QXL_ASYNC: use the new version and make sure there are no two
+ *   happening at the same time. This is used for guest initiated
+ *   calls
+ */
+typedef enum qxl_async_io {
+    QXL_SYNC,
+    QXL_ASYNC,
+} qxl_async_io;
+
+enum {
+    QXL_COOKIE_TYPE_IO,
+    QXL_COOKIE_TYPE_RENDER_UPDATE_AREA,
+    QXL_COOKIE_TYPE_POST_LOAD_MONITORS_CONFIG,
+    QXL_COOKIE_TYPE_GL_DRAW_DONE,
+};
+
+typedef struct QXLCookie {
+    int      type;
+    uint64_t io;
+    union {
+        uint32_t surface_id;
+        QXLRect area;
+        struct {
+            QXLRect area;
+            int redraw;
+        } render;
+        struct {
+            QXLInstance *qxl;
+            uint32_t x;
+            uint32_t y;
+            uint32_t w;
+            uint32_t h;
+        } gl_draw;
+        void *data;
+    } u;
+} QXLCookie;
+
+QXLCookie *qxl_cookie_new(int type, uint64_t io);
+
+typedef struct SimpleSpiceDisplay SimpleSpiceDisplay;
+typedef struct SimpleSpiceUpdate SimpleSpiceUpdate;
+typedef struct SimpleSpiceCursor SimpleSpiceCursor;
+typedef void *SpiceDisplayMetalContext;
+
+struct SimpleSpiceDisplay {
+    DisplaySurface *ds;
+    DisplayGLCtx dgc;
+    DisplayChangeListener dcl;
+    void *buf;
+    int bufsize;
+    QXLInstance qxl;
+    uint32_t unique;
+    pixman_image_t *surface;
+    pixman_image_t *mirror;
+    int32_t num_surfaces;
+
+    QXLRect dirty;
+    int notify;
+
+    /*
+     * All struct members below this comment can be accessed from
+     * both spice server and qemu (iothread) context and any access
+     * to them must be protected by the lock.
+     */
+    QemuMutex lock;
+    QTAILQ_HEAD(, SimpleSpiceUpdate) updates;
+
+    /* cursor (without qxl): displaychangelistener -> spice server */
+    SimpleSpiceCursor *ptr_define;
+    SimpleSpiceCursor *ptr_move;
+    int16_t ptr_x, ptr_y;
+    int16_t hot_x, hot_y;
+
+    /* cursor (with qxl): qxl local renderer -> displaychangelistener */
+    QEMUCursor *cursor;
+    int mouse_x, mouse_y;
+    QEMUBH *cursor_bh;
+
+#ifdef HAVE_SPICE_GL
+    /* opengl rendering */
+    QEMUBH *gl_unblock_bh;
+    QEMUTimer *gl_unblock_timer;
+    QemuGLShader *gls;
+    int gl_updates;
+    bool have_scanout;
+    bool have_surface;
+
+#if defined(CONFIG_GBM)
+    QemuDmaBuf *guest_dmabuf;
+    bool guest_dmabuf_refresh;
+#endif
+#if defined(CONFIG_IOSURFACE)
+    IOSurfaceRef iosurface;
+    /* IOSurface pixel format ('BGRA'/'RGBA') the surface was created with;
+     * a guest scanout in a different channel order forces a recreate. */
+    uint32_t iosurface_fourcc;
+    int surface_send_fd;
+    /* last geometry sent via spice_qxl_gl_scanout/monitor_config so we can
+     * skip re-sending the scanout for pure back-buffer flips */
+    uint32_t scanout_last_x, scanout_last_y, scanout_last_w, scanout_last_h;
+    bool scanout_last_y0top;
+#if defined(CONFIG_METAL)
+    SpiceDisplayMetalContext metal_context;
+#endif
+#endif
+#if defined(CONFIG_EGL)
+    EGLSurface esurface;
+    egl_fb iosurface_fb;
+#endif
+    GLuint tex_id;
+    bool y_0_top;
+    bool render_cursor;
+
+    egl_fb guest_fb;
+    egl_fb blit_fb;
+    egl_fb cursor_fb;
+    bool have_hot;
+#endif
+};
+
+struct SimpleSpiceUpdate {
+    QXLDrawable drawable;
+    QXLImage image;
+    QXLCommandExt ext;
+    uint8_t *bitmap;
+    QTAILQ_ENTRY(SimpleSpiceUpdate) next;
+};
+
+struct SimpleSpiceCursor {
+    QXLCursorCmd cmd;
+    QXLCommandExt ext;
+    QXLCursor cursor;
+};
+
+int qemu_spice_rect_is_empty(const QXLRect* r);
+void qemu_spice_rect_union(QXLRect *dest, const QXLRect *r);
+
+void qemu_spice_destroy_update(SimpleSpiceDisplay *sdpy, SimpleSpiceUpdate *update);
+void qemu_spice_create_host_memslot(SimpleSpiceDisplay *ssd);
+void qemu_spice_create_host_primary(SimpleSpiceDisplay *ssd);
+void qemu_spice_destroy_host_primary(SimpleSpiceDisplay *ssd);
+void qemu_spice_display_init_common(SimpleSpiceDisplay *ssd);
+
+void qemu_spice_display_update(SimpleSpiceDisplay *ssd,
+                               int x, int y, int w, int h);
+void qemu_spice_display_switch(SimpleSpiceDisplay *ssd,
+                               DisplaySurface *surface);
+void qemu_spice_display_refresh(SimpleSpiceDisplay *ssd);
+void qemu_spice_cursor_refresh_bh(void *opaque);
+
+void qemu_spice_add_memslot(SimpleSpiceDisplay *ssd, QXLDevMemSlot *memslot,
+                            qxl_async_io async);
+void qemu_spice_del_memslot(SimpleSpiceDisplay *ssd, uint32_t gid,
+                            uint32_t sid);
+void qemu_spice_create_primary_surface(SimpleSpiceDisplay *ssd, uint32_t id,
+                                       QXLDevSurfaceCreate *surface,
+                                       qxl_async_io async);
+void qemu_spice_destroy_primary_surface(SimpleSpiceDisplay *ssd,
+                                        uint32_t id, qxl_async_io async);
+void qemu_spice_wakeup(SimpleSpiceDisplay *ssd);
+void qemu_spice_display_start(void);
+void qemu_spice_display_stop(void);
+int qemu_spice_display_is_running(SimpleSpiceDisplay *ssd);
+
+#if defined(CONFIG_METAL) && defined(CONFIG_IOSURFACE)
+typedef void *MTLTexture_id;
+typedef void (*SpiceDisplayMetalCompletion)(void *data);
+
+SpiceDisplayMetalContext qemu_spice_display_metal_create_context(IOSurfaceRef surface,
+                                                                 uint32_t width,
+                                                                 uint32_t height);
+void qemu_spice_display_metal_destroy_context(SpiceDisplayMetalContext ctx);
+/* IOSurface pixel format matching a scanout MTLTexture, 0 if unsupported. */
+uint32_t qemu_spice_display_metal_texture_fourcc(void *texture);
+void qemu_spice_display_metal_scanout_texture(SpiceDisplayMetalContext ctx,
+                                              MTLTexture_id tex, uint32_t x, uint32_t y,
+                                              uint32_t w, uint32_t h);
+void qemu_spice_display_metal_scanout_disable(SpiceDisplayMetalContext ctx);
+bool qemu_spice_display_metal_has_scanout(SpiceDisplayMetalContext ctx);
+void qemu_spice_display_metal_draw_frame(SpiceDisplayMetalContext ctx,
+                                         uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                         SpiceDisplayMetalCompletion completion,
+                                         void *data);
+#endif
+
+#endif

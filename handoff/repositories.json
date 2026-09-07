@@ -1,0 +1,66 @@
+[
+  {
+    "directory": ".",
+    "head": "859c4a0129993abfc68eda86ec64fd6f329db153",
+    "branch": "main",
+    "remotes": "",
+    "status": "D scripts/aero_layout_window.py\n?? .DS_Store\n?? aaaaa/\n?? driver/\n?? en_windows_vista_x64_check_dvd_x13-31669.iso\n?? extracted/\n?? host-triton/\n?? notes/\n?? pdbs/\n?? recovery-vista/\n?? scripts/audit_triton_host_fence_contract.py\n?? scripts/build_deploy_vista_driver.sh\n?? scripts/build_vista_deploy_service.sh\n?? scripts/capture_vista_passive_png.py\n?? scripts/fetch_pdbs.py\n?? scripts/run_vista_guest_deploy.sh\n?? scripts/stage_vista_deploy_media.sh\n?? scripts/verify_aero_glass_pixels.py\n?? scripts/vista_artifact_server.py\n?? test-artifacts/\n?? triton-angle/\n?? triton-dxmt/\n?? triton-kmd/\n?? triton-libepoxy/\n?? triton-qemu/\n?? triton-umd/\n?? triton-virglrenderer/\n?? winvista-recreated.qcow2",
+    "submodules": ""
+  },
+  {
+    "directory": "triton-angle",
+    "head": "ed78ab6e1a37f4f11583a0bd038f22ec91f3ff10",
+    "branch": "",
+    "remotes": "origin\thttps://github.com/utmapp/WebKit.git (fetch) [blob:none]\norigin\thttps://github.com/utmapp/WebKit.git (push)",
+    "status": "",
+    "submodules": ""
+  },
+  {
+    "directory": "triton-dxmt",
+    "head": "822ae637a39512ddbd8e0bbd7744af514670c9d3",
+    "branch": "main",
+    "remotes": "origin\thttps://github.com/utmapp/dxmt.git (fetch)\norigin\thttps://github.com/utmapp/dxmt.git (push)",
+    "status": "M src/d3d11/d3d11_context_imm.cpp\n M src/d3d11/d3d11_context_impl.cpp\n M src/d3d11/d3d11_device.hpp\n M src/dxmt-native/dxmt_native.exports\n M src/dxmt-native/dxmt_native.h\n M src/dxmt/dxmt_command.cpp\n M src/dxmt/dxmt_command.hpp\n M tests/native/d3d11_test.cpp\n?? _dxmt.log\n?? tests/native/_dxmt.log",
+    "submodules": "d08488fcc82eef313b0464db37d2955709691e94 external/nvapi (remotes/origin/530-13-gd08488f)\n 9df86f2341616ef1888ae59919feaa6d4fad693d include/native/directx (heads/main)"
+  },
+  {
+    "directory": "triton-kmd",
+    "head": "74cb98d15f6cb9ca44d9b6ecc6e47a2236eeb2d3",
+    "branch": "neptune",
+    "remotes": "origin\thttps://github.com/osy/kvm-guest-drivers-windows.git (fetch)\norigin\thttps://github.com/osy/kvm-guest-drivers-windows.git (push)",
+    "status": "M VirtIO/VirtIOPCIModern.c\n M VirtIO/VirtioLib.vcxproj\n M build/Driver.Common.props\n M build/Driver.PackOne.targets\n M viogpu/common/baseobj.cpp\n M viogpu/common/baseobj.h\n M viogpu/common/helper.h\n M viogpu/common/linked_list.h\n M viogpu/common/viogpu.h\n M viogpu/common/viogpu_idr.cpp\n M viogpu/common/viogpu_pci.cpp\n M viogpu/common/viogpu_pci.h\n M viogpu/common/viogpu_pnp_fixup.cpp\n M viogpu/common/viogpu_queue.cpp\n M viogpu/common/viogpu_queue.h\n M viogpu/shared/viogpum.h\n M viogpu/viogpu3d/driver.cpp\n M viogpu/viogpu3d/driver.h\n M viogpu/viogpu3d/trace.h\n M viogpu/viogpu3d/viogpu3d.props\n M viogpu/viogpu3d/viogpu3d.vcxproj\n M viogpu/viogpu3d/viogpu3d.vcxproj.filters\n M viogpu/viogpu3d/viogpu_adapter.cpp\n M viogpu/viogpu3d/viogpu_adapter.h\n M viogpu/viogpu3d/viogpu_allocation.cpp\n M viogpu/viogpu3d/viogpu_allocation.h\n M viogpu/viogpu3d/viogpu_command.cpp\n M viogpu/viogpu3d/viogpu_command.h\n M viogpu/viogpu3d/viogpu_device.cpp\n M viogpu/viogpu3d/viogpu_device.h\n M viogpu/viogpu3d/viogpu_vidpn.cpp\n M viogpu/viogpu3d/viogpu_vidpn.h\n M viogpu/viogpudo/viogpudo.cpp\n?? .DS_Store\n?? viogpu/BUILDING_VISTA.md\n?? viogpu/tools/\n?? viogpu/viogpu3d/viogpu3d_vista_x64.inx\n?? viogpu/viogpu3d/viogpu3d_vista_x86.inx\n?? viogpu/viogpu_vista.sln",
+    "submodules": ""
+  },
+  {
+    "directory": "triton-libepoxy",
+    "head": "bf98587477fe68d07b93319ece7b40a7d0e2eabe",
+    "branch": "",
+    "remotes": "origin\thttps://github.com/utmapp/libepoxy.git (fetch)\norigin\thttps://github.com/utmapp/libepoxy.git (push)",
+    "status": "?? .DS_Store",
+    "submodules": ""
+  },
+  {
+    "directory": "triton-qemu",
+    "head": "7311c3651c3a2cbc3d32e6eae262c60339f28d79",
+    "branch": "utm-edition",
+    "remotes": "origin\thttps://github.com/utmapp/qemu.git (fetch)\norigin\thttps://github.com/utmapp/qemu.git (push)",
+    "status": "M hw/display/virtio-gpu-gl.c\n M hw/display/virtio-gpu-virgl.c\n M hw/display/virtio-gpu.c\n M hw/display/virtio-vga.c\n M include/hw/virtio/virtio-gpu.h\n ? roms/edk2\n?? .DS_Store\n?? roms/.DS_Store\n?? subprojects/.wraplock",
+    "submodules": "90c488d5f4a407342247b9ea869df1c2d9c8e266 roms/QemuMacDrivers (heads/master)\n 3a259df2449fc4a4e43ab5f33f0b2c66484b4bc3 roms/SLOF (3a259df)\n 4dfdca63a93497203f197ec98ba20e2327e4afe4 roms/edk2 (4dfdca63)\n 4bd064de239dab2426b31c9789a1f4d78087dc63 roms/ipxe (4bd064d)\n c3a19c1e54977a53027d6232050e1e3e39a98a1b roms/openbios (c3a19c1)\n 43cace6c3671e5172d0df0a8963e552bb04b7b20 roms/opensbi (43cace6)\n 8ca302e86d685fa05b16e2b208888243da319941 roms/qboot (heads/master)\n 99d9b4dcf27d7fbcbadab71bdc88ef6531baf6bf roms/qemu-palcode (heads/master)\n a6ed6b701f0a57db0569ab98b0661c12a6ec3ff8 roms/seabios (a6ed6b7)\n 3391c580960febcb9fa8f686f9666adaa462c349 roms/seabios-hppa (3391c58)\n 785a5e3070a86e18521e62fe202b87209de30fa2 roms/skiboot (785a5e3)\n 840658b093976390e9537724f802281c9c8439f5 roms/u-boot (840658b0)\n 60b3916f33e617a815973c5a6df77055b2e3a588 roms/u-boot-sam460ex (heads/master)\n 1287b6e42e839ba2ab0f06268c5b53ae60df3537 roms/vbootrom (1287b6e)\n 18c4bfe02c467e5639bf9a687139735ccd7a3fff tests/lcitool/libvirt-ci (18c4bfe)"
+  },
+  {
+    "directory": "triton-umd",
+    "head": "7432d34c2bc10c602d72b1ad4058cde98549f98c",
+    "branch": "neptune",
+    "remotes": "origin\thttps://github.com/osy/virtio-win-mesa.git (fetch)\norigin\thttps://github.com/osy/virtio-win-mesa.git (push)",
+    "status": "M meson.build\n M meson.options\n M src/util/os_misc.h\n M src/virtio/neptune/meson.build\n M src/virtio/neptune/neptune-protocol/npt_protocol_common_types.h\n M src/virtio/neptune/neptune-protocol/npt_protocol_defs.h\n M src/virtio/neptune/npt_com.c\n M src/virtio/neptune/npt_com.h\n M src/virtio/neptune/npt_common.h\n M src/virtio/neptune/npt_dispatch.c\n M src/virtio/neptune/npt_dispatch.h\n M src/virtio/neptune/npt_entry_d3d11.c\n M src/virtio/neptune/npt_overrides_d3d11_fence.c\n M src/virtio/neptune/npt_overrides_d3d11_query.c\n M src/virtio/neptune/npt_renderer.h\n M src/virtio/neptune/npt_renderer_virtgpu_win32.c\n M src/virtio/neptune/npt_ring.c\n M src/virtio/neptune/npt_ring.h\n M src/virtio/neptune/npt_shared_texture.c\n M src/virtio/neptune/npt_shared_texture.h\n M src/virtio/neptune/npt_tls.c\n M src/virtio/neptune/npt_transport_defs.h\n M src/virtio/neptune/triton/tritonDxbc.c\n M src/virtio/neptune/triton/tritonResource.c\n M src/virtio/neptune/triton/tritonShader.c\n M src/virtio/neptune/triton/tritonSharedBridge.c\n M src/virtio/neptune/triton/tritonSharedBridge.h\n M src/virtio/virtio-gpu/wddm_hw.h\n?? .DS_Store\n?? build-support/audit-vista-d3d9-pe.sh\n?? build-support/bootstrap-vista-crt.sh\n?? build-support/vista-x64.ini\n?? build-support/vista-x86.ini\n?? src/.DS_Store\n?? src/virtio/neptune/npt_common_win32.c\n?? src/virtio/neptune/triton/tritonDxbc.h\n?? src/virtio/neptune/triton/tritonDxbcSignature.h\n?? src/virtio/neptune/vista-d3d9/",
+    "submodules": ""
+  },
+  {
+    "directory": "triton-virglrenderer",
+    "head": "65cc14eb896f121ffc5130ce04815a923a03c41d",
+    "branch": "macos-next",
+    "remotes": "origin\thttps://github.com/utmapp/virglrenderer.git (fetch)\norigin\thttps://github.com/utmapp/virglrenderer.git (push)",
+    "status": "M src/neptune/neptune-protocol/npt_protocol_common_types.h\n M src/neptune/neptune-protocol/npt_protocol_defs.h\n M src/neptune/npt_context.c\n M src/neptune/npt_dispatch.c\n M src/neptune/npt_library.c\n M src/neptune/npt_library.h\n M src/neptune/npt_shared.c\n M src/neptune/npt_transport_defs.h\n M src/proxy/proxy_context.c\n M src/virglrenderer.c\n M src/virglrenderer.h\n?? .DS_Store",
+    "submodules": ""
+  }
+]

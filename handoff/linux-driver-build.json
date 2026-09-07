@@ -1,0 +1,250 @@
+{
+  "recorded_utc": "2026-09-06T19:59:10.841304+00:00",
+  "dxvk_revision": "404240fdacf47470b02c76d6e684639a95dc7387",
+  "dxvk_submodules": [
+    " 9df86f2341616ef1888ae59919feaa6d4fad693d include/native/directx (heads/main)",
+    " 04f10f650d514df88b76d25e83db360142c7b174 include/spirv (04f10f6)",
+    " 5d94bb4dcc968cccce1f601324fcaf3eda92a52b include/vulkan (5d94bb4)",
+    " 0e79a703db8b23004c77dbabacf25ed2d41f0bd9 subprojects/dxbc-spirv (0e79a70)",
+    " c8ad050fcb29e42a2f57d9f59e97488f465c436d subprojects/dxbc-spirv/submodules/spirv_headers (c8ad050)",
+    " 275e6459c7ab1ddd4b125f28d0440716e4888078 subprojects/libdisplay-info (heads/windows)"
+  ],
+  "container_image": "1e571ec870d5ac72b8bc5f003b99a7e3b59764e445bafe2558ee68fdae99ec30",
+  "base": {
+    "path": "/var/home/strix/winvistachecked/winvista-3.qcow2",
+    "size": 42956488704,
+    "mtime_ns": 1788722192362531882,
+    "written_by_this_work": false
+  },
+  "artifacts": [
+    {
+      "path": "host-linux/lib/x86_64-linux-gnu/libdxvk_d3d11.so",
+      "size": 9276464,
+      "sha256": "41a04952d29dee7d17083f7d7cc2b48bade314ee198d2d0e2695d1e8783a66bd"
+    },
+    {
+      "path": "host-linux/lib/x86_64-linux-gnu/libdxvk_dxgi.so",
+      "size": 6384560,
+      "sha256": "7467aac757fb3f8e60ec10aad035b25e6b623331750c97b862fd2714b78e6bbf"
+    },
+    {
+      "path": "host-linux/lib/x86_64-linux-gnu/libvirglrenderer.so",
+      "size": 10933296,
+      "sha256": "ce0f3608eba30856539f65b5b0194b0907847d96d6af3ce4a742b3207a985ed4"
+    },
+    {
+      "path": "host-linux/libexec/virgl_render_server",
+      "size": 8516320,
+      "sha256": "c7ad9c8efe84a5e51e51cbbaf81566dbc23f1bcd8c33f3cc29d6a55c10cf7557"
+    },
+    {
+      "path": "triton-qemu/build-linux/qemu-system-x86_64",
+      "size": 81768392,
+      "sha256": "c0c02a46409f4b74394152a8847e8aa5d530fadce9c65c2eb95d1026f07a89a1"
+    },
+    {
+      "path": "test-artifacts/linux-build/d3d11-test",
+      "size": 114040,
+      "sha256": "89873304dad88ee25688faf2abd48fdc742e46bd132dbf4cadcbe10848feb1be"
+    },
+    {
+      "path": "test-artifacts/linux-build/triton-vista-deploy.exe",
+      "size": 302913,
+      "sha256": "0d57df02f8b4a39e4870283db659c89b10b458dc4b3b652f68f5de8cb3a1e510"
+    },
+    {
+      "path": "triton-umd/build-vista-linux-x64/src/virtio/neptune/vista-d3d9/neptune_d3d9.dll",
+      "size": 19718546,
+      "sha256": "12c4f412072a3b091dfdc7b60e1e499bdfc1f4a310168b76d7ced4cb22929c81"
+    },
+    {
+      "path": "triton-umd/build-vista-linux-x64/src/virtio/neptune/vista-d3d9/triton9_runtime_probe.exe",
+      "size": 591715,
+      "sha256": "28d14b0956ab06151dea7b4a6177cee17e41f56ac2dbb7c2eb87d160155af8f3"
+    },
+    {
+      "path": "triton-umd/build-vista-linux-x64/src/virtio/neptune/vista-d3d9/libtriton9_abi_compile.a",
+      "size": 250,
+      "sha256": "b73974f702ab4835c65981ead433b2aed7e791633dc1b5554ea48f484a17742c"
+    },
+    {
+      "path": "triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d9/neptune_d3d9.dll",
+      "size": 18184828,
+      "sha256": "8373882dbe3656fc654cd321f06d28894839935544272a2ae53a6dfdab4ee97e"
+    },
+    {
+      "path": "triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d9/triton9_runtime_probe.exe",
+      "size": 570386,
+      "sha256": "29c4530e72df74cf9fc75a6d0eb1563a8b0efbe5f242e4eefe34c701e36652ed"
+    },
+    {
+      "path": "triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d9/libtriton9_abi_compile.a",
+      "size": 250,
+      "sha256": "0df715539a9c37d82e11bcb4312e5cf5b47f54347cda57f6811d081d98d7f5c6"
+    }
+  ],
+  "changed_sources": [
+    {
+      "path": "scripts/build_linux_graphics.sh",
+      "size": 1141,
+      "sha256": "cae67f3bd219491e4fb95c902ba9fae99e32250f8be6b4dfd7427c211a3d692b"
+    },
+    {
+      "path": "scripts/build_linux_qemu.sh",
+      "size": 553,
+      "sha256": "ef060f64520347f3de7a0611094e395a43c0c1d66c8c88448a70fa1524ad8fc8"
+    },
+    {
+      "path": "scripts/build_vista_service_linux.sh",
+      "size": 1077,
+      "sha256": "23ac887c5fa0e8325dca73ef05f534c5fcac051a95bf55c2df17dc5e6e511c2a"
+    },
+    {
+      "path": "scripts/build_vista_umd_linux.sh",
+      "size": 1355,
+      "sha256": "2300e4186b9adf8f8bd6c56138aa8681f8c87fb36d2e176bad76491098e7e2d1"
+    },
+    {
+      "path": "scripts/check_linux_neptune_qemu.py",
+      "size": 3914,
+      "sha256": "068395af81cc64579ce1c8727ffc97cb051e537841e7faf55985386d52309c3c"
+    },
+    {
+      "path": "scripts/fetch_vista_sdk_headers.py",
+      "size": 2515,
+      "sha256": "1e401107e4d30b5f2d4b4c17bc9b6d3caa8541f203a5cab8057324f68bfc3b88"
+    },
+    {
+      "path": "scripts/linux-driver.Containerfile",
+      "size": 962,
+      "sha256": "506e2bc437f44b38a684fc373078bd52d1d92e206a6c8de19c2d37245652c57e"
+    },
+    {
+      "path": "scripts/test_linux_graphics.sh",
+      "size": 1219,
+      "sha256": "b42fc5dc0fc4771290f5b636350aaad1a08d84e2f02409ae178c9eadfe33ff67"
+    },
+    {
+      "path": "test-artifacts/linux-d3d11-test.cpp",
+      "size": 8614,
+      "sha256": "e195d33e5d515dc52026ef5133810916f880e5fafaac1d2cd20d0b4d4e106acd"
+    },
+    {
+      "path": "triton-dxmt/tests/native/d3d11_test.cpp",
+      "size": 58930,
+      "sha256": "ae004270162c3e499a5c4c0a228e44ae67a7ea6775cd6b361e8a43989e1060a8"
+    },
+    {
+      "path": "triton-dxvk/include/native/dxvk_neptune.h",
+      "size": 900,
+      "sha256": "c9edd14a2acff813c4cba5a16586190b933fe537c3c81f5b812936220cd82edf"
+    },
+    {
+      "path": "triton-dxvk/include/native/meson.build",
+      "size": 456,
+      "sha256": "6e742b7e88991e1ad6b6329a783692e5d0f8bd4db57cae79b59c8aaa57e0fbd5"
+    },
+    {
+      "path": "triton-dxvk/src/d3d11/d3d11.sym",
+      "size": 186,
+      "sha256": "9f9900ee0169f4797e9f4c05e5e66b624ebc55cc338d785cde18891f8e5e518e"
+    },
+    {
+      "path": "triton-dxvk/src/d3d11/d3d11_context.cpp",
+      "size": 215991,
+      "sha256": "5e745a0bf13ea55289a35ef97c01ddd0b9bfd0fc0d7c6361a358566a79d93d8f"
+    },
+    {
+      "path": "triton-dxvk/src/d3d11/d3d11_context_imm.cpp",
+      "size": 47020,
+      "sha256": "741290f7f94665ca94a48e4cd5c15f7d4eb4881703e1aec2504eb45ce80646ac"
+    },
+    {
+      "path": "triton-dxvk/src/d3d11/d3d11_context_imm.h",
+      "size": 7505,
+      "sha256": "97520aa99630bc3e15e1115ab90f2e3c49415a629ae34651445fb09d30089cc4"
+    },
+    {
+      "path": "triton-dxvk/src/d3d11/d3d11_main.cpp",
+      "size": 16876,
+      "sha256": "1fc5dfa3b910f422359a213250d110094a079eef6e63d7a9e941c3d9e8944797"
+    },
+    {
+      "path": "triton-dxvk/src/dxvk/dxvk_device.cpp",
+      "size": 36429,
+      "sha256": "4b29cb82a147d83b46b0ee68b4b6a455f0126739c21e7872f5d2271dc68f3c6d"
+    },
+    {
+      "path": "triton-dxvk/src/dxvk/dxvk_device.h",
+      "size": 21895,
+      "sha256": "0adadb0ea321b88f89729fd029c6eb2ad76a2c476ada66e08b1fcac6106df7f0"
+    },
+    {
+      "path": "triton-qemu/ui/spice-display.c",
+      "size": 58158,
+      "sha256": "8e17c716559dd597242f6b01832fe1ef06ca80420a6a32c524c6a7eca79976a1"
+    },
+    {
+      "path": "triton-umd/build-support/vista-linux-x64.ini",
+      "size": 1384,
+      "sha256": "9c7a0bed5b02b7980b782a4dfe0feb0f2f5cae7f22178ebf80c5f20a12fd7c23"
+    },
+    {
+      "path": "triton-umd/build-support/vista-linux-x86.ini",
+      "size": 1368,
+      "sha256": "843efb3c2240ea3156664e7d712c9be93a4422c695a4cdca7678f981b936f325"
+    },
+    {
+      "path": "triton-umd/src/virtio/neptune/vista-d3d9/meson.build",
+      "size": 6082,
+      "sha256": "ccb2cdb5ec02f504929289b1b1d5ab5136277861818605561e0bcd10c1401812"
+    },
+    {
+      "path": "triton-umd/src/virtio/neptune/vista-d3d9/third_party/d3d9on12-shaderconverter/ShaderConv/context.hpp",
+      "size": 23613,
+      "sha256": "0859dbaf38a83124c216823a334335c27f60d546301498db97495a5afa393715"
+    },
+    {
+      "path": "triton-virglrenderer/src/neptune/npt_dispatch.c",
+      "size": 32382,
+      "sha256": "36acebf527728a624a6a25ebf2b662e905b633dd420dee9cee259c3372eb50e6"
+    },
+    {
+      "path": "triton-virglrenderer/src/neptune/npt_library.c",
+      "size": 9278,
+      "sha256": "94068b68b49278e169b124bc4b8d3c78608c54b8374a2d7207b869cd14ce2b50"
+    },
+    {
+      "path": "triton-virglrenderer/src/neptune/npt_library.h",
+      "size": 3192,
+      "sha256": "ce03200449248f8fe18c03c9dda134f3a30f8fb2d1b3ed7a8bad9028679ddf3d"
+    },
+    {
+      "path": "triton-virglrenderer/src/vrend/vrend_renderer.c",
+      "size": 525801,
+      "sha256": "c2f67513523d298cefa91e5d916acb3e124b8096ce4f091f7cbd4008712239f7"
+    },
+    {
+      "path": "triton-virglrenderer/tests/test_neptune_init.c",
+      "size": 5219,
+      "sha256": "b2d01083540c47907e8721d1cbdba89152a661713bdcfa46e3a69e4f9e306b66"
+    }
+  ],
+  "validation": {
+    "hardware_native_d3d11": {
+      "passed": 234,
+      "failed": 0,
+      "log": "test-artifacts/linux-build/final-hardware-tests.log"
+    },
+    "software_native_d3d11": {
+      "passed": 212,
+      "failed": 0,
+      "dmabuf_sharing": "skipped",
+      "log": "test-artifacts/linux-build/d3d11-runtime.log"
+    },
+    "qemu_smoke": "test-artifacts/linux-build/qemu-smoke.json",
+    "umd_pe_audits": "test-artifacts/linux-build/umd-rebuild.log",
+    "service_pe_audit": "test-artifacts/linux-build/service-build.log"
+  },
+  "guest_deployment": "not performed; OOBE and KMD build/signing route outstanding"
+}

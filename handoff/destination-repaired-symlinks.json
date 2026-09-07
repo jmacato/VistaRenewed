@@ -1,0 +1,9 @@
+[
+  "triton-qemu/subprojects/libvduse/include/atomic.h",
+  "triton-qemu/subprojects/libvduse/include/compiler.h",
+  "triton-qemu/subprojects/libvduse/linux-headers/linux",
+  "triton-qemu/subprojects/libvduse/standard-headers/linux",
+  "triton-qemu/subprojects/libvhost-user/include/atomic.h",
+  "triton-qemu/subprojects/libvhost-user/include/compiler.h",
+  "triton-qemu/subprojects/libvhost-user/standard-headers/linux"
+]
