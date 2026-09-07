@@ -17,7 +17,8 @@ __pycache__/
 /triton-qemu/test-artifacts/
 /test-artifacts/linux-build/
 /test-artifacts/vista-triton/
-/test-artifacts/vista-driver-x64-kd-serialtrace/
+/test-artifacts/vista-driver-x64-kd-serialtrace/*
+!/test-artifacts/vista-driver-x64-kd-serialtrace/viogpu3d-diagnostic.inf
 /test-artifacts/vista-driver-x86/
 
 # Local signing identities must never enter version control.

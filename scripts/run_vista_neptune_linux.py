@@ -41,6 +41,7 @@ if display == 'gtk':
 recovery_vga = os.environ.get('VISTA_RECOVERY_VGA') == '1'
 if not 1 <= cpus <= 16:
     raise SystemExit('VISTA_CPUS must be 1..16')
+(root/'vista-kvm/runs').mkdir(parents=True, exist_ok=True)
 run = Path(tempfile.mkdtemp(prefix='neptune-', dir=root/'vista-kvm/runs'))
 token = secrets.token_hex(32)
 name = 'vista-aero-'+token[:16]

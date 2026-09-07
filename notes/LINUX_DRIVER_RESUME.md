@@ -1,3 +1,5 @@
+> Historical development record. Start with the [current project documentation](../README.md); early status statements below describe earlier stages.
+
 # Linux driver continuation — September 7, 2026
 
 The supplied `winvista-3.qcow2` remains the base. Its working overlay is

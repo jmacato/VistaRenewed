@@ -12,7 +12,8 @@ The new commit has not been pushed to that upstream. The parent repository
 records it as a submodule and also includes `handoff/triton-dxvk-linux.patch`
 so the change can be reconstructed from the upstream base with `git am`.
 Do not assume a recursive clone can fetch the local commit from upstream.
-Public packaging must resolve this before release.
+`scripts/bootstrap_sources.py` now restores this exact commit from the bundled
+delta in `patches/dxvk-neptune.bundle`; see the root README for clone instructions.
 
 VM disks and runtime records, downloaded SDK/WDK/Windows files, generated
 packages and host binaries, and local signing identities are excluded.

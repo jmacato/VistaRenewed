@@ -25,10 +25,10 @@ Launch nonces:
 - First: `5239a53b0551fe71f0bb240aab84799895a56d063c92ea1ca470c803e7f87172`
 - Second: `32b2e76c34129d3fe74f86d6a87f5fd6ba3aeb073dfbe85c85ca518ccefd5f9a`
 
-Artifacts:
+Artifacts (PNGs are included in Git; the remaining records are local-only):
 
-- [First settled capture](../vista-kvm/runs/neptune-22gmrwll/glass-ea97-boot1-settled.png)
-- [Second capture](../vista-kvm/runs/neptune-22gmrwll/glass-ea97-boot2.png)
+- [First settled capture](../docs/evidence/glass-boot1.png)
+- [Second capture](../docs/evidence/glass-boot2.png)
 - [First metrics, hashes and log location](../vista-kvm/runs/neptune-22gmrwll/glass-ea97-boot1-settled.json)
 - [Second metrics, hashes and log location](../vista-kvm/runs/neptune-22gmrwll/glass-ea97-boot2.json)
 - [Combined machine-readable report](../vista-kvm/runs/neptune-22gmrwll/aero-glass-verification.json)

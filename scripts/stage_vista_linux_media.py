@@ -22,7 +22,7 @@ manifest = ''.join(f'{sha(package/name)}  {name}\n' for name in files)
 (package/'package-manifest.sha256').write_text(manifest)
 deployment = hashlib.sha256(manifest.encode()).hexdigest()
 publications = root/'vista-kvm/publications'
-publications.mkdir(exist_ok=True)
+publications.mkdir(parents=True, exist_ok=True)
 destination = publications/deployment
 if destination.exists():
     raise SystemExit(f'Publication already exists: {destination}')

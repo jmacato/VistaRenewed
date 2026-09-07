@@ -1,3 +1,5 @@
+> Historical development record. Start with the [current project documentation](README.md); early status statements below describe earlier stages.
+
 # Vista Triton handoff — 2026-09-07
 
 ## Destination update — Linux/KVM, September 7
