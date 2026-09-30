@@ -2,8 +2,9 @@
 // The RSSFeeds gadget consumes this store directly, so its shipped page and
 // script stay untouched.
 
-var FEED_NAME = "Philippines News";
-var FEED_URL = "http://10.0.2.2:8765/news";
+var locale = new ActiveXObject("WScript.Shell").RegRead("HKCU\\Control Panel\\International\\LocaleName");
+var FEED_URL = "http://10.0.2.2:8765/news?locale=" + encodeURIComponent(locale);
+var FEED_NAME = "Google News (" + locale + ")";
 
 function main() {
     var manager = new ActiveXObject("Microsoft.FeedsManager");

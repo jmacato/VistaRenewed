@@ -49,7 +49,7 @@ function LocalWeatherLookupService() {
                     respond(500, new Array());
                 }
             };
-            request.open("GET", "http://10.0.2.2:8765/weather-search?query=" + encodeURIComponent(query), true);
+            request.open("GET", "http://10.0.2.2:8765/weather-search?query=" + encodeURIComponent(query) + "&locale=" + encodeURIComponent(navigator.userLanguage || navigator.systemLanguage || ""), true);
             request.send();
         } catch (error) {
             respond(0, new Array());

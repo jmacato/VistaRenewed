@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from vista_sidebar_paths import BACKUP, discover_gadgets, gadget_files
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL = ROOT / "tools" / "vista_control.py"
@@ -19,17 +21,11 @@ ASSETS = ROOT / "packaging" / "vista-sidebar-gadgets"
 PROXY = ASSETS / "vista_sidebar_proxy.py"
 CONTAINER = os.environ.get("VISTA_VM_NAME", "triton-vista-x64-normal")
 SOCKET_ARGS = []
-BACKUP = r"C:\ProgramData\TritonSidebarGadgets\original"
-UI_FILES = {
-    r"C:\Program Files\Windows Sidebar\Gadgets\RSSFeeds.Gadget\en-US\RSSFeeds.html": "RSSFeeds.html",
-    r"C:\Program Files\Windows Sidebar\Gadgets\Weather.Gadget\en-US\weather.html": "weather.html",
-    r"C:\Program Files\Windows Sidebar\Gadgets\Currency.Gadget\en-US\currency.html": "currency.html",
-}
-BACKENDS = {
-    r"C:\Program Files\Windows Sidebar\Gadgets\RSSFeeds.Gadget\en-US\js\RSSFeeds.js": ("g_localRssUrl", "http://10.0.2.2:8765/news"),
-    r"C:\Program Files\Windows Sidebar\Gadgets\Weather.Gadget\en-US\js\weather.js": ("LocalWeatherService", "http://10.0.2.2:8765/weather"),
-    r"C:\Program Files\Windows Sidebar\Gadgets\Weather.Gadget\en-US\js\settings.js": ("LocalWeatherLookupService", "http://10.0.2.2:8765/weather-search"),
-    r"C:\Program Files\Windows Sidebar\Gadgets\Currency.Gadget\en-US\js\service.js": ("CurrencyService", "http://10.0.2.2:8765/currency"),
+BACKEND_MARKERS = {
+    "rss": ("g_localRssUrl", "http://10.0.2.2:8765/news"),
+    "weather": ("LocalWeatherService", "http://10.0.2.2:8765/weather"),
+    "weather-settings": ("LocalWeatherLookupService", "http://10.0.2.2:8765/weather-search"),
+    "currency": ("CurrencyService", "http://10.0.2.2:8765/currency"),
 }
 
 
@@ -77,16 +73,21 @@ def verify_guest() -> None:
     ])
     if health:
         raise RuntimeError("unexpected relay health output")
+    def control(*arguments):
+        return run([sys.executable, str(CONTROL), *SOCKET_ARGS, *arguments])
+
+    pages, backends = gadget_files(discover_gadgets(control))
     with tempfile.TemporaryDirectory(prefix="vista-sidebar-verify-") as temp_dir:
         temporary = Path(temp_dir)
-        for remote_path, backup_name in UI_FILES.items():
-            active = temporary / (backup_name + ".active")
-            original = temporary / (backup_name + ".original")
+        for index, (remote_path, backup_name) in enumerate(pages.items()):
+            active = temporary / f"page-{index}.active"
+            original = temporary / f"page-{index}.original"
             get(remote_path, active)
             get(BACKUP + "\\" + backup_name, original)
             if hashlib.sha256(active.read_bytes()).digest() != hashlib.sha256(original.read_bytes()).digest():
                 raise RuntimeError(f"Sidebar UI differs from its original backup: {remote_path}")
-        for index, (remote_path, markers) in enumerate(BACKENDS.items()):
+        for index, (remote_path, (name, kind)) in enumerate(backends.items()):
+            markers = BACKEND_MARKERS[kind]
             local = temporary / f"backend-{index}.js"
             get(remote_path, local)
             text = local.read_bytes().decode("utf-16")
@@ -94,10 +95,14 @@ def verify_guest() -> None:
                 raise RuntimeError(f"local data adapter is missing from: {remote_path}")
     remote_probe = r"C:\Windows\Temp\TritonSidebarHttpProbe.js"
     run([sys.executable, str(CONTROL), *SOCKET_ARGS, "put", str(ASSETS / "guest-http-probe.js"), remote_probe])
-    output = run([sys.executable, str(CONTROL), *SOCKET_ARGS, "run", "--timeout", "300", f"cscript //nologo {remote_probe}"])
+    currency_paths = " ".join(f'"{path}"' for path, (name, kind) in backends.items() if kind == "currency")
+    output = control("run", "--timeout", "300", f"cscript //nologo {remote_probe} {currency_paths}")
     for marker in ("NEWS OK", "NEWS DESCRIPTION OK", "WEATHER OK", "WEATHER SEARCH OK", "CURRENCY OK", "CURRENCY LABELS OK"):
         if marker not in output:
             raise RuntimeError("guest network probe did not prove " + marker)
+    expected = sum(kind == "currency" for name, kind in backends.values())
+    if output.count("CURRENCY LABELS OK") != expected or "CURRENCY LABELS ERROR" in output:
+        raise RuntimeError("guest currency labels failed for an installed language")
     process = run([sys.executable, str(CONTROL), *SOCKET_ARGS, "run", "--timeout", "120", 'tasklist /fi "imagename eq sidebar.exe"'])
     if not any(line.lstrip().lower().startswith("sidebar.exe") for line in process.splitlines()):
         raise RuntimeError("Sidebar is not running")

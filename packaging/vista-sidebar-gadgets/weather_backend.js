@@ -46,7 +46,7 @@ function LocalWeatherService() {
                     for (var index = 0; index < forecastNodes.length; index++) {
                         forecasts.push({
                             Date: forecastNodes[index].getAttribute("date"),
-                            Day: forecastNodes[index].getAttribute("day"),
+                            Day: new Date(forecastNodes[index].getAttribute("date").replace(/-/g, "/")).toLocaleDateString(),
                             High: degrees(forecastNodes[index].getAttribute("high")),
                             Low: degrees(forecastNodes[index].getAttribute("low")),
                             SkyCode: parseInt(forecastNodes[index].getAttribute("skyCode"), 10),
@@ -74,7 +74,7 @@ function LocalWeatherService() {
                     result(500, null);
                 }
             };
-            request.open("GET", "http://10.0.2.2:8765/weather?location=" + encodeURIComponent(locationCode || ""), true);
+            request.open("GET", "http://10.0.2.2:8765/weather?location=" + encodeURIComponent(locationCode || "") + "&name=" + encodeURIComponent(unescape(readSetting("WeatherLocation")) || gDefaultWeatherLocation) + "&locale=" + encodeURIComponent(navigator.userLanguage || navigator.systemLanguage || ""), true);
             request.send();
         } catch (error) {
             result(0, null);

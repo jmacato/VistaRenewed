@@ -7,6 +7,7 @@ import argparse
 import datetime
 import html
 import json
+import re
 import threading
 import time
 import xml.etree.ElementTree as element_tree
@@ -20,7 +21,6 @@ from urllib.request import Request, urlopen
 
 
 USER_AGENT = "TritonVistaSidebar/1.0 (+local cached relay)"
-DEFAULT_LOCATION = (14.5995, 120.9842, "Manila")
 Parameters = dict[str, list[str]]
 
 
@@ -116,16 +116,16 @@ def weather_code(code: int, is_day: int) -> tuple[int, str]:
 
 def location_from_code(code: str) -> tuple[float, float, str]:
     if not code:
-        return DEFAULT_LOCATION
+        raise ValueError("weather needs a valid location")
     parts = code.split(";", 2)
     if len(parts) != 3 or len(parts[2].strip()) == 0 or len(parts[2]) > 100:
-        return DEFAULT_LOCATION
+        raise ValueError("weather needs a valid location")
     try:
         latitude, longitude = float(parts[0]), float(parts[1])
     except ValueError:
-        return DEFAULT_LOCATION
+        raise ValueError("weather needs a valid location")
     if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
-        return DEFAULT_LOCATION
+        raise ValueError("weather needs a valid location")
     return latitude, longitude, parts[2].strip()
 
 
@@ -174,7 +174,18 @@ def weather_xml(document: dict[str, object], location: str) -> bytes:
 
 
 def fetch_weather(parameters: Parameters) -> bytes:
-    latitude, longitude, location = location_from_code(one(parameters, "location"))
+    try:
+        latitude, longitude, location = location_from_code(one(parameters, "location"))
+    except ValueError:
+        # Vista's original MSN location codes cannot be used by Open-Meteo.
+        # Resolve the saved/default localized city name instead.
+        locations = element_tree.fromstring(fetch_weather_search({
+            "query": [one(parameters, "name")], "locale": [one(parameters, "locale")],
+        }))
+        first = locations.find("location")
+        if first is None:
+            raise ValueError("weather location was not found")
+        latitude, longitude, location = location_from_code(first.attrib["code"])
     query = urlencode(
         {
             "latitude": latitude,
@@ -195,7 +206,7 @@ def fetch_weather_search(parameters: Parameters) -> bytes:
         raise ValueError("weather search needs a short location query")
     payload = fetch_bytes(
         "https://geocoding-api.open-meteo.com/v1/search?"
-        + urlencode({"name": query, "count": 5, "language": "en", "format": "json"})
+        + urlencode({"name": query, "count": 5, "language": locale_parts(parameters)[0], "format": "json"})
     )
     document = json.loads(payload.decode("utf-8"))
     results = document.get("results", [])
@@ -223,8 +234,19 @@ def fetch_weather_search(parameters: Parameters) -> bytes:
     return element_tree.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def fetch_news(_: Parameters) -> bytes:
-    payload = fetch_bytes("https://news.google.com/rss?hl=en-PH&gl=PH&ceid=PH:en")
+def locale_parts(parameters: Parameters) -> tuple[str, str]:
+    locale = one(parameters, "locale") or "en-US"
+    if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", locale):
+        raise ValueError("invalid language tag")
+    parts = locale.split("-")
+    region = next((part.upper() for part in parts[1:] if len(part) == 2 and part.isalpha()), "US")
+    return parts[0].lower(), region
+
+
+def fetch_news(parameters: Parameters) -> bytes:
+    language, region = locale_parts(parameters)
+    query = urlencode({"hl": language + "-" + region, "gl": region, "ceid": region + ":" + language})
+    payload = fetch_bytes("https://news.google.com/rss?" + query)
     document = element_tree.fromstring(payload)
     if document.tag.lower().split("}")[-1] != "rss" or not document.findall(".//item"):
         raise ValueError("news response has no RSS items")

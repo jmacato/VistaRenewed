@@ -1,6 +1,6 @@
 var urls = [
     { name: "NEWS", url: "http://10.0.2.2:8765/news", marker: "<item" },
-    { name: "WEATHER", url: "http://10.0.2.2:8765/weather", marker: "location=\"Manila\"" },
+    { name: "WEATHER", url: "http://10.0.2.2:8765/weather?location=35.6762;139.6503;Tokyo", marker: "<weather" },
     { name: "WEATHER SEARCH", url: "http://10.0.2.2:8765/weather-search?query=Tokyo", marker: "<location" },
     { name: "CURRENCY", url: "http://10.0.2.2:8765/currency", marker: "symbol=\"PHP\"" }
 ];
@@ -26,8 +26,7 @@ for (var i = 0; i < urls.length; i++) {
     }
 }
 
-function checkCurrencyLabels() {
-    var sourcePath = "C:\\Program Files\\Windows Sidebar\\Gadgets\\Currency.Gadget\\en-US\\js\\service.js";
+function checkCurrencyLabels(sourcePath) {
     var source = new ActiveXObject("Scripting.FileSystemObject").OpenTextFile(sourcePath, 1, false, -1).ReadAll();
     var L_localizedStrings_Text = [];
     function getLocalizedString(key) {
@@ -52,7 +51,10 @@ function checkCurrencyLabels() {
 }
 
 try {
-    checkCurrencyLabels();
+    if (!WScript.Arguments.length) throw new Error("Currency script path is required");
+    for (var index = 0; index < WScript.Arguments.length; index++) {
+        checkCurrencyLabels(WScript.Arguments(index));
+    }
 } catch (error) {
     WScript.Echo("CURRENCY LABELS ERROR " + error.number + " " + error.description);
 }

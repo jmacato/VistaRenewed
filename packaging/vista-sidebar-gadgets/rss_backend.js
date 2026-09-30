@@ -3,7 +3,8 @@
 // bypassing the unavailable Feedstore COM server in the 64-bit Sidebar host.
 
 var g_localRssRequestActive = false;
-var g_localRssUrl = "http://10.0.2.2:8765/news";
+var g_localRssUrl = "http://10.0.2.2:8765/news?locale=" + encodeURIComponent(navigator.userLanguage || navigator.systemLanguage || "");
+var g_localRssTitle = "Google News";
 
 function localRssText(item, name) {
     var nodes = item.getElementsByTagName(name);
@@ -39,8 +40,10 @@ function refreshRssFeedData() {
                 return;
             }
             try {
+                var channel = request.responseXML.selectSingleNode("/rss/channel/title");
+                g_localRssTitle = channel ? channel.text : "Google News";
                 var nodes = request.responseXML.documentElement.getElementsByTagName("item");
-                var feed = new makeFeed("Philippines News", g_localRssUrl, nodes.length);
+                var feed = new makeFeed(g_localRssTitle, g_localRssUrl, nodes.length);
                 for (var index = 0; index < nodes.length; index++) {
                     var title = removeNewLines(localRssText(nodes.item(index), "title"));
                     var link = localRssText(nodes.item(index), "link");
@@ -52,8 +55,8 @@ function refreshRssFeedData() {
                         link,
                         false,
                         "local-news-" + index,
-                        "Philippines News",
-                        "Philippines News",
+                        g_localRssTitle,
+                        g_localRssTitle,
                         localRssDate(localRssText(nodes.item(index), "pubDate"))
                     );
                     itemModel.feedItemDescription = localRssText(nodes.item(index), "description");
@@ -88,7 +91,7 @@ function loadData() {
 }
 
 function createFeedDropDown() {
-    AddFeedToDropDown("Philippines News", g_localRssUrl);
+    AddFeedToDropDown(g_localRssTitle, g_localRssUrl);
     for (var index = 0; index < L_ARTICLES_TEXT.length; index++) {
         rssTotalsSelection.options[index] = new Option(L_ARTICLES_TEXT[index], articleArray[index]);
         rssTotalsSelection.options[index].title = L_ARTICLES_TEXT[index];

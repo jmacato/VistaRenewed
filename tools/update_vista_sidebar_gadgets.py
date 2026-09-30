@@ -5,17 +5,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 
+from vista_sidebar_paths import BACKUP, discover_gadgets, gadget_files
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL = ROOT / "tools" / "vista_control.py"
 ASSETS = ROOT / "packaging" / "vista-sidebar-gadgets"
-BACKUP = r"C:\ProgramData\TritonSidebarGadgets\original"
 SIDEBAR_TASK = "TritonSidebarHost"
 SIDEBAR_EXECUTABLE = r'\"C:\Program Files\Windows Sidebar\sidebar.exe\"'
 RSS_SETUP = ASSETS / "configure_rss_feed.js"
@@ -23,23 +25,6 @@ RSS_BACKEND = ASSETS / "rss_backend.js"
 CURRENCY_BACKEND = ASSETS / "currency_service_backend.js"
 WEATHER_BACKEND = ASSETS / "weather_backend.js"
 WEATHER_SETTINGS_BACKEND = ASSETS / "weather_settings_backend.js"
-
-UI_FILES = {
-    r"C:\Program Files\Windows Sidebar\Gadgets\RSSFeeds.Gadget\en-US\RSSFeeds.html": "RSSFeeds.html",
-    r"C:\Program Files\Windows Sidebar\Gadgets\Weather.Gadget\en-US\weather.html": "weather.html",
-    r"C:\Program Files\Windows Sidebar\Gadgets\Currency.Gadget\en-US\currency.html": "currency.html",
-}
-WEATHER_SCRIPT = r"C:\Program Files\Windows Sidebar\Gadgets\Weather.Gadget\en-US\js\weather.js"
-WEATHER_SETTINGS_SCRIPT = r"C:\Program Files\Windows Sidebar\Gadgets\Weather.Gadget\en-US\js\settings.js"
-CURRENCY_SCRIPT = r"C:\Program Files\Windows Sidebar\Gadgets\Currency.Gadget\en-US\js\service.js"
-RSS_SCRIPT = r"C:\Program Files\Windows Sidebar\Gadgets\RSSFeeds.Gadget\en-US\js\RSSFeeds.js"
-BACKEND_FILES = {
-    RSS_SCRIPT: "rss.backend-original.js",
-    WEATHER_SCRIPT: "weather.backend-original.js",
-    WEATHER_SETTINGS_SCRIPT: "weather-settings.backend-original.js",
-    CURRENCY_SCRIPT: "currency.backend-original.js",
-}
-
 
 SOCKET_ARGS = []
 
@@ -72,9 +57,10 @@ def backup_path(name: str) -> str:
 
 
 def backup_files(files: dict[str, str]) -> None:
-    guest(f'if not exist "{BACKUP}" mkdir "{BACKUP}"')
     for remote_path, name in files.items():
         destination = backup_path(name)
+        parent = destination.rsplit("\\", 1)[0]
+        guest(f'if not exist "{parent}" mkdir "{parent}"')
         guest(f'if not exist "{destination}" copy /y "{remote_path}" "{destination}"')
 
 
@@ -85,15 +71,11 @@ def remote_sha256(remote_path: str) -> str:
         return hashlib.sha256(downloaded.read_bytes()).hexdigest()
 
 
-def verify_shipped_pages() -> None:
-    for remote_path, name in UI_FILES.items():
+def verify_shipped_pages(files: dict[str, str]) -> None:
+    for remote_path, name in files.items():
         original_path = backup_path(name)
         if remote_sha256(remote_path) != remote_sha256(original_path):
             raise RuntimeError(f"the original gadget UI is not restored: {remote_path}")
-
-
-def to_utf16_file(text: str, destination: Path) -> None:
-    destination.write_bytes(b"\xff\xfe" + text.replace("\n", "\r\n").encode("utf-16le"))
 
 
 def patched_weather_script(original: bytes) -> bytes:
@@ -101,13 +83,15 @@ def patched_weather_script(original: bytes) -> bytes:
         source = original.decode("utf-16")
     except UnicodeDecodeError as error:
         raise RuntimeError("Weather data script is not UTF-16") from error
-    start = source.find("  try \r\n  {\t\t\r\n    // Connect to Weather Service .dll")
-    end = source.find("  ////////////////////////////////////////////////////////////////////////////////\r\n  //\r\n  // Public Methods", start)
-    if start == -1 or end == -1:
+    pattern = (r'try\s*\{\s*(?://[^\n]*\n\s*)*'
+               r'var\s+oMSN\s*=\s*new\s+ActiveXObject\(\s*[\'"]wlsrvc\.WLServices[\'"]\s*\)\s*;'
+               r'\s*this\.oMSN\s*=\s*oMSN\.GetService\(\s*[\'"]weather[\'"]\s*\)\s*;'
+               r'\s*\}\s*catch\s*\([^)]*\)\s*\{[^{}]*\}')
+    source, count = re.subn(pattern, 'this.oMSN = new LocalWeatherService();', source)
+    if count != 1:
         raise RuntimeError("could not locate the retired Weather service provider")
-    replacement = "  // Data provider; the original display and behavior below are unchanged.\r\n  this.oMSN = new LocalWeatherService();\r\n\r\n"
     backend = WEATHER_BACKEND.read_text(encoding="utf-8").replace("\n", "\r\n")
-    return (source[:start] + replacement + source[end:] + "\r\n" + backend).encode("utf-16")
+    return (source + "\r\n" + backend).encode("utf-16")
 
 
 def appended_backend_script(original: bytes, backend_path: Path) -> bytes:
@@ -124,54 +108,33 @@ def patched_weather_settings_script(original: bytes) -> bytes:
         source = original.decode("utf-16")
     except UnicodeDecodeError as error:
         raise RuntimeError("Weather settings data script is not UTF-16") from error
-    old_settings = (
-        '  var theWeatherLocation            = unescape(readSetting("WeatherLocation")) || gDefaultWeatherLocation;\r\n'
-        '  var theWeatherLocationCode        = readSetting("WeatherLocationCode") || gDefaultWeatherLocationCode;\r\n'
-        '  var theDisplayDegreesIn            = readSetting("DisplayDegreesIn")   || gDefaultDisplayDegreesIn;'
-    )
-    new_settings = (
-        '  var storedWeatherLocation = unescape(readSetting("WeatherLocation"));\r\n'
-        '  var storedWeatherLocationCode = readSetting("WeatherLocationCode");\r\n'
-        '  var theWeatherLocation = storedWeatherLocation || "Manila";\r\n'
-        '  var theWeatherLocationCode = storedWeatherLocationCode || "14.5995;120.9842;Manila";\r\n'
-        '  var theDisplayDegreesIn = readSetting("DisplayDegreesIn") || gDefaultDisplayDegreesIn;'
-    )
-    old_service = (
-        '  // Create instance of MSNServices.dll and attach to our Global Object\r\n'
-        '  var oMSN = new ActiveXObject("wlsrvc.WLServices");\r\n'
-        '  MicrosoftGadget.oMSN = oMSN.GetService("weather"); '
-    )
-    new_service = '  MicrosoftGadget.oMSN = new LocalWeatherLookupService(); '
-    if old_settings not in source or old_service not in source:
+    pattern = r'var\s+oMSN\s*=\s*new\s+ActiveXObject\(\s*[\'"]wlsrvc\.WLServices[\'"]\s*\)\s*;\s*MicrosoftGadget\.oMSN\s*=\s*oMSN\.GetService\(\s*[\'"]weather[\'"]\s*\)\s*;'
+    source, count = re.subn(pattern, 'MicrosoftGadget.oMSN = new LocalWeatherLookupService();', source)
+    if count != 1:
         raise RuntimeError("could not locate the retired Weather settings provider")
-    source = source.replace(old_settings, new_settings, 1).replace(old_service, new_service, 1)
     backend = WEATHER_SETTINGS_BACKEND.read_text(encoding="utf-8").replace("\n", "\r\n")
     return (source + "\r\n" + backend).encode("utf-16")
 
 
-def install_backends() -> None:
+def install_backends(backends) -> None:
+    patchers = {
+        "rss": lambda data: appended_backend_script(data, RSS_BACKEND),
+        "weather": patched_weather_script,
+        "weather-settings": patched_weather_settings_script,
+        "currency": lambda data: b"\xff\xfe" + CURRENCY_BACKEND.read_text(encoding="utf-8").replace("\n", "\r\n").encode("utf-16le"),
+    }
+    # Prepare every language before changing any installed script.
     with tempfile.TemporaryDirectory(prefix="vista-sidebar-backend-") as directory:
-        temporary = Path(directory)
-        weather_original = temporary / "weather-original.js"
-        weather_patched = temporary / "weather.js"
-        weather_settings_original = temporary / "weather-settings-original.js"
-        weather_settings_patched = temporary / "weather-settings.js"
-        currency_patched = temporary / "currency-service.js"
-        rss_original = temporary / "rss-original.js"
-        rss_patched = temporary / "RSSFeeds.js"
-        control("get", backup_path(BACKEND_FILES[WEATHER_SCRIPT]), str(weather_original))
-        control("get", backup_path(BACKEND_FILES[WEATHER_SETTINGS_SCRIPT]), str(weather_settings_original))
-        control("get", backup_path(BACKEND_FILES[RSS_SCRIPT]), str(rss_original))
-        weather_patched.write_bytes(patched_weather_script(weather_original.read_bytes()))
-        weather_settings_patched.write_bytes(patched_weather_settings_script(weather_settings_original.read_bytes()))
-        rss_patched.write_bytes(appended_backend_script(rss_original.read_bytes(), RSS_BACKEND))
-        to_utf16_file(CURRENCY_BACKEND.read_text(encoding="utf-8"), currency_patched)
-        for remote_path in (RSS_SCRIPT, WEATHER_SCRIPT, WEATHER_SETTINGS_SCRIPT, CURRENCY_SCRIPT):
+        prepared = []
+        for index, (remote_path, (name, kind)) in enumerate(backends.items()):
+            original = Path(directory) / f"{index}.original"
+            patched = Path(directory) / f"{index}.js"
+            control("get", backup_path(name), str(original))
+            patched.write_bytes(patchers[kind](original.read_bytes()))
+            prepared.append((remote_path, patched))
+        for remote_path, patched in prepared:
             guest(f'takeown /f "{remote_path}" /a & icacls "{remote_path}" /grant *S-1-5-18:(F)')
-        control("put", str(rss_patched), RSS_SCRIPT)
-        control("put", str(weather_patched), WEATHER_SCRIPT)
-        control("put", str(weather_settings_patched), WEATHER_SETTINGS_SCRIPT)
-        control("put", str(currency_patched), CURRENCY_SCRIPT)
+            control("put", str(patched), remote_path)
 
 
 def configure_rss() -> None:
@@ -213,10 +176,11 @@ def main() -> int:
     for asset in (RSS_SETUP, RSS_BACKEND, CURRENCY_BACKEND, WEATHER_BACKEND, WEATHER_SETTINGS_BACKEND):
         if not asset.is_file():
             raise SystemExit(f"missing asset: {asset}")
-    backup_files(UI_FILES)
-    verify_shipped_pages()
-    backup_files(BACKEND_FILES)
-    install_backends()
+    pages, backends = gadget_files(discover_gadgets(control))
+    backup_files(pages)
+    verify_shipped_pages(pages)
+    backup_files({path: name for path, (name, kind) in backends.items()})
+    install_backends(backends)
     configure_rss()
     if not args.no_restart:
         restart_sidebar(args.user)
