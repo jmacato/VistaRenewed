@@ -93,18 +93,19 @@ def verify_guest() -> None:
             if not all(marker in text for marker in markers):
                 raise RuntimeError(f"local data adapter is missing from: {remote_path}")
     remote_probe = r"C:\Windows\Temp\TritonSidebarHttpProbe.js"
-    run([sys.executable, str(CONTROL), "put", str(ASSETS / "guest-http-probe.js"), remote_probe])
-    output = run([sys.executable, str(CONTROL), "run", "--timeout", "300", f"cscript //nologo {remote_probe}"])
+    run([sys.executable, str(CONTROL), *SOCKET_ARGS, "put", str(ASSETS / "guest-http-probe.js"), remote_probe])
+    output = run([sys.executable, str(CONTROL), *SOCKET_ARGS, "run", "--timeout", "300", f"cscript //nologo {remote_probe}"])
     for marker in ("NEWS OK", "NEWS DESCRIPTION OK", "WEATHER OK", "WEATHER SEARCH OK", "CURRENCY OK", "CURRENCY LABELS OK"):
         if marker not in output:
             raise RuntimeError("guest network probe did not prove " + marker)
-    process = run([sys.executable, str(CONTROL), "run", "--timeout", "120", 'tasklist /fi "imagename eq sidebar.exe"'])
+    process = run([sys.executable, str(CONTROL), *SOCKET_ARGS, "run", "--timeout", "120", 'tasklist /fi "imagename eq sidebar.exe"'])
     if not any(line.lstrip().lower().startswith("sidebar.exe") for line in process.splitlines()):
         raise RuntimeError("Sidebar is not running")
     print("SIDEBAR UI INTEGRITY AND GUEST DATA VERIFIED")
 
 
 def main() -> int:
+    global CONTAINER, SOCKET_ARGS
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--source", action="store_true")
@@ -112,8 +113,8 @@ def main() -> int:
     parser.add_argument("--vm-name", default=CONTAINER, help="running VM container")
     parser.add_argument("--socket", help="guest control socket")
     args = parser.parse_args()
-    globals()["CONTAINER"] = args.vm_name
-    globals()["SOCKET_ARGS"] = ["--socket", args.socket] if args.socket else []
+    CONTAINER = args.vm_name
+    SOCKET_ARGS = ["--socket", args.socket] if args.socket else []
     if args.source:
         verify_source()
     else:
