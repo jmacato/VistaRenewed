@@ -7,7 +7,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libpipewire-0.3-dev pipewire-bin \
     libva-dev libv4l-dev libx11-dev libxrandr-dev libxpresent-dev check \
     glslang-tools mesa-vulkan-drivers vulkan-tools \
-    p7zip-full msitools cabextract clang lld llvm-18 llvm-18-tools wine64 osslsigncode openssl xorriso \
+    p7zip-full msitools cabextract clang libclang-rt-18-dev lld llvm-18 llvm-18-tools wine64 osslsigncode openssl xorriso \
     gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix \
     gcc-mingw-w64-i686-posix g++-mingw-w64-i686-posix \
     && python3 -m venv --system-site-packages /opt/vista-build-tools \
