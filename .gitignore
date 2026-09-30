@@ -6,6 +6,12 @@
 /dist/
 /ci-logs/
 /recovery-vista/
+
+# Local investigation captures and downloaded browser source trees.
+/.unlazy/
+/third_party/cef2623/
+/third_party/supermium-cef/
+/third_party/supermium-v144-r5/
 *.qcow2
 *.iso
 *.log
