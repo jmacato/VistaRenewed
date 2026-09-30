@@ -5,6 +5,7 @@ import os
 from collections import defaultdict
 from pathlib import Path
 import re
+import shutil
 
 ROOTS = ('triton-kmd', 'triton-umd', 'packaging', 'tests/vista')
 SUFFIXES = {'.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hxx', '.inl', '.inc',
@@ -79,12 +80,64 @@ SDK/WDK inputs are excluded. Unmarked custom build output may require cleanup.
     return header + '\n' + ('\n' + '=' * 72 + '\n\n').join(entries)
 
 
+# Both ephemeral CI signing and persistent local signing ship the same notices.
+LICENSE_FILES = {
+    'virtio-gpu-LICENSE.txt': 'triton-kmd/viogpu/LICENSE',
+    'virtio-LICENSE.txt': 'triton-kmd/VirtIO/LICENSE',
+    'shader-converter-LICENSE.txt': 'triton-umd/src/virtio/neptune/vista-d3d9/third_party/d3d9on12-shaderconverter/LICENSE',
+    'upstream-sources.md': 'docs/UPSTREAM.md',
+    'LICENSE-scope.md': 'LICENSE.md',
+    'MIT-original.txt': 'LICENSES/MIT-original.txt',
+}
+
+
+# Source documentation uses source-tree paths; distribution notices are flat.
+# Only these links change. Copyright/license text and source files stay intact.
+DISTRIBUTION_LINKS = {
+    'LICENSE-scope.md': {
+        b'LICENSES/MIT-original.txt': b'MIT-original.txt',
+        b'docs/UPSTREAM.md': b'upstream-sources.md',
+    },
+    'upstream-sources.md': {
+        b'../LICENSE.md': b'LICENSE-scope.md',
+        b'../LICENSES/MIT-original.txt': b'MIT-original.txt',
+    },
+}
+
+
+def distribution_document(name, data):
+    for source, destination in DISTRIBUTION_LINKS.get(name, {}).items():
+        data = data.replace(b'](' + source + b')', b'](' + destination + b')')
+    return data
+
+
+def assemble(root, output):
+    # Collect and read all required inputs before creating distribution output.
+    # A new directory prevents stale notices from surviving a repeated build.
+    source_notices = collect(root)
+    licenses = {name: (root / path).read_bytes()
+                for name, path in LICENSE_FILES.items()}
+    mesa = root / 'triton-umd/licenses'
+    if not mesa.is_dir():
+        raise ValueError('Missing Mesa license directory')
+    output.mkdir()
+    for name, data in licenses.items():
+        (output / name).write_bytes(distribution_document(name, data))
+    shutil.copytree(mesa, output / 'mesa-licenses')
+    (output / 'SOURCE-NOTICES.txt').write_text(source_notices, encoding='utf-8')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument('--output', required=True, type=Path)
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument('--output', type=Path, help='Source comment collection only')
+    destination.add_argument('--directory', type=Path, help='New complete distribution notice directory')
     args = parser.parse_args()
-    args.output.write_text(collect(args.root), encoding='utf-8')
+    if args.directory is not None:
+        assemble(args.root, args.directory)
+    else:
+        args.output.write_text(collect(args.root), encoding='utf-8')
 
 
 if __name__ == '__main__':

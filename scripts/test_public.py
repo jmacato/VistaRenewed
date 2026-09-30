@@ -23,7 +23,7 @@ CPU_FIXTURES = (
     'present-consumption', 'present-timeline', 'primary-allocation', 'primary-layout',
     'query-transport', 'ring-failure', 'ring-publication', 'scanout-address',
     'scanout-refresh', 'scanout-reuse', 'scanout-surface', 'shared-pending',
-    'synchronized-flip', 'trace-buffer', 'vsync-timing', 'vsync-worker',
+    'synchronized-flip', 'texture-transform', 'trace-buffer', 'vsync-timing', 'vsync-worker',
     'x86-normal-signing',
 )
 
@@ -38,7 +38,8 @@ def cases(output):
                ('shader-cache', ['triton-umd/src/virtio/neptune/vista-d3d9/tests/native_compat/shader_cache_test.py'])]
     result += [(n, ['-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_' + n + '.py'])
                for n in ('run_vm', 'triton_trace', 'vista_control', 'vista_transfer', 'vista_uia_client', 'source_notices', 'sdk_headers')]
-    result += [('bootstrap-sources', ['tests/bootstrap/test_sources.py'])]
+    result += [('bootstrap-sources', ['tests/bootstrap/test_sources.py']),
+               ('bootstrap-qemu-sources', ['tests/bootstrap/test_qemu_sources.py'])]
     return result
 
 

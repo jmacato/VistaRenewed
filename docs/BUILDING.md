@@ -103,6 +103,11 @@ serial tracing (`--verbose-trace`) is diagnostic and can distort performance.
 
 ## 5. Test, package and install
 
+The VM launcher carries the host timezone into QEMU for Vista's local-time RTC.
+Set `TZ` explicitly if the host timezone cannot be detected. Confirm that the
+guest clock is correct before installing: a shifted clock can reject the
+development certificate as not yet valid or expired.
+
 Run the default CPU regression manifest after source bootstrap:
 
 ```sh
@@ -110,7 +115,8 @@ bash scripts/dev-container.sh run python3 scripts/test_public.py
 ```
 
 `python3 scripts/test_public.py --list` lists the explicit CPU-only selection.
-See [the test guide](../tests/vista/README.md) for individual CPU regression commands,
+See [the test index](../tests/README.md) for suite entry points and
+[the Vista test guide](../tests/vista/README.md) for individual CPU regression commands,
 explicit native GPU suites and guest probes. Native tests need the freshly built
 host libraries and real device access. The build wrapper intentionally does not
 pretend to provide a host NVIDIA driver or a display server. Do not run native

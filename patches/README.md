@@ -21,6 +21,12 @@ DIRECT_PRIMARY coherent-memory experiment is excluded. SINGLE_PLANE negotiation,
 foreign ownership, imported descriptor lifetime, and protection against clearing
 shared memory through the debug zeroing option are retained.
 
+The inline-copy optimization rejects non-relocatable images when their existing
+usage lacks the required input-attachment or storage bit. This keeps shared
+images on the regular copy path without first attempting an impossible usage
+change. Compilation and runtime validation of this correction are separate
+from source restoration checks.
+
 These are downstream source changes, not claims of upstream acceptance or full
 DX9/DX10 compatibility. Component licenses remain in their source trees. No new
 ownership attribution or developer sign-off is implied by this packaging.

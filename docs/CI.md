@@ -6,6 +6,11 @@ See [the workflow](../.github/workflows/driver-iso.yml) for its current triggers
 and retention settings. It uploads artifacts; it does not publish a release,
 boot Vista, or certify graphics compatibility.
 
+The `host-and-cpu` job restores pinned host sources, runs the explicit CPU
+manifest, and builds the Linux renderer and QEMU. The driver packaging job
+depends on that job succeeding, so a broken host build or failed CPU regression
+cannot produce an uploaded installer. Failed jobs retain their diagnostics.
+
 ## Build locally
 
 From the checkout root:
@@ -44,7 +49,9 @@ The installer includes `NOTICES/SOURCE-NOTICES.txt`, a deterministic collection
 of existing copyright/SPDX source comment blocks from guest source components,
 packaging and guest tests. This is a conservative attribution superset, not an
 exact binary dependency inventory or a new license grant. Full existing license
-texts remain alongside it; missing standalone helper grants stay unresolved.
+texts remain alongside it, together with `LICENSE-scope.md` and
+`MIT-original.txt` for the maintainer's original contributions. The persistent
+signing helper uses the same notice assembly.
 
 Packaging validates catalog membership and signatures, extracts the finished
 ISO and checks it against the staging manifest. No GPU, KVM device, guest VM

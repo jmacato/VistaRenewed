@@ -37,16 +37,30 @@ No repository-wide license replaces those terms. Read component `LICENSE`,
 converter's third-party notices. The Windows SDK/WDK and guest applications
 have their own terms and are not source components of this repository.
 
-**Unresolved publication decision:** standalone development helpers without an
-existing license notice do not have a project-wide license grant. A rights
-holder must identify the authorship of those files and authorize a specific
-license before the repository can claim they are freely redistributable.
-Likewise, copied copyright wording on newly authored files is not evidence of
-ownership. Preserve genuine upstream notices; do not invent a grant, assign
-third-party ownership or add contributor sign-offs on someone's behalf.
+The maintainer authorized MIT on 2026-09-30 for original standalone code and
+additions where permitted. [License scope](../LICENSE.md) defines the original
+portions covered by this grant; [the MIT text](../LICENSES/MIT-original.txt)
+accompanies source and guest binary notices. Third-party licenses, attribution
+and component obligations remain in force. This is not one replacement license
+for the entire repository.
 
-This is a release-readiness limitation. A public source preview must not claim a
-single repository-wide open-source license while it remains unresolved.
+Authorship verification remains separate from that grant. Eight new UMD files
+carry Turing Software LLC copyright wording whose ownership has not been
+independently established from the available development record:
+
+- `src/virtio/neptune/npt_runtime_binding.h`
+- `src/virtio/neptune/triton/tritonD3D10.c` and `.h`
+- `src/virtio/neptune/triton/tritonDitherControl.h`
+- `src/virtio/neptune/vista-d3d10/meson.build`
+- `src/virtio/neptune/vista-d3d9/triton9_fixed.cpp` and `.h`
+- `src/virtio/neptune/vista-d3d9/third_party/d3d9on12-shaderconverter/Inc/ShaderValidation.h`
+
+Paths above are relative to `triton-umd/`. These existing labels are retained;
+the maintainer's MIT selection neither verifies them nor transfers ownership.
+In particular, the locally added `ShaderValidation.h` is distinct from the
+recorded Microsoft shader-converter import. Resolve attribution from evidence
+before claiming a complete provenance audit. Never invent contributor sign-offs
+or assign third-party ownership on someone's behalf.
 
 ## Contribution and review boundaries
 

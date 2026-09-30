@@ -9,7 +9,7 @@
       "path": "triton-dxvk",
       "commit": "c6bb6d57fac2b6cae7f6adbbc521eb949849815e",
       "patch": "patches/dxvk-vista.patch",
-      "sha256": "d23bd592ad55ef74086ae44fd5b28ca7ff17d40e3519a847beb003cab300c75e"
+      "sha256": "18869e8f289bf80524bdc764991dc40b40aeed66dd39b0a05b3f6acf36361973"
     },
     {
       "path": "triton-dxvk/subprojects/dxbc-spirv",

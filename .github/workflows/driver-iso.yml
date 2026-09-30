@@ -55,6 +55,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
   build:
+    needs: host-and-cpu
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:

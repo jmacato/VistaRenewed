@@ -32,4 +32,3 @@ def reserve_output(out, run, parser):
             yield
     finally:
         lock_path.unlink()
-

@@ -1,5 +1,5 @@
 diff --git a/include/native/dxvk_neptune.h b/include/native/dxvk_neptune.h
-index bfd58cb1c79b90a84e7ed5864330c4167429fe49..d6b579d5a9ba0ccac1761087b33aadaf097d3d42 100644
+index bfd58cb..d6b579d 100644
 --- a/include/native/dxvk_neptune.h
 +++ b/include/native/dxvk_neptune.h
 @@ -20,6 +20,23 @@ int32_t dxvk_d3d11_clear_depth_stencil_rects(
@@ -27,7 +27,7 @@ index bfd58cb1c79b90a84e7ed5864330c4167429fe49..d6b579d5a9ba0ccac1761087b33aadaf
  }
  #endif
 diff --git a/include/native/dxvk_shared_resource.h b/include/native/dxvk_shared_resource.h
-index 3a6f9bfe2c1e6c1700c22ef47d2d1b677d4418ef..5fbff3007dcf2fc565143d202132444487219e93 100644
+index 3a6f9bf..5fbff30 100644
 --- a/include/native/dxvk_shared_resource.h
 +++ b/include/native/dxvk_shared_resource.h
 @@ -51,6 +51,14 @@ extern "C" {
@@ -46,7 +46,7 @@ index 3a6f9bfe2c1e6c1700c22ef47d2d1b677d4418ef..5fbff3007dcf2fc565143d2021324444
   * D3D11-level description of a shared texture.  Fields mirror
   * D3D11_TEXTURE2D_DESC plus the texture layout; fixed-width types keep
 diff --git a/src/d3d11/d3d11.sym b/src/d3d11/d3d11.sym
-index 1842edd999f60ae54c649abc08a50c37a7454218..58ee8a37e4d047b3b7fc19016965469ec18c6be9 100644
+index 1842edd..58ee8a3 100644
 --- a/src/d3d11/d3d11.sym
 +++ b/src/d3d11/d3d11.sym
 @@ -1,6 +1,7 @@
@@ -58,7 +58,7 @@ index 1842edd999f60ae54c649abc08a50c37a7454218..58ee8a37e4d047b3b7fc19016965469e
      D3D11CreateDevice;
      D3D11CreateDeviceAndSwapChain;
 diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
-index a8fd99f643760766755058f8339b097a9d1bcb05..0ceb2254446ca1615f7fffb72a72426377dd8102 100644
+index a8fd99f..0ceb225 100644
 --- a/src/d3d11/d3d11_context.cpp
 +++ b/src/d3d11/d3d11_context.cpp
 @@ -404,7 +404,7 @@ namespace dxvk {
@@ -546,7 +546,7 @@ index a8fd99f643760766755058f8339b097a9d1bcb05..0ceb2254446ca1615f7fffb72a724263
  
          if (likely(length == bufferSize) || unlikely(CopyFlags != 0)) {
 diff --git a/src/d3d11/d3d11_context.h b/src/d3d11/d3d11_context.h
-index 76de0ebd80ccdd02e43bb1d54ae6d935056b556c..38f7b6a46e475ca75e1f428eb5b89cf11a635eff 100644
+index 76de0eb..38f7b6a 100644
 --- a/src/d3d11/d3d11_context.h
 +++ b/src/d3d11/d3d11_context.h
 @@ -19,6 +19,7 @@
@@ -607,7 +607,7 @@ index 76de0ebd80ccdd02e43bb1d54ae6d935056b556c..38f7b6a46e475ca75e1f428eb5b89cf1
      void EmitCsCmd(D3D11CmdType type, size_t count, Cmd&& command) {
        m_csDataType = type;
 diff --git a/src/d3d11/d3d11_context_def.cpp b/src/d3d11/d3d11_context_def.cpp
-index d58774c3ec09967a4b488cc9a569f548b91e41d8..bdfbb7eb3d8078c295931920bbc582b2cafd166c 100644
+index d58774c..bdfbb7e 100644
 --- a/src/d3d11/d3d11_context_def.cpp
 +++ b/src/d3d11/d3d11_context_def.cpp
 @@ -47,6 +47,9 @@ namespace dxvk {
@@ -640,7 +640,7 @@ index d58774c3ec09967a4b488cc9a569f548b91e41d8..bdfbb7eb3d8078c295931920bbc582b2
      if (RestoreDeferredContextState)
        RestoreCommandListState();
 diff --git a/src/d3d11/d3d11_context_def.h b/src/d3d11/d3d11_context_def.h
-index feabf4481dde96df4c04779944808c0097eaab0c..81b2bcfc8da5f05f58efce429fb818af615bb812 100644
+index feabf44..81b2bcf 100644
 --- a/src/d3d11/d3d11_context_def.h
 +++ b/src/d3d11/d3d11_context_def.h
 @@ -92,7 +92,9 @@ namespace dxvk {
@@ -655,7 +655,7 @@ index feabf4481dde96df4c04779944808c0097eaab0c..81b2bcfc8da5f05f58efce429fb818af
      D3DDestructionNotifier m_destructionNotifier;
  
 diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
-index 270bbb46e42ef7328ff7a218fc8049fdd5754d9f..cdcf1368a91958e258abc2480aa05c073a0c97f3 100644
+index 270bbb4..cdcf136 100644
 --- a/src/d3d11/d3d11_context_imm.cpp
 +++ b/src/d3d11/d3d11_context_imm.cpp
 @@ -4,6 +4,8 @@
@@ -794,7 +794,7 @@ index 270bbb46e42ef7328ff7a218fc8049fdd5754d9f..cdcf1368a91958e258abc2480aa05c07
      RequestFlush(D3D11_CONTEXT_TYPE_ALL, nullptr);
    }
 diff --git a/src/d3d11/d3d11_context_imm.h b/src/d3d11/d3d11_context_imm.h
-index a1c4363b972a6b168b58f2234e6e205c4bda78c1..d198f7e52e7570e91e4ffa1903f7de093c8a50e5 100644
+index a1c4363..d198f7e 100644
 --- a/src/d3d11/d3d11_context_imm.h
 +++ b/src/d3d11/d3d11_context_imm.h
 @@ -48,6 +48,12 @@ namespace dxvk {
@@ -811,7 +811,7 @@ index a1c4363b972a6b168b58f2234e6e205c4bda78c1..d198f7e52e7570e91e4ffa1903f7de09
      void STDMETHODCALLTYPE Flush1(
              D3D11_CONTEXT_TYPE          ContextType,
 diff --git a/src/d3d11/d3d11_context_state.h b/src/d3d11/d3d11_context_state.h
-index b2f7a47e8ead0b91742a7f6996523c0825d282e1..197b08cb4a1afa15208c403e8c69656cb4d6f099 100644
+index b2f7a47..197b08c 100644
 --- a/src/d3d11/d3d11_context_state.h
 +++ b/src/d3d11/d3d11_context_state.h
 @@ -197,6 +197,8 @@ namespace dxvk {
@@ -832,7 +832,7 @@ index b2f7a47e8ead0b91742a7f6996523c0825d282e1..197b08cb4a1afa15208c403e8c69656c
        sampleMask = D3D11_DEFAULT_SAMPLE_MASK;
        stencilRef = D3D11_DEFAULT_STENCIL_REFERENCE;
 diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
-index f80646241751bbcbd6b055080b19b22ad6db5da9..9197493e05d3930aa1f7984932d3a736f9b5dc1b 100644
+index f806462..9197493 100644
 --- a/src/d3d11/d3d11_device.cpp
 +++ b/src/d3d11/d3d11_device.cpp
 @@ -1252,11 +1252,20 @@ namespace dxvk {
@@ -858,7 +858,7 @@ index f80646241751bbcbd6b055080b19b22ad6db5da9..9197493e05d3930aa1f7984932d3a736
        return S_FALSE;
      
 diff --git a/src/d3d11/d3d11_device_child.h b/src/d3d11/d3d11_device_child.h
-index 5e8b0e335585f1a6c0904a376ab589d15ecae1f2..df89afafd3dccabfa4c4bd87227effb7692ac798 100644
+index 5e8b0e3..df89afa 100644
 --- a/src/d3d11/d3d11_device_child.h
 +++ b/src/d3d11/d3d11_device_child.h
 @@ -23,6 +23,9 @@ namespace dxvk {
@@ -906,7 +906,7 @@ index 5e8b0e335585f1a6c0904a376ab589d15ecae1f2..df89afafd3dccabfa4c4bd87227effb7
        // here, because D3D11Device includes this file.
 diff --git a/src/d3d11/d3d11_dither_control.h b/src/d3d11/d3d11_dither_control.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5747521d2a518ede8659e987eb793a5597b7a9da
+index 0000000..5747521
 --- /dev/null
 +++ b/src/d3d11/d3d11_dither_control.h
 @@ -0,0 +1,19 @@
@@ -930,7 +930,7 @@ index 0000000000000000000000000000000000000000..5747521d2a518ede8659e987eb793a55
 +struct TritonDitherState { uint32_t version; uint32_t enabled; };
 +#endif
 diff --git a/src/d3d11/d3d11_main.cpp b/src/d3d11/d3d11_main.cpp
-index 8733a11bc679b6a09c7e076fa2ea2bebe808fa90..8d6a577783ededded7996082842ae46764ef5a77 100644
+index 8733a11..8d6a577 100644
 --- a/src/d3d11/d3d11_main.cpp
 +++ b/src/d3d11/d3d11_main.cpp
 @@ -1,4 +1,5 @@
@@ -969,7 +969,7 @@ index 8733a11bc679b6a09c7e076fa2ea2bebe808fa90..8d6a577783ededded7996082842ae467
            IDXGIFactory*       pFactory,
            IDXGIAdapter*       pAdapter,
 diff --git a/src/d3d11/d3d11_query.cpp b/src/d3d11/d3d11_query.cpp
-index 3e059be229f0e9686356d67369f21f0d36de3569..da931fd234c7a202cd74b7a26ab08ccb6f703d29 100644
+index 3e059be..da931fd 100644
 --- a/src/d3d11/d3d11_query.cpp
 +++ b/src/d3d11/d3d11_query.cpp
 @@ -48,15 +48,17 @@ namespace dxvk {
@@ -1066,7 +1066,7 @@ index 3e059be229f0e9686356d67369f21f0d36de3569..da931fd234c7a202cd74b7a26ab08ccb
  
          default:
 diff --git a/src/d3d11/d3d11_query.h b/src/d3d11/d3d11_query.h
-index 06715bdcbe6eae72640d4f162b2b5e28cada1b07..ce75c77f7e28bb830c7335710e81cab08040b4f2 100644
+index 06715bd..ce75c77 100644
 --- a/src/d3d11/d3d11_query.h
 +++ b/src/d3d11/d3d11_query.h
 @@ -2,6 +2,7 @@
@@ -1106,7 +1106,7 @@ index 06715bdcbe6eae72640d4f162b2b5e28cada1b07..ce75c77f7e28bb830c7335710e81cab0
      std::array<Rc<DxvkQuery>, MaxGpuQueries> m_query;
      std::array<Rc<DxvkEvent>, MaxGpuEvents>  m_event;
 diff --git a/src/d3d11/d3d11_shader.cpp b/src/d3d11/d3d11_shader.cpp
-index e3821d0124e7932c6c785a884b6e92f36d9b2e92..dae9b4cd9050083ab4a6d2bdfabd419563dbc274 100644
+index e3821d0..dae9b4c 100644
 --- a/src/d3d11/d3d11_shader.cpp
 +++ b/src/d3d11/d3d11_shader.cpp
 @@ -158,16 +158,28 @@ namespace dxvk {
@@ -1141,7 +1141,7 @@ index e3821d0124e7932c6c785a884b6e92f36d9b2e92..dae9b4cd9050083ab4a6d2bdfabd4195
    }
  
 diff --git a/src/d3d11/d3d11_texture.cpp b/src/d3d11/d3d11_texture.cpp
-index 34daed47fc3eff96990d166c547b54010087c5d3..0017bdf508a198594a7596e4299c8cd5b3efb276 100644
+index 34daed4..0017bdf 100644
 --- a/src/d3d11/d3d11_texture.cpp
 +++ b/src/d3d11/d3d11_texture.cpp
 @@ -54,12 +54,16 @@ namespace dxvk {
@@ -1164,7 +1164,7 @@ index 34daed47fc3eff96990d166c547b54010087c5d3..0017bdf508a198594a7596e4299c8cd5
  
      const auto sharingFlags = D3D11_RESOURCE_MISC_SHARED|D3D11_RESOURCE_MISC_SHARED_NTHANDLE|D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
 diff --git a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
-index 8db2243afb6601fa41bfd1f389864e06ebe9929d..b384cc30420e56443d945c856e8f8e4b4ffc2ca6 100644
+index 8db2243..b384cc3 100644
 --- a/src/dxvk/dxvk_cmdlist.cpp
 +++ b/src/dxvk/dxvk_cmdlist.cpp
 @@ -160,6 +160,7 @@ namespace dxvk {
@@ -1307,7 +1307,7 @@ index 8db2243afb6601fa41bfd1f389864e06ebe9929d..b384cc30420e56443d945c856e8f8e4b
      m_cmd.execCommands = VK_FALSE;
      m_cmd.syncSdma = VK_FALSE;
 diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
-index 97989f689228285fed2f642748839c46304f16dc..9a67c5a7aa76e1beb1145c28160578dfbf10a213 100644
+index 97989f6..9a67c5a 100644
 --- a/src/dxvk/dxvk_cmdlist.h
 +++ b/src/dxvk/dxvk_cmdlist.h
 @@ -70,6 +70,7 @@ namespace dxvk {
@@ -1552,7 +1552,7 @@ index 97989f689228285fed2f642748839c46304f16dc..9a67c5a7aa76e1beb1145c28160578df
      sync::SyncPoint           m_descriptorSync;
  
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 97aee05862b17a671b8a86945b0e1c2f4e78d9a0..4021563ac1a3b1e4dd1061ecc155dab709d689e8 100644
+index 97aee05..b04017a 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
 @@ -92,6 +92,7 @@ namespace dxvk {
@@ -1746,7 +1746,7 @@ index 97aee05862b17a671b8a86945b0e1c2f4e78d9a0..4021563ac1a3b1e4dd1061ecc155dab7
 +    if (!preparePredicate(condition))
 +      return;
 +    const auto* predicate = condition.buffer ? &condition : nullptr;
- 
++
 +    // Some byte-count implementations perform an unsigned subtraction before
 +    // clamping. Normalize on the GPU so a bias past the filled region cannot
 +    // underflow, and leave the original SO counter available for append draws.
@@ -1754,7 +1754,7 @@ index 97aee05862b17a671b8a86945b0e1c2f4e78d9a0..4021563ac1a3b1e4dd1061ecc155dab7
 +      ? normalizeXfbCounter(counterOffset, drawCounterBias)
 +      : m_state.id.cntBuffer.getSliceInfo();
 +    const VkDeviceSize drawCounterOffset = drawCounterBias ? 0 : counterOffset;
-+
+ 
 +    if (this->commitGraphicsState<false, true>()) {
        m_cmd->cmdDrawIndirectVertexCount(1, 0,
 -        argInfo.buffer, argInfo.offset + counterOffset,
@@ -1972,7 +1972,23 @@ index 97aee05862b17a671b8a86945b0e1c2f4e78d9a0..4021563ac1a3b1e4dd1061ecc155dab7
      
      m_flags.set(DxvkContextFlag::GpDirtyPipelineState);
    }
-@@ -6371,12 +6589,17 @@ namespace dxvk {
+@@ -4655,6 +4873,15 @@ namespace dxvk {
+      || !srcImage.hasUnifiedLayout() || !dstImage.hasUnifiedLayout())
+       return false;
+ 
++    // Shared images cannot be relocated to add usage flags. Reject this
++    // optional fast path before changing either image or ending the render
++    // pass; the regular copy path supports their existing usage.
++    if ((!(srcImage.info().usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)
++      && !srcImage.canRelocate())
++     || (!(dstImage.info().usage & VK_IMAGE_USAGE_STORAGE_BIT)
++      && !dstImage.canRelocate()))
++      return false;
++
+     // We fake unified layouts on some GPUs, so we still need to ensure
+     // that we don't use the input attachment path with invalid layouts.
+     // That could happen with the feedback loop layout in some cases.
+@@ -6371,12 +6598,17 @@ namespace dxvk {
          useSecondaryCmdBuffer |= depthStencilAspects || colorInfoCount > 1u || !hasMipmappedRt;
      }
  
@@ -1991,7 +2007,7 @@ index 97aee05862b17a671b8a86945b0e1c2f4e78d9a0..4021563ac1a3b1e4dd1061ecc155dab7
  
        m_cmd->beginSecondaryCommandBuffer(inheritance);
      } else {
-@@ -9155,6 +9378,7 @@ namespace dxvk {
+@@ -9155,6 +9387,7 @@ namespace dxvk {
      // beginRecording calls, except that we keep the same
      // command list object for subsequent commands.
      this->endCurrentCommands();
@@ -1999,7 +2015,7 @@ index 97aee05862b17a671b8a86945b0e1c2f4e78d9a0..4021563ac1a3b1e4dd1061ecc155dab7
  
      m_trackingId += 1u;
      m_cmd->next();
-@@ -9454,16 +9678,30 @@ namespace dxvk {
+@@ -9454,16 +9687,30 @@ namespace dxvk {
  
  
    void DxvkContext::prepareSharedImages() {
@@ -2038,7 +2054,7 @@ index 97aee05862b17a671b8a86945b0e1c2f4e78d9a0..4021563ac1a3b1e4dd1061ecc155dab7
      restoreImageLayouts([] (DxvkImage& image) {
        return image.info().shared;
 diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
-index dacdfd5f17294e72c1a2b4de0ef90f111ae8f54d..214b5272d8bcec83da5ec330dd91ef8f415fd716 100644
+index dacdfd5..214b527 100644
 --- a/src/dxvk/dxvk_context.h
 +++ b/src/dxvk/dxvk_context.h
 @@ -126,6 +126,11 @@ namespace dxvk {
@@ -2093,7 +2109,7 @@ index dacdfd5f17294e72c1a2b4de0ef90f111ae8f54d..214b5272d8bcec83da5ec330dd91ef8f
              VkDeviceSize                alignment,
              VkDeviceSize                size);
 diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
-index d0df438fdea5eda62438075b67674e6b2acc54bb..5ccebd88ab5a10114d2e3ddbf3c4dac30c1fee07 100644
+index d0df438..5ccebd8 100644
 --- a/src/dxvk/dxvk_device_info.cpp
 +++ b/src/dxvk/dxvk_device_info.cpp
 @@ -18,6 +18,7 @@ namespace dxvk {
@@ -2137,7 +2153,7 @@ index d0df438fdea5eda62438075b67674e6b2acc54bb..5ccebd88ab5a10114d2e3ddbf3c4dac3
        ENABLE_EXT_FEATURE(extLineRasterization, rectangularLines,  false),
        ENABLE_EXT_FEATURE(extLineRasterization, smoothLines, false),
 diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
-index 62ce776e76b370ab1632422a7203ed749e358bfd..1db1eddbb6ff3b46702cb7c36cfeed28782010c5 100644
+index 62ce776..1db1edd 100644
 --- a/src/dxvk/dxvk_device_info.h
 +++ b/src/dxvk/dxvk_device_info.h
 @@ -61,6 +61,7 @@ namespace dxvk {
@@ -2173,7 +2189,7 @@ index 62ce776e76b370ab1632422a7203ed749e358bfd..1db1eddbb6ff3b46702cb7c36cfeed28
      VkExtensionProperties extMemoryBudget                   = vk::makeExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
      VkExtensionProperties extMemoryPriority                 = vk::makeExtension(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
 diff --git a/src/dxvk/dxvk_gpu_query.cpp b/src/dxvk/dxvk_gpu_query.cpp
-index cac562c437857d81d87231b2b5e2d71289501919..5082ed0bd373ccb71c92be4358dc097dc359d058 100644
+index cac562c..5082ed0 100644
 --- a/src/dxvk/dxvk_gpu_query.cpp
 +++ b/src/dxvk/dxvk_gpu_query.cpp
 @@ -58,6 +58,16 @@ namespace dxvk {
@@ -2217,7 +2233,7 @@ index cac562c437857d81d87231b2b5e2d71289501919..5082ed0bd373ccb71c92be4358dc097d
        return DxvkGpuQueryStatus::Pending;
      else if (result != VK_SUCCESS)
 diff --git a/src/dxvk/dxvk_gpu_query.h b/src/dxvk/dxvk_gpu_query.h
-index ec65c329b45096c4ae27fd97cee1ec60c30b3e49..e777c79c4987bab793eb636ca1701dcfe2701463 100644
+index ec65c32..e777c79 100644
 --- a/src/dxvk/dxvk_gpu_query.h
 +++ b/src/dxvk/dxvk_gpu_query.h
 @@ -167,6 +167,8 @@ namespace dxvk {
@@ -2230,7 +2246,7 @@ index ec65c329b45096c4ae27fd97cee1ec60c30b3e49..e777c79c4987bab793eb636ca1701dcf
       * \brief Increments reference count
       */
 diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
-index 02b91f1e0d1123ecf101d50fa395ed4c13835b21..f9f44002d4e225be15abb8dd73d9b8f79680f6de 100644
+index 02b91f1..f9f4400 100644
 --- a/src/dxvk/dxvk_graphics.cpp
 +++ b/src/dxvk/dxvk_graphics.cpp
 @@ -17,7 +17,8 @@ namespace dxvk {
@@ -2347,7 +2363,7 @@ index 02b91f1e0d1123ecf101d50fa395ed4c13835b21..f9f44002d4e225be15abb8dd73d9b8f7
        flags.flags |= VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
  
 diff --git a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
-index 98a3f1846ff87763b19353a916c6c75f184c1f31..7c708382bf98303c132e00ac0bedb65043341b84 100644
+index 98a3f18..7c70838 100644
 --- a/src/dxvk/dxvk_graphics.h
 +++ b/src/dxvk/dxvk_graphics.h
 @@ -120,6 +120,7 @@ namespace dxvk {
@@ -2373,7 +2389,7 @@ index 98a3f1846ff87763b19353a916c6c75f184c1f31..7c708382bf98303c132e00ac0bedb650
    };
  
 diff --git a/src/dxvk/dxvk_graphics_state.h b/src/dxvk/dxvk_graphics_state.h
-index b467e8d8c8d33f1b2cfe051608d6a948188cda0c..ed87328308d440aa80d95897a05263c2d4503b73 100644
+index b467e8d..ed87328 100644
 --- a/src/dxvk/dxvk_graphics_state.h
 +++ b/src/dxvk/dxvk_graphics_state.h
 @@ -339,10 +339,12 @@ namespace dxvk {
@@ -2412,7 +2428,7 @@ index b467e8d8c8d33f1b2cfe051608d6a948188cda0c..ed87328308d440aa80d95897a05263c2
    };
  
 diff --git a/src/dxvk/dxvk_image.cpp b/src/dxvk/dxvk_image.cpp
-index 7fd7de7194fd5ea92ce556e14f72cdbbd79def9b..ec50c2059000de4f115d9ee41edc3cf9e1984c1c 100644
+index 7fd7de7..ec50c20 100644
 --- a/src/dxvk/dxvk_image.cpp
 +++ b/src/dxvk/dxvk_image.cpp
 @@ -177,6 +177,7 @@ namespace dxvk {
@@ -2519,7 +2535,7 @@ index 7fd7de7194fd5ea92ce556e14f72cdbbd79def9b..ec50c2059000de4f115d9ee41edc3cf9
        Logger::err(str::format("Failed to create dmabuf-shared resource: no usable modifier for format ",
          createInfo.format));
 diff --git a/src/dxvk/dxvk_image.h b/src/dxvk/dxvk_image.h
-index 60594b3e8738ca20aacb18fa81cd2892d989ba88..93f73643c5136ef3aaf46f7286c1fd83b53e7d4e 100644
+index 60594b3..93f7364 100644
 --- a/src/dxvk/dxvk_image.h
 +++ b/src/dxvk/dxvk_image.h
 @@ -1,5 +1,7 @@
@@ -2569,7 +2585,7 @@ index 60594b3e8738ca20aacb18fa81cd2892d989ba88..93f73643c5136ef3aaf46f7286c1fd83
              DxvkDevice*           device,
        const VkImageCreateInfo&    createInfo,
 diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
-index 50a2a39fa215784ff8b45077197c45a5c5c8e957..fb29b49ceb8d193b85d215d8376556e951f6ae70 100644
+index 50a2a39..fb29b49 100644
 --- a/src/dxvk/dxvk_memory.cpp
 +++ b/src/dxvk/dxvk_memory.cpp
 @@ -920,11 +920,20 @@ namespace dxvk {
@@ -2698,7 +2714,7 @@ index 50a2a39fa215784ff8b45077197c45a5c5c8e957..fb29b49ceb8d193b85d215d8376556e9
  
        Logger::debug(str::format("Mapped memory region 0x", std::hex,
 diff --git a/src/dxvk/dxvk_memory.h b/src/dxvk/dxvk_memory.h
-index 3ce6295d5021f392dc8e8e53643056e9efbb0ee6..6f45c4739831657c750758ce01d76dafa87791db 100644
+index 3ce6295..6f45c47 100644
 --- a/src/dxvk/dxvk_memory.h
 +++ b/src/dxvk/dxvk_memory.h
 @@ -63,6 +63,9 @@ namespace dxvk {
@@ -2742,7 +2758,7 @@ index 3ce6295d5021f392dc8e8e53643056e9efbb0ee6..6f45c4739831657c750758ce01d76daf
              DxvkMemoryType&       type,
 diff --git a/src/dxvk/dxvk_meta_draw_auto.cpp b/src/dxvk/dxvk_meta_draw_auto.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e4623b79a2f3a1f6507c7fe5d4c31d62ae5237e2
+index 0000000..e4623b7
 --- /dev/null
 +++ b/src/dxvk/dxvk_meta_draw_auto.cpp
 @@ -0,0 +1,20 @@
@@ -2768,7 +2784,7 @@ index 0000000000000000000000000000000000000000..e4623b79a2f3a1f6507c7fe5d4c31d62
 +}
 diff --git a/src/dxvk/dxvk_meta_draw_auto.h b/src/dxvk/dxvk_meta_draw_auto.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..cb20e8ba34c25c860783f84c2a98110fee333668
+index 0000000..cb20e8b
 --- /dev/null
 +++ b/src/dxvk/dxvk_meta_draw_auto.h
 @@ -0,0 +1,27 @@
@@ -2801,7 +2817,7 @@ index 0000000000000000000000000000000000000000..cb20e8ba34c25c860783f84c2a98110f
 +}
 diff --git a/src/dxvk/dxvk_meta_predicate.cpp b/src/dxvk/dxvk_meta_predicate.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f05471724b3dbfdd500f631672cac97d45a7f6db
+index 0000000..f054717
 --- /dev/null
 +++ b/src/dxvk/dxvk_meta_predicate.cpp
 @@ -0,0 +1,17 @@
@@ -2824,7 +2840,7 @@ index 0000000000000000000000000000000000000000..f05471724b3dbfdd500f631672cac97d
 +}
 diff --git a/src/dxvk/dxvk_meta_predicate.h b/src/dxvk/dxvk_meta_predicate.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9c26374725c072e51bf96823f3d9126846bd0a8e
+index 0000000..9c26374
 --- /dev/null
 +++ b/src/dxvk/dxvk_meta_predicate.h
 @@ -0,0 +1,34 @@
@@ -2863,7 +2879,7 @@ index 0000000000000000000000000000000000000000..9c26374725c072e51bf96823f3d91268
 +  };
 +}
 diff --git a/src/dxvk/dxvk_objects.h b/src/dxvk/dxvk_objects.h
-index 579593b560a88d66219cf499e0504d2660c5a549..56d78ff29ec7141cf85407e5195438979d2c87ea 100644
+index 579593b..56d78ff 100644
 --- a/src/dxvk/dxvk_objects.h
 +++ b/src/dxvk/dxvk_objects.h
 @@ -7,7 +7,9 @@
@@ -2898,7 +2914,7 @@ index 579593b560a88d66219cf499e0504d2660c5a549..56d78ff29ec7141cf85407e519543897
    };
  
 diff --git a/src/dxvk/dxvk_shader.h b/src/dxvk/dxvk_shader.h
-index c0b3e7797bf46f2a2c18efe7ed90b1af72238431..c411f68c9ab343e0fbfffd3e8b7236020663e683 100644
+index c0b3e77..c411f68 100644
 --- a/src/dxvk/dxvk_shader.h
 +++ b/src/dxvk/dxvk_shader.h
 @@ -83,6 +83,8 @@ namespace dxvk {
@@ -2919,7 +2935,7 @@ index c0b3e7797bf46f2a2c18efe7ed90b1af72238431..c411f68c9ab343e0fbfffd3e8b723602
  
    using DxvkShaderFlags = Flags<DxvkShaderFlag>;
 diff --git a/src/dxvk/dxvk_shader_ir.cpp b/src/dxvk/dxvk_shader_ir.cpp
-index 7279825ab0aa9391cc8e294f5c165fd07e3f2da5..fac1a900b13608f67b8753a6a7ffebf3347b1718 100644
+index 7279825..fac1a90 100644
 --- a/src/dxvk/dxvk_shader_ir.cpp
 +++ b/src/dxvk/dxvk_shader_ir.cpp
 @@ -291,6 +291,9 @@ namespace dxvk {
@@ -2951,7 +2967,7 @@ index 7279825ab0aa9391cc8e294f5c165fd07e3f2da5..fac1a900b13608f67b8753a6a7ffebf3
          if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsDualSrcBlend) {
            dxbc_spv::ir::IoMap io = { };
 diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
-index 40f4cc05c49a62ba0d12bb02c85477af7d6cc186..f2135752b844c94def54f0d4e6e3f2a6151fdd4f 100644
+index 40f4cc0..f213575 100644
 --- a/src/dxvk/meson.build
 +++ b/src/dxvk/meson.build
 @@ -3,8 +3,10 @@ dxvk_shaders = files([
@@ -2977,7 +2993,7 @@ index 40f4cc05c49a62ba0d12bb02c85477af7d6cc186..f2135752b844c94def54f0d4e6e3f2a6
    'dxvk_pipelayout.cpp',
 diff --git a/src/dxvk/shaders/dxvk_draw_auto.comp b/src/dxvk/shaders/dxvk_draw_auto.comp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cff6afc32ef519124536c47d9d9e6b549d39ee31
+index 0000000..cff6afc
 --- /dev/null
 +++ b/src/dxvk/shaders/dxvk_draw_auto.comp
 @@ -0,0 +1,21 @@
@@ -3004,7 +3020,7 @@ index 0000000000000000000000000000000000000000..cff6afc32ef519124536c47d9d9e6b54
 +}
 diff --git a/src/dxvk/shaders/dxvk_predicate_reduce.comp b/src/dxvk/shaders/dxvk_predicate_reduce.comp
 new file mode 100644
-index 0000000000000000000000000000000000000000..dcc413fb81f9934a9fcc4ca2d6df437dc36df879
+index 0000000..dcc413f
 --- /dev/null
 +++ b/src/dxvk/shaders/dxvk_predicate_reduce.comp
 @@ -0,0 +1,26 @@
@@ -3035,7 +3051,7 @@ index 0000000000000000000000000000000000000000..dcc413fb81f9934a9fcc4ca2d6df437d
 +  args.destination.value = result;
 +}
 diff --git a/src/vulkan/vulkan_util.h b/src/vulkan/vulkan_util.h
-index b3ff21f0186cb79dacc1ce044b7bfc19be49d163..fc53ab84dcddffd26bf417c5885ef6b8d48e52c8 100644
+index b3ff21f..fc53ab8 100644
 --- a/src/vulkan/vulkan_util.h
 +++ b/src/vulkan/vulkan_util.h
 @@ -23,7 +23,8 @@ namespace dxvk::vk {

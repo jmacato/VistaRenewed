@@ -71,6 +71,9 @@ def overlay_files(subprojects, config):
     if Path(name).name != name:
         raise RuntimeError(f'Unsafe patch_directory: {name}')
     directory = subprojects / 'packagefiles' / name
+    for parent in (subprojects, subprojects / 'packagefiles', directory):
+        if parent.is_symlink():
+            raise RuntimeError(f'Unsupported overlay symlink: {parent}')
     if not directory.is_dir():
         raise RuntimeError(f'Missing Meson overlay: {directory}')
     result = {}
@@ -82,9 +85,24 @@ def overlay_files(subprojects, config):
     return result
 
 
+def validate_overlay_destinations(repo, overlay):
+    for name in overlay:
+        relative = Path(name)
+        if relative.is_absolute() or '..' in relative.parts or not relative.parts:
+            raise RuntimeError(f'Unsafe overlay destination: {name}')
+        for parent in reversed(relative.parents):
+            target = repo / parent
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                raise RuntimeError(f'Overlay parent collision: {target}')
+        target = repo / relative
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise RuntimeError(f'Overlay destination collision: {target}')
+
+
 def plan(repo, pin, overlay):
     if repo.is_symlink() or not (repo / '.git').is_dir():
         raise RuntimeError(f'Refusing non-Git or linked source directory: {repo}')
+    validate_overlay_destinations(repo, overlay)
     if git(repo, 'rev-parse', 'HEAD').decode().strip() != pin:
         raise RuntimeError(f'Unexpected dependency revision: {repo}')
     if git(repo, 'diff', '--cached', '--name-only', pin).strip():
@@ -101,6 +119,7 @@ def plan(repo, pin, overlay):
 
 
 def apply_overlay(repo, overlay):
+    validate_overlay_destinations(repo, overlay)
     for name, path in overlay.items():
         target = repo / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -108,6 +127,9 @@ def apply_overlay(repo, overlay):
 
 
 def bootstrap(root):
+    for directory in (root / 'triton-qemu', root / 'triton-qemu/subprojects'):
+        if directory.is_symlink():
+            raise RuntimeError(f'Refusing linked dependency ancestor: {directory}')
     subprojects = root / 'triton-qemu/subprojects'
     entries = []
     for name in NAMES:
@@ -146,6 +168,8 @@ def bootstrap(root):
                 source.rename(repo)
         elif needed:
             apply_overlay(repo, overlay)
+            if plan(repo, pin, overlay):
+                raise RuntimeError(f'Overlay verification failed: {repo}')
         print(f'{repo.name}: {pin} (source and overlay verified)')
 
 

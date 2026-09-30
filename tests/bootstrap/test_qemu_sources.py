@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('qemu_bootstrap', ROOT / 'scripts/bootstrap_qemu_sources.py')
@@ -80,6 +81,98 @@ class QemuSources(unittest.TestCase):
         link.symlink_to(self.repo)
         with self.assertRaisesRegex(RuntimeError, 'linked'):
             module.plan(link, self.pin, self.files)
+
+    def test_overlay_directory_collision_preserved(self):
+        destination = self.repo / 'meson.build'
+        destination.mkdir()
+        with self.assertRaisesRegex(RuntimeError, 'destination collision'):
+            self.plan()
+        with self.assertRaisesRegex(RuntimeError, 'destination collision'):
+            module.apply_overlay(self.repo, self.files)
+        self.assertEqual(list(destination.iterdir()), [])
+
+    def test_overlay_symlink_destination_preserved(self):
+        outside = self.root / 'valuable'
+        outside.write_text('user data')
+        destination = self.repo / 'meson.build'
+        destination.symlink_to(outside)
+        with self.assertRaisesRegex(RuntimeError, 'destination collision'):
+            self.plan()
+        self.assertEqual(outside.read_text(), 'user data')
+        self.assertTrue(destination.is_symlink())
+
+    def test_overlay_parent_file_and_symlink_preserved(self):
+        parent = self.repo / 'nested'
+        for is_link in (False, True):
+            if is_link:
+                parent.symlink_to(self.root, target_is_directory=True)
+            else:
+                parent.write_text('user data')
+            with self.assertRaisesRegex(RuntimeError, 'parent collision'):
+                module.plan(self.repo, self.pin, {'nested/meson.build': self.overlay})
+            parent.unlink()
+
+    def test_overlay_root_and_ancestor_symlink_rejected(self):
+        projects = self.root / 'subprojects'
+        projects.mkdir()
+        packagefiles = projects / 'packagefiles'
+        packagefiles.mkdir()
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'meson.build').write_text('external overlay')
+        (packagefiles / 'fixture').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, 'overlay symlink'):
+            module.overlay_files(projects, {'patch_directory': 'fixture'})
+        (packagefiles / 'fixture').unlink()
+        packagefiles.rmdir()
+        packagefiles.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, 'overlay symlink'):
+            module.overlay_files(projects, {'patch_directory': 'fixture'})
+
+    def prepare_bootstrap(self):
+        projects = self.root / 'project/triton-qemu/subprojects'
+        projects.mkdir(parents=True)
+        destination = projects / 'keycodemapdb'
+        self.repo.rename(destination)
+        self.repo = destination
+        overlay = projects / 'packagefiles/fixture'
+        overlay.mkdir(parents=True)
+        (overlay / 'meson.build').write_text(self.overlay.read_text())
+        (projects / 'keycodemapdb.wrap').write_text(
+            '[wrap-git]\nurl = https://gitlab.com/qemu-project/keycodemapdb.git\n'
+            f'revision = {self.pin}\npatch_directory = fixture\n')
+        return self.root / 'project'
+
+    def test_existing_bootstrap_checks_overlay_result(self):
+        root = self.prepare_bootstrap()
+        with patch.object(module, 'NAMES', ('keycodemapdb',)):
+            with patch.object(module, 'apply_overlay'):
+                with self.assertRaisesRegex(RuntimeError, 'verification failed'):
+                    module.bootstrap(root)
+            module.bootstrap(root)
+            module.bootstrap(root)
+        self.assertEqual((self.repo / 'meson.build').read_bytes(), self.overlay.read_bytes())
+
+    def test_existing_bootstrap_preserves_empty_directory(self):
+        root = self.prepare_bootstrap()
+        destination = self.repo / 'meson.build'
+        destination.mkdir()
+        with patch.object(module, 'NAMES', ('keycodemapdb',)):
+            with self.assertRaisesRegex(RuntimeError, 'destination collision'):
+                module.bootstrap(root)
+        self.assertEqual(list(destination.iterdir()), [])
+
+    def test_linked_dependency_ancestors_rejected_before_git(self):
+        for name in ('triton-qemu', 'triton-qemu/subprojects'):
+            root = self.root / ('linked-' + name.replace('/', '-'))
+            root.mkdir()
+            link = root / name
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(self.repo, target_is_directory=True)
+            with patch.object(module, 'git') as calls:
+                with self.assertRaisesRegex(RuntimeError, 'linked dependency ancestor'):
+                    module.bootstrap(root)
+            calls.assert_not_called()
 
 
 if __name__ == '__main__':

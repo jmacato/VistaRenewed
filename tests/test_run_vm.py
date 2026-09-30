@@ -145,6 +145,22 @@ class LauncherTests(unittest.TestCase):
         self.assertIn(str(prefix) + ':' + str(prefix) + ':ro', args)
         self.assertIn(str(qemu) + ':' + str(qemu) + ':ro', args)
 
+    def test_local_rtc_preserves_explicit_timezone(self):
+        self.env['TZ'] = 'Asia/Manila'
+        result, runs = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('TZ=Asia/Manila', runs[0])
+        self.assertIn('base=localtime', runs[0])
+
+    def test_local_rtc_uses_host_zone_without_exported_tz(self):
+        self.env.pop('TZ', None)
+        readlink = self.bin / 'readlink'
+        readlink.write_text('#!/bin/sh\necho /usr/share/zoneinfo/Asia/Manila\n')
+        readlink.chmod(0o755)
+        result, runs = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('TZ=Asia/Manila', runs[0])
+
     def test_audio_none_omits_socket_and_usb_audio(self):
         self.env['VISTA_AUDIO'] = 'none'
         result, runs = self.launch()

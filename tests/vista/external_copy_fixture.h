@@ -533,4 +533,3 @@ static bool glExternalIdentity(Candidate& a) {
           ",\"device_match\":" + (deviceMatch ? "true" : "false"));
     return identityMatch;
 }
-

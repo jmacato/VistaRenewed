@@ -118,17 +118,8 @@ with tempfile.TemporaryDirectory(prefix='triton-ci-signing-') as temporary:
         inf, '--package-dir', package)
     publications = work/'publications'
     notices = work/'notices'
-    notices.mkdir()
-    for name, source in {
-        'virtio-gpu-LICENSE.txt': root/'triton-kmd/viogpu/LICENSE',
-        'virtio-LICENSE.txt': root/'triton-kmd/VirtIO/LICENSE',
-        'shader-converter-LICENSE.txt': root/'triton-umd/src/virtio/neptune/vista-d3d9/third_party/d3d9on12-shaderconverter/LICENSE',
-        'upstream-sources.md': root/'docs/UPSTREAM.md',
-    }.items():
-        shutil.copy2(source, notices/name)
-    shutil.copytree(root/'triton-umd/licenses', notices/'mesa-licenses')
     run('python3', 'scripts/collect_source_notices.py', '--root', root,
-        '--output', notices/'SOURCE-NOTICES.txt')
+        '--directory', notices)
     run('python3', 'scripts/stage_vista_linux_media.py', '--package', package,
         '--arch', arch,
         '--certificate', cert, '--publications', publications, '--no-activate',

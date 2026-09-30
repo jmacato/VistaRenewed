@@ -53,5 +53,8 @@ for file in "$package"/*.sys "$package"/*.dll "$package"/*.exe; do
     osslsigncode verify -CAfile "$cert" -catalog "$package/viogpu3d-vista-x64.cat" -in "$file"
 done > build/catalog-pe-verify.log 2>&1
 python3 triton-kmd/viogpu/tools/check_vista_inf.py --arch x64 "$package/viogpu3d-diagnostic.inf" --package-dir "$package"
+notices=$(mktemp -d "$root/build/persistent-notices.XXXXXX")
+trap 'rm -rf -- "$notices"' EXIT
+"$python" scripts/collect_source_notices.py --root "$root" --directory "$notices/NOTICES"
 python3 scripts/stage_vista_linux_media.py --certificate "$certificate" \
-    --publications "$root/dist/persistent" --no-activate
+    --publications "$root/dist/persistent" --no-activate --notices-dir "$notices/NOTICES"

@@ -6,10 +6,9 @@ QEMU/Neptune host renderer, and native DXVK on Linux/Vulkan. The original
 Direct3D 11 route and macOS source components remain in the tree.
 
 This is experimental source for developers. Full Direct3D 9/10 compatibility,
-smooth Aero, and acceptable game performance are **not established**. In
-particular, a SuperTuxKart run recorded only about 10–12 actual QEMU-window
-updates per second. Guest FPS alone cannot close that regression. Tests of an
-older development build do not validate a newly built installer.
+smooth Aero, and acceptable game performance are **not established**. See
+[validation requirements and known presentation limits](docs/RELEASE-VALIDATION.md).
+Tests of an older development build do not validate a newly built installer.
 
 ## Start here
 
@@ -28,6 +27,7 @@ no Windows installation media, VM disk or private signing key is included.
 - [Architecture and paired-component contracts](docs/ARCHITECTURE.md)
 - [Installer/CI behavior](docs/CI.md) and [installation instructions](docs/INSTALL-ISO.txt)
 - [Upstream provenance and licensing decisions](docs/UPSTREAM.md)
+- [Test entry points and evidence locations](tests/README.md)
 - [Release validation requirements](docs/RELEASE-VALIDATION.md)
 - [Contributor/agent presentation requirements](AGENTS.md)
 
@@ -41,10 +41,11 @@ no Windows installation media, VM disk or private signing key is included.
 | `triton-dxvk/`, `patches/` | Pinned host backend and downstream source patches |
 | `triton-dxmt/`, `triton-angle/`, `triton-libepoxy/` | Retained upstream platform components |
 | `scripts/`, `packaging/` | Bootstrap, builds, validators and installer source |
-| `tests/`, component test directories | CPU, native GPU and guest tests |
+| `tests/`, component test directories | [CPU, native GPU and guest tests](tests/README.md) |
 | `docs/` | Build, architecture, installation and validation documentation |
 
 Upstream component layouts and licenses are preserved. Build output belongs in
 ignored `build/`, component build directories, `host-linux/` and `dist/`; test
-captures belong in `test-artifacts/`. See [UPSTREAM](docs/UPSTREAM.md) for the
-unresolved license grant on standalone helpers before redistributing them.
+captures belong in `test-artifacts/`. Original project contributions use the
+[scoped MIT grant](LICENSE.md); see [UPSTREAM](docs/UPSTREAM.md) for component
+terms and remaining attribution questions.

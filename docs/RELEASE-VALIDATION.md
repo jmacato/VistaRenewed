@@ -47,4 +47,4 @@ and performance remain unproven until their corresponding gates pass.
 
 Agent review supplements testing locally. It does not constitute human testing
 or satisfy an upstream project's contribution eligibility rules. See
-[UPSTREAM](UPSTREAM.md) for those constraints and unresolved licensing decisions.
+[UPSTREAM](UPSTREAM.md) for those constraints, the scoped MIT grant and remaining attribution questions.

@@ -380,13 +380,13 @@ int virgl_gbm_transfer(struct gbm_bo *bo, uint32_t direction, const struct iovec
    if (info->stride || info->level) {
       guest_stride0 = info->stride ? info->stride : info->level;
       if (guest_stride0 < (uint32_t)info->box->width * layout->bytes_per_pixel[0])
-         return -1;
+         goto unmap_error;
    } else {
       guest_stride0 = width * layout->bytes_per_pixel[0];
    }
 
    if (guest_stride0 > host_map_stride0)
-      return -1;
+      goto unmap_error;
 
    for (int plane = 0; plane < plane_count; plane++) {
       uint32_t host_plane_offset = gbm_bo_get_offset(bo, plane);
@@ -432,6 +432,10 @@ int virgl_gbm_transfer(struct gbm_bo *bo, uint32_t direction, const struct iovec
 
    gbm_bo_unmap(bo, map_data);
    return 0;
+
+unmap_error:
+   gbm_bo_unmap(bo, map_data);
+   return -1;
 }
 
 uint32_t virgl_gbm_convert_flags(uint32_t virgl_bind_flags)

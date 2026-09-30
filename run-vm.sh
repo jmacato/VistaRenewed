@@ -152,6 +152,22 @@ auth=$(realpath -- "$auth")
 [[ -x $host_prefix/libexec/virgl_render_server ]] || die 'Build the Linux graphics backend first; see docs/BUILDING.md.'
 podman image exists "$image" || die "Container image is missing: $image. See docs/BUILDING.md."
 
+# Windows interprets the RTC as local time. Containers otherwise default to UTC,
+# which shifts the guest clock and can reject freshly signed media as not valid
+# yet. Carry the desktop host's timezone into QEMU unless TZ is explicit.
+rtc_timezone=${TZ:-}
+if [[ -z $rtc_timezone ]]; then
+    localtime_path=$(readlink -f /etc/localtime 2>/dev/null || true)
+    if [[ $localtime_path == */zoneinfo/* ]]; then
+        rtc_timezone=${localtime_path#*/zoneinfo/}
+    elif [[ -r /etc/timezone ]]; then
+        rtc_timezone=$(cat /etc/timezone)
+    elif command -v timedatectl >/dev/null; then
+        rtc_timezone=$(timedatectl show -p Timezone --value 2>/dev/null || true)
+    fi
+fi
+[[ -n $rtc_timezone ]] || die 'Cannot determine host timezone for the local-time RTC; set TZ explicitly.'
+
 # Inspect before removing a stopped container or starting a new one. Mount
 # each backing layer read-only, including layers outside the overlay's folder.
 disk_mount_plan=$(python3 "$root/scripts/vista_disk_mounts.py" "$disk")
@@ -197,7 +213,7 @@ podman run -d --name "$name" 9>&- \
     -e "LD_LIBRARY_PATH=$host_prefix/lib/x86_64-linux-gnu" \
     -e "RENDER_SERVER_EXEC_PATH=$host_prefix/libexec/virgl_render_server" \
     -e DXVK_WSI_DRIVER=Headless -e "DXVK_FILTER_DEVICE_NAME=$gpu_filter" \
-    -e "TZ=${TZ:-UTC}" \
+    -e "TZ=$rtc_timezone" \
     -e "DXVK_SHADER_CACHE_PATH=$vm/shader-cache" \
     -e "MESA_SHADER_CACHE_DIR=$vm/shader-cache/mesa" \
     -e TRITON_DISPLAY_STATS=1 \
