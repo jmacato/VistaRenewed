@@ -10,8 +10,7 @@ These are real Vista screenshots. No generated artwork is used.
 
 The Sidebar gadgets were moved onto the desktop before capture. Cropping
 removes unused desktop space; the displayed UI and values were not retouched.
-The IE capture is unchanged. Its run is described in the
-[MSHTML development record](../MSHTML_CEF_SCOUT.md).
+The IE capture is unchanged and comes from the earlier prototype run.
 
 These development captures illustrate the projects. They do not validate the
 latest public build or establish compatibility or visible frame rate.

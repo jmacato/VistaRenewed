@@ -60,6 +60,5 @@ CPU storage and GPU storage are not proven to be one permanently coherent
 allocation. The experimental direct-primary allocation and synthetic Vulkan
 provenance diagnostics are excluded from the public production path.
 
-Tracing helps correlate resource and presentation events. It cannot show that
-the host window displayed advancing game frames. The final acceptance gate is
-[matched guest and visible-window validation](RELEASE-VALIDATION.md).
+Tracing helps explain resource and display events. It does not prove smooth
+output in QEMU. See [current display limits](STATUS.md).

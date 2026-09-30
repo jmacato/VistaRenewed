@@ -11,7 +11,7 @@ Graphics drivers for Vista in QEMU, with Direct3D 9/10 and a Linux/Vulkan
 backend. Compatibility and smooth display output are still in progress.
 
 [Build guide](docs/BUILDING.md) · [Architecture](docs/ARCHITECTURE.md) ·
-[Known limits](docs/RELEASE-VALIDATION.md)
+[Known limits](docs/STATUS.md)
 
 ## Internet Explorer
 
@@ -22,7 +22,7 @@ adapters, test tools and Supermium/CEF build scripts. This is a prototype;
 the full CEF build is unfinished. The image is a real prototype capture from
 September 12, 2026.
 
-[Setup and status](docs/DESKTOP-MODULES.md) · [IE work](docs/MSHTML_CEF_SCOUT.md)
+[Setup and status](docs/DESKTOP-MODULES.md#ie-and-mshtml)
 
 ## Windows Sidebar
 

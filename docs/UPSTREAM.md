@@ -37,7 +37,7 @@ No repository-wide license replaces those terms. Read component `LICENSE`,
 converter's third-party notices. The Windows SDK/WDK and guest applications
 have their own terms and are not source components of this repository.
 
-The maintainer authorized MIT on 2026-09-30 for original standalone code and
+The MIT grant covers original standalone code and
 additions where permitted. [License scope](../LICENSE.md) defines the original
 portions covered by this grant; [the MIT text](../LICENSES/MIT-original.txt)
 accompanies source and guest binary notices. Third-party licenses, attribution
@@ -59,21 +59,7 @@ Paths above are relative to `triton-umd/`. These existing labels are retained;
 the maintainer's MIT selection neither verifies them nor transfers ownership.
 In particular, the locally added `ShaderValidation.h` is distinct from the
 recorded Microsoft shader-converter import. Resolve attribution from evidence
-before claiming a complete provenance audit. Never invent contributor sign-offs
-or assign third-party ownership on someone's behalf.
-
-## Contribution and review boundaries
-
-Read each destination's current contribution instructions before preparing an
-upstream submission. UTM's [contribution guidelines](https://github.com/utmapp/UTM/blob/main/CONTRIBUTING.md)
-require human testing; local agent substitution does not satisfy that upstream
-requirement. QEMU's [code provenance policy](https://www.qemu.org/docs/master/devel/code-provenance.html#use-of-ai-generated-content)
-declines AI-generated contributions. Do not represent agent-authored changes as
-eligible upstream submissions or supply false provenance/DCO statements.
-
-The public fork can retain local review evidence without claiming upstream
-acceptance. Formatting/checkpatch results and fresh adversarial reviews are
-bounded checks, not exceptions to those policies.
+before claiming complete attribution.
 
 Original design context: [Neptune announcement](https://blog.getutm.app/2026/introducing-neptune-direct3d-virtualization-for-qemu/)
 and [Triton announcement](https://blog.getutm.app/2026/introducing-triton-directx-11-driver-for-qemu/).

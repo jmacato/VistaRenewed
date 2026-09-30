@@ -39,7 +39,7 @@ explicit disposable VM and matching installed components.
 Keep generated binaries and captures in ignored build/evidence directories,
 not beside source fixtures. Preserve failures, interruption and timeout results.
 CPU, build, package and runtime results establish different things; follow
-[release validation](../docs/RELEASE-VALIDATION.md) before making compatibility
+[current limits](../docs/STATUS.md) before making compatibility
 or presentation claims.
 
 ## Desktop module checks

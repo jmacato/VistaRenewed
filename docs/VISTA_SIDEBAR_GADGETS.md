@@ -1,64 +1,47 @@
-# Restoring Vista Sidebar data providers
+# Windows Sidebar setup
 
-> Development record retained with the public desktop sources. Local capture,
-> VM and `.unlazy/` paths refer to non-shipped development artifacts. See
-> [current public entry points and status](DESKTOP-MODULES.md).
+The providers replace the retired RSS, weather and currency services. They
+keep Vista's original gadget pages and back up files before changes.
 
+## Start the relay
 
-Vista's original RSS, Weather, and Currency pages remain in place. This
-integration replaces only the retired data providers with a local relay and
-compatibility adapters, so the existing Vista artwork, layout, controls, and
-flyouts are retained.
+`run-vm.sh` starts the relay inside the QEMU container. Vista reaches it at
+`http://10.0.2.2:8765`. Set `VISTA_SIDEBAR=0` to disable it.
 
-## Sources
+The relay uses Google News RSS, Open-Meteo weather and location search, and
+Frankfurter currency rates. It connects to them over HTTPS; no API key is
+needed. RSS defaults to Philippine news in English. Weather defaults to
+Manila when no saved location is available.
 
-- News: Google News RSS for the Philippines in English.
-- Weather and location search: Open-Meteo forecast and geocoding APIs.
-- Currency: Frankfurter rates, with USD as the base rate and the complete
-  source currency set exposed through the original Currency chooser.
+## Update the guest
 
-None of these sources requires a key. The relay caches news and weather for
-ten minutes, location searches for one day, and currency rates for twelve
-hours. If an upstream source is temporarily unreachable, it serves its most
-recent cached response.
-
-## Launch and install
-
-`run-vm.sh` starts the loopback-only relay inside the QEMU container before it
-launches the guest. QEMU user networking exposes that listener to Vista at
-`10.0.2.2:8765`; the guest therefore uses HTTP only on its host-only network
-path, while the relay uses current HTTPS support for upstream sources.
-
-After the Vista control service is available, install the adapters and restart
-Sidebar with:
+First set up the [Vista control service](VISTA_CONTROL.md), then run:
 
 ```sh
-python3 tools/update_vista_sidebar_gadgets.py
+python3 tools/update_vista_sidebar_gadgets.py --user 'DOMAIN\username'
 ```
 
-The installer first backs up the exact original gadget pages under
-`C:\ProgramData\TritonSidebarGadgets\original`, refuses to proceed unless
-the active pages match those backups, and changes only the RSS, Weather, and
-Currency data scripts. It starts Sidebar in the active `triton` console
-session and configures the task to start it at logon.
+Use the Windows account that owns Sidebar. The updater checks the original
+HTML against its backups, replaces the data scripts and restarts Sidebar.
+Use `--no-restart` to leave it running.
 
-Weather starts in Manila when no previous location is saved. Its original
-settings page can search for and save a different city. The RSS flyout accepts
-only sanitized paragraphs, lists, emphasis, and HTTP(S) links from the feed;
-active markup and arbitrary attributes are discarded. Currency codes with no
-Vista-era localized name use their three-letter ISO code rather than showing
-`null`.
+Backups are stored in `C:\ProgramData\TritonSidebarGadgets\original`.
+Use the original weather settings page to select another city.
 
-## Verification
-
-Run both checks after installation:
+## Check the result
 
 ```sh
 python3 tools/verify_vista_sidebar_gadgets.py --source
 python3 tools/verify_vista_sidebar_gadgets.py --guest
 ```
 
-The guest check compares all three active HTML pages with their original
-backups, validates the installed data adapters, tests news, forecast, location
-search, currency rates, and fallback currency labels through Vista's own
-XMLHTTP stack, and confirms that Sidebar is running.
+The source check runs without a VM. The guest check tests the providers,
+checks the original pages and confirms that Sidebar is running.
+
+For another VM, pass `--socket /absolute/path/to/control.sock` to the updater
+and verifier, plus `--vm-name NAME` to the guest verifier.
+
+The relay caches news and weather for ten minutes, location searches for
+one day, and rates for twelve hours. It uses the last cached response when
+an upstream service is unavailable. RSS descriptions are sanitized before
+being sent to the gadget.

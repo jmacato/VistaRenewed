@@ -2,12 +2,11 @@
 
 The original Triton Vista code and documentation contributed by this project's
 maintainer are licensed under the [MIT License](LICENSES/MIT-original.txt).
-The maintainer authorized this grant on 2026-09-30 for original standalone code
-and additions where permitted. This is a grant for those contributions, not a
+The grant covers original standalone code and additions where permitted. This is a grant for those contributions, not a
 replacement license for the combined repository or its dependencies.
 
 The standalone scope is original content in `scripts/`, `tools/`, `packaging/`,
-`tests/`, `docs/`, `.github/`, and the root `run-vm.sh`, `run-triton.sh`, `README.md`, `AGENTS.md`,
+`tests/`, `docs/`, `.github/`, and the root `run-vm.sh`, `run-triton.sh`, `README.md`,
 `.gitignore`, and `.gitmodules`. It includes the deployment service, build and
 bootstrap helpers, test harnesses, and packaging tools. This notice applies to
 original portions of mixed-origin files; it does not relicense copied code,

@@ -161,10 +161,8 @@ media under `dist/persistent/`. It does not change a VM deployment pointer.
 Use `VISTA_SIGNING_DIRECTORY` inside the container to select a different mounted
 input directory. Keep private keys outside source control.
 
-## 6. Record validation
+## 6. Check the result
 
-Record the source revision, applied source patch identities, image ID, build
-commands, package hashes, guest architecture and host GPU/driver. Retain failing
-logs. Validate the exact installed package and host build according to
-[RELEASE-VALIDATION](RELEASE-VALIDATION.md); a successful compile, native GPU test,
-Aero-enabled flag or guest FPS counter is insufficient for a performance claim.
+Build and package checks do not prove Vista application compatibility or smooth
+output in QEMU. Test the installed package with its matching host build and
+read the [current limits](STATUS.md).

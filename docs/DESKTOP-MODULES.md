@@ -1,70 +1,48 @@
-# Vista desktop modules
+# Vista desktop tools
 
-The public release includes the desktop work alongside the graphics stack.
-These are developer sources and optional experiments. Building a DLL does not
-establish IE compatibility, and the full Supermium/CEF source build remains
-unfinished. No prototype is registered automatically by the graphics installer.
+## IE and MSHTML
 
-| Module | Sources and entry points | Status |
-| --- | --- | --- |
-| IE/MSHTML | `tools/ie7_*`, `tools/mshtml_*`, `tools/vista_mshtml_*` | Experimental COM/document adapters, browser transport, activation and navigation probes; reversible per-user installation tooling |
-| Sidebar | `packaging/vista-sidebar-gadgets/`, `tools/update_vista_sidebar_gadgets.py`, `tools/verify_vista_sidebar_gadgets.py` | RSS, weather, search and currency providers; original guest HTML preserved |
-| Supermium/CEF | `scripts/supermium_cef_*`, `scripts/stage_supermium_runtime.py`, `packaging/supermium-runtime-pin.json` | Pinned source/toolchain workflow and runtime staging; full CEF compilation unfinished |
-| Desktop control | `tools/vista_control.py`, `tools/vista_transfer.py`, UI automation and trace tools | Serial service, file transfer and diagnostics |
-| Media Center | `tools/measure_wmc.py`, `tools/verify_wmc_results.py`, `tests/fixtures/wmc-720p-captions.json` | Workload and result collection utilities; historical reports are separate from current validation |
-| Service readiness | `packaging/vista-licensing-ready.c` | Protected-policy readiness probe; no Windows binary redistribution |
-
-## Build IE/MSHTML experiments
-
-After building the toolchain image described in [BUILDING](BUILDING.md):
+Build the optional adapters and probes after creating the toolchain image:
 
 ```sh
+bash scripts/dev-container.sh build
 python3 scripts/build_vista_desktop_extras.py
 ```
 
-This builds the facade, x86/x64 activation adapters and content, element,
-navigation, transport and view probes into ignored `build/`. It uses ephemeral
-containers via `scripts/dev-container.sh`; no named development container is
-required. CI compiles these alongside the public CPU checks. Guest installation
-and COM registration are explicit operations in `tools/vista_mshtml_install.py`;
-read its help and rollback commands before exercising a disposable Vista guest.
-The optional payloads are separate from the graphics driver ISO.
+Outputs go in `build/`. They are separate from the graphics driver ISO.
+The source includes document adapters, browser transport and tests for
+activation, navigation, content and window handling.
 
-See [MSHTML experiments](MSHTML_CEF_SCOUT.md), [native MSHTML investigation](MSHTML_NATIVE_RE.md)
-and [Supermium/CEF source workflow](SUPERMIUM_CEF_BUILD.md). Downloaded browser
-archives, source trees and SDKs stay in ignored directories. The runtime staging
-script verifies the separately obtained archive against the public pin metadata.
-Third-party license terms continue to apply.
+`tools/vista_mshtml_install.py` provides per-user installation, status and
+rollback commands. It requires a running VM, the control service and a
+separately installed Supermium runtime. Read its help before installing:
+
+```sh
+python3 tools/vista_mshtml_install.py --help
+```
+
+The adapters are prototypes. See [current limits](STATUS.md).
 
 ## Sidebar
 
-`run-vm.sh` starts the host relay on container loopback port 8765, accessible
-from the guest at `http://10.0.2.2:8765`. Set `VISTA_SIDEBAR=0` to disable it.
-The launcher checks relay health before starting QEMU. Updating the guest is a
-separate operation; existing pages and backend scripts are backed up first.
+Follow the [Sidebar setup guide](VISTA_SIDEBAR_GADGETS.md). It covers the
+host relay, guest updates and checks.
 
-```sh
-python3 tools/verify_vista_sidebar_gadgets.py --source
-python3 tools/update_vista_sidebar_gadgets.py --user 'DOMAIN\username'
-python3 tools/verify_vista_sidebar_gadgets.py --guest
-```
+## Supermium and CEF
 
-For a nondefault VM, pass `--socket /path/to/control.sock` to the updater and
-verifier, and `--vm-name NAME` to the guest verifier. `--no-restart` installs
-providers without requiring an account name. No stock Sidebar HTML or Microsoft
-DLL is shipped here. See [Sidebar provider details](VISTA_SIDEBAR_GADGETS.md)
-and [desktop control](VISTA_CONTROL.md).
+The full CEF build is unfinished. The source and toolchain helpers are
+`scripts/supermium_cef_source.py`, `scripts/supermium_cef_toolchain.py` and
+`scripts/supermium_cef_build.py`; each has `--help`.
 
-## Validation and investigation records
+`packaging/supermium-runtime-pin.json` records the runtime version, download
+URL and checksum. Put the matching archive at the path listed in that file,
+then run `python3 scripts/stage_supermium_runtime.py` to create a runtime ISO.
+Downloaded browser files, SDKs and source trees are separate inputs; their
+license terms still apply.
 
-`python3 scripts/test_public.py` includes offline Sidebar provider tests and
-Supermium source/toolchain and registry-policy tests. These checks do not
-contact upstream services, change a guest or prove runtime compatibility.
+## Other tools
 
-The dated investigation reports retain their original results and references.
-Their `.unlazy/`, VM and machine-specific paths describe development artifacts
-that are not shipped. Use the public workflows above for a new checkout.
-`patches/dxvk-deferred-resource-tracking.patch` and
-`patches/dxvk-shared-clear-flush.patch` are retained investigation patches;
-the bootstrap patch series is authoritative. Do not apply archival patches on
-top of the curated backend automatically.
+- [Desktop control and file transfer](VISTA_CONTROL.md)
+- [Graphics tracing](TRITON_TRACE.md)
+- [Test commands](../tests/README.md)
+- Media Center helpers: `tools/measure_wmc.py` and `tools/verify_wmc_results.py`

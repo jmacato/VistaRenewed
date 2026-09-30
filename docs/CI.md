@@ -79,4 +79,4 @@ Builds repeat the procedure; they do not promise identical ISO bytes. Record
 the source revision, source patch manifest, image ID and generated checksums.
 
 Compilation, signing and artifact validation remain separate from the actual
-Vista [runtime and presentation gates](RELEASE-VALIDATION.md).
+Vista [runtime and display limits](STATUS.md).
