@@ -47,5 +47,3 @@ and private signing keys are not included.
 
 See the [build checks](tests/README.md), [CI guide](docs/CI.md) and
 [license notes](LICENSE.md).
-
-[Screenshot dates](docs/images/README.md).
