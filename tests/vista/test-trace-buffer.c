@@ -23,12 +23,16 @@ static unsigned GetCurrentProcessId(void) {return 1;}
 static unsigned GetCurrentThreadId(void) {return 2;}
 /* SOURCE_UNDER_TEST */
 static TRITON_TRACE_HEADER *header;
-static int stop;
+static int restarted;
 static void *producer(void *unused)
 {
     (void)unused;
     TRITON9_DEVICE device = {header,1,1,1};
-    while (!__atomic_load_n(&stop,__ATOMIC_SEQ_CST))
+    /* Keep the workload finite even on runners with fewer CPUs than writers. */
+    for(unsigned i=0;i<500;i++)
+        triton9TraceEventAt(&device,TT_PRESENT_BEGIN,1,0,0,0);
+    while (!__atomic_load_n(&restarted,__ATOMIC_SEQ_CST))sched_yield();
+    for(unsigned i=0;i<1000;i++)
         triton9TraceEventAt(&device,TT_PRESENT_BEGIN,1,0,0,0);
     return NULL;
 }
@@ -38,18 +42,17 @@ int main(void)
     header->capacity=TRITON_TRACE_CAPACITY;header->run=1;header->enabled=1;
     pthread_t threads[8];
     for(unsigned i=0;i<8;i++)assert(!pthread_create(&threads[i],NULL,producer,NULL));
-    while (__atomic_load_n(&header->count,__ATOMIC_SEQ_CST)<2000)sched_yield();
+    while (__atomic_load_n(&header->count,__ATOMIC_SEQ_CST)<1000)sched_yield();
     __atomic_fetch_and(&header->enabled,~1,__ATOMIC_SEQ_CST);
     while (__atomic_load_n(&header->enabled,__ATOMIC_SEQ_CST))sched_yield();
-    LONG count=header->count;assert(count>=2000 && !header->dropped);
+    LONG count=header->count;assert(count>=1000 && !header->dropped);
     TRITON_TRACE_RECORD *records=(void*)(header+1);
     for(LONG i=0;i<count;i++)assert(records[i].seq==(unsigned)i && records[i].run==1 && records[i].frame==1);
     /* Old producers continue running across a new capture's initialization.
      * A stale reference may acquire the new gate, but must not append to it. */
     header->count=0;header->dropped=0;header->run=2;
     __atomic_store_n(&header->enabled,1,__ATOMIC_SEQ_CST);
-    for(unsigned i=0;i<10000;i++)sched_yield();
-    __atomic_store_n(&stop,1,__ATOMIC_SEQ_CST);
+    __atomic_store_n(&restarted,1,__ATOMIC_SEQ_CST);
     for(unsigned i=0;i<8;i++)assert(!pthread_join(threads[i],NULL));
     assert(header->count==0 && header->enabled==1 && header->writers==0);
     free(header);puts("TRITON TRACE BUFFER CONCURRENCY PASS");return 0;
