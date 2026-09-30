@@ -5,6 +5,7 @@ Windows Sidebar.
 
 ## Triton graphics
 
+![Vista running the Triton graphics driver in a Linux Host](docs/images/hero.png)
 ![Vista running the Triton graphics driver](docs/images/triton.png)
 
 Graphics drivers for Vista in QEMU, with Direct3D 9/10 and a Linux/Vulkan
