@@ -19,7 +19,7 @@ CPU_FIXTURES = (
     'draw-auto', 'dwm-blt-flags', 'egl-export-query',
     'egl-external-copy-lifecycle', 'egl-upload-context', 'external-copy-integration',
     'fence-health', 'flip-copy-completion', 'flip-flags', 'flip-wait-status',
-    'gl-reset-thread', 'gtk-egl-viewport', 'host-present-blt', 'host-trace',
+    'gl-reset-thread', 'gtk-egl-viewport', 'host-present-blt',
     'present-consumption', 'present-timeline', 'primary-allocation', 'primary-layout',
     'query-transport', 'ring-failure', 'ring-publication', 'scanout-address',
     'scanout-refresh', 'scanout-reuse', 'scanout-surface', 'shared-pending',
@@ -30,14 +30,13 @@ CPU_FIXTURES = (
 
 def cases(output):
     result = [(n, ['tests/vista/test-' + n + '.py']) for n in CPU_FIXTURES]
-    result += [('kart-probe', ['tests/vista/run-kart-game.py', 'self-test']),
-               ('d3d9-query', ['tests/vista/test-d3d9-pipeline.py', '--cpu']),
+    result += [('d3d9-query', ['tests/vista/test-d3d9-pipeline.py', '--cpu']),
                ('d3d10-cpu', ['tests/vista/run-d3d10-compat.py', '--cpu']),
                ('shared-map-initialization', ['tests/vista/test-shared-map-initialization.py',
                                               '--evidence', str(output / 'shared-map')]),
                ('shader-cache', ['triton-umd/src/virtio/neptune/vista-d3d9/tests/native_compat/shader_cache_test.py'])]
     result += [(n, ['-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_' + n + '.py'])
-               for n in ('run_vm', 'triton_trace', 'vista_control', 'vista_transfer', 'vista_uia_client', 'source_notices', 'sdk_headers', 'supermium_cef_source', 'supermium_cef_toolchain', 'vista_supermium_policy', 'sidebar')]
+               for n in ('run_vm', 'vista_control', 'vista_transfer', 'vista_uia_client', 'source_notices', 'sdk_headers', 'supermium_cef_source', 'supermium_cef_toolchain', 'vista_supermium_policy', 'sidebar')]
     result += [('sidebar-source', ['tools/verify_vista_sidebar_gadgets.py', '--source']),
                ('bootstrap-sources', ['tests/bootstrap/test_sources.py']),
                ('bootstrap-qemu-sources', ['tests/bootstrap/test_qemu_sources.py'])]

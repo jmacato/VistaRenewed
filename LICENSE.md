@@ -1,29 +1,21 @@
-# License scope
+# License
 
-The original Triton Vista code and documentation contributed by this project's
-maintainer are licensed under the [MIT License](LICENSES/MIT-original.txt).
-The grant covers original standalone code and additions where permitted. This is a grant for those contributions, not a
-replacement license for the combined repository or its dependencies.
+Original code and documentation by this project's maintainer use the
+[MIT License](LICENSES/MIT-original.txt). Third-party code keeps its own licenses.
 
-The standalone scope is original content in `scripts/`, `tools/`, `packaging/`,
-`tests/`, `docs/`, `.github/`, and the root `run-vm.sh`, `run-triton.sh`, `README.md`,
-`.gitignore`, and `.gitmodules`. It includes the deployment service, build and
-bootstrap helpers, test harnesses, and packaging tools. This notice applies to
-original portions of mixed-origin files; it does not relicense copied code,
-fixtures, specifications, or other third-party material in those directories.
-Existing per-file or third-party terms and attribution remain applicable.
+The MIT grant covers original work in `scripts/`, `tools/`, `packaging/`,
+`tests/`, `docs/`, `.github/`, and these root files: `run-vm.sh`, `run-triton.sh`,
+`README.md`, `.gitignore` and `.gitmodules`. In files that include third-party
+material, the grant covers only the maintainer's contributions.
 
-Original additions inside `triton-*` components and `patches/` are covered by
-this MIT grant only to the extent permitted by the surrounding component's
-license. Existing component and file licenses govern the combined work,
-including copyleft obligations. A patch or Git bundle does not change the
-license of the source it contains. Preserve all upstream copyright, license,
-patent and attribution notices. Consult [UPSTREAM](docs/UPSTREAM.md) and each
-component's license files before redistribution.
+Original additions in `triton-*` and `patches/` use MIT where the component
+license allows it. The component's license governs the combined work,
+including any copyleft requirements. Keep existing copyright, license,
+patent and attribution notices when redistributing it.
 
-The grant does not cover downloaded SDK/WDK files, Windows installations,
-guest applications, generated signing identities, or other external inputs.
-It makes no ownership assignment or representation that every inherited
-copyright label has been independently verified. Missing attribution should
-be investigated and corrected from provenance, not filled with a guessed
-person or company name.
+Downloaded SDK/WDK files, Windows installations, guest applications and
+signing keys have their own terms and are outside this grant.
+
+Some inherited copyright labels still need verification. Use the original
+source history to resolve missing attribution. See [upstream sources and
+license notes](docs/UPSTREAM.md) for details.

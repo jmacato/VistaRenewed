@@ -2,14 +2,21 @@
 
 This is a developer preview.
 
-- **Triton:** Direct3D compatibility and display pacing are still being fixed.
-  Build and CPU checks do not prove that applications run correctly in Vista.
-  Guest FPS counters do not prove smooth output in the QEMU window.
-- **IE/MSHTML:** the adapters are prototypes, not a complete IE replacement.
-  The full Supermium/CEF source build is unfinished. The graphics installer
-  does not register these adapters.
-- **Sidebar:** the providers need network access from the host. If a service
-  is unavailable, the relay uses cached data when it has any.
+## Triton
 
-Use matching guest drivers, QEMU, renderer and backend builds. Screenshots
-show development builds; they do not validate a new installer.
+Direct3D compatibility and display pacing are still being fixed. Test the
+installed drivers with their matching QEMU, renderer and backend builds.
+For display performance, measure advancing frames in the QEMU window along
+with guest frame production. Guest FPS counters alone miss host display stalls.
+
+## IE and MSHTML
+
+The adapters are prototypes. The full Supermium/CEF source build is unfinished.
+Install the adapters separately; the graphics installer leaves IE unchanged.
+
+## Sidebar
+
+The host needs internet access for the data providers. The relay can serve
+cached data during a service outage. A request fails if no cached data is available.
+
+The screenshots show development builds. See [capture dates](images/README.md).

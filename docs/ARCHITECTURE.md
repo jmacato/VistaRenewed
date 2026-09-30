@@ -1,4 +1,4 @@
-# Architecture and component contracts
+# Graphics architecture
 
 Triton implements Vista WDDM 1.0 kernel and user-mode interfaces. Neptune
 transports guest Direct3D work through virtio to a host renderer. On Linux,
@@ -16,8 +16,7 @@ flowchart LR
     G --> H[QEMU GPU scanout and GTK window]
 ```
 
-The retained D3D11 frontend shares transport/backend code. DXMT and Metal source
-remain for upstream context; the Linux workflow does not validate the macOS path.
+The D3D11 frontend shares transport and backend code. The Linux build uses DXVK.
 
 | Source | Responsibility |
 | --- | --- |
@@ -32,19 +31,17 @@ remain for upstream context; the Linux workflow does not validate the macOS path
 | `triton-dxvk/` | Native host graphics execution and exported sharing interfaces |
 | `packaging/` | Installer service, INF and Windows resources |
 
-## Deploy paired components
+## Matching components
 
-Guest Neptune and host Neptune must use downstream wire revision **4** together.
+Guest and host Neptune must both use wire revision 4.
 This includes color-copy, shared-export cancellation and map-abort semantics.
-The duplicated protocol headers are maintained together; the upstream generator
-mentioned in their comments is not included here. Review both copies when
-changing the protocol.
+Update both copies of the protocol headers when changing the wire format.
+The generator mentioned in their comments is unavailable in this repo.
 
 The renderer's version-1 exported resource layout is a separate server/proxy
 contract. Keep the server, proxy, library and QEMU consumers matched. DXVK's
 single-plane sharing flag and native color-copy/dithering interfaces likewise
-require their corresponding guest and host consumers. Installing a new UMD over
-an unrelated QEMU/renderer/backend is not a supported configuration.
+require their corresponding guest and host consumers. Build and deploy the guest drivers, QEMU, renderer and backend together.
 
 ## Presentation and CPU access
 
@@ -54,11 +51,8 @@ as the presentation source; explicit screenshots have their own readback path.
 External-only EGL images use a GPU copy helper before desktop OpenGL consumption.
 Lifetime and reset handling must retire imports before deleting their storage.
 
-This does not establish a completely GPU-only driver. Application-requested CPU
-access, staging/readback and older primary backing paths remain. Shared primary
-CPU storage and GPU storage are not proven to be one permanently coherent
-allocation. The experimental direct-primary allocation and synthetic Vulkan
-provenance diagnostics are excluded from the public production path.
+Applications still use CPU access and readback paths. Primary CPU and GPU
+storage can use separate allocations.
 
-Tracing helps explain resource and display events. It does not prove smooth
-output in QEMU. See [current display limits](STATUS.md).
+Use tracing to inspect resource and display events. See
+[current display limits](STATUS.md) for performance status.

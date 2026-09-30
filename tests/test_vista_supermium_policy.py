@@ -10,7 +10,6 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import vista_supermium_policy as policy
-import vista_low_launch_exercise as launch
 
 
 class Registry:
@@ -229,31 +228,6 @@ class PolicyTest(unittest.TestCase):
             self.registry.values['Extra'] = 'REG_SZ', 'keep'
         self.assertEqual(self.registry.values['Extra'], ('REG_SZ', 'keep'))
 
-    def test_actual_harness_borrows_durable_policy_and_checks_zones(self):
-        self.policy.install()
-        with mock.patch.object(launch, 'exercise_policy', lambda: policy.exercise_policy(self.policy)), \
-                mock.patch.object(launch, 'require', return_value='zones') as commands:
-            launch.exercise('web')
-        self.assertEqual(commands.call_count, 3)
-        self.assertEqual(self.registry.values, policy.expected(policy.DURABLE))
-        self.assertIn('LOW_POLICY_PRESERVED_AND_ZONES_UNCHANGED', self.output.getvalue())
-
-    def test_actual_harness_failure_preserves_policy_without_success_marker(self):
-        self.policy.install()
-        with mock.patch.object(launch, 'exercise_policy', lambda: policy.exercise_policy(self.policy)), \
-                mock.patch.object(launch, 'require', side_effect=['zones', RuntimeError('IE failed'), 'zones']), \
-                self.assertRaisesRegex(RuntimeError, 'IE failed'):
-            launch.exercise('web')
-        self.assertEqual(self.registry.values, policy.expected(policy.DURABLE))
-        self.assertNotIn('AND_ZONES_UNCHANGED', self.output.getvalue())
-
-    def test_actual_harness_detects_zone_changes(self):
-        with mock.patch.object(launch, 'exercise_policy', lambda: policy.exercise_policy(self.policy)), \
-                mock.patch.object(launch, 'require', side_effect=['before', 'result', 'after']), \
-                self.assertRaisesRegex(RuntimeError, 'zone settings changed'):
-            launch.exercise('web')
-        self.assertIsNone(self.registry.values)
-        self.assertNotIn('AND_ZONES_UNCHANGED', self.output.getvalue())
 
 
 if __name__ == '__main__':

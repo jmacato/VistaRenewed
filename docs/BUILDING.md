@@ -2,8 +2,8 @@
 
 Run commands from the repository root on an x86-64 Linux host. Git, Python 3.11+
 and Podman or Docker are needed for source restoration and container builds.
-No GPU or VM is needed to compile. GPU tests and Vista validation are separate
-steps and require a working Vulkan/EGL host and compatible QEMU runtime setup.
+Compilation runs without a GPU or VM. Graphics tests need Vulkan/EGL support
+and a Vista VM with the matching host components.
 
 ## 1. Restore source and create the build environment
 
@@ -15,27 +15,23 @@ python3 scripts/bootstrap_qemu_sources.py
 bash scripts/dev-container.sh build
 ```
 
-Bootstrap restores the pinned DXVK source bundle, nested sources and downstream
-patch series. Do not manually apply older development patches afterward. Keep
-local edits out of restored dependencies when checking reproducibility.
+Bootstrap restores DXVK and its dependencies, then applies the project patches.
+Local edits to those sources stop the bootstrap.
 
 The QEMU bootstrap restores the four C dependencies at the revisions in its
-checked-in Meson wrap files and applies their source overlays. It validates
-existing contents before making changes. QEMU compilation keeps downloads
-disabled so an absent dependency fails explicitly.
+checked-in Meson wrap files and applies their source overlays. It checks
+existing files before making changes. Missing dependencies stop the QEMU build.
 
 `dev-container.sh run COMMAND ...` starts a disposable container with this
-checkout mounted at `/workspace`. It does not require a preexisting named
-container. Podman is preferred when available; set `CONTAINER_ENGINE=docker` to
+checkout mounted at `/workspace`. Each command gets a new container. Podman is preferred when available; set `CONTAINER_ENGINE=docker` to
 choose Docker. Set `VISTA_BUILD_IMAGE` to select a different image tag. Podman
 uses the invoking user's identity; Docker's default root process can leave
-root-owned build files. The wrapper disables SELinux labeling for the workspace
-mount and gives the container no graphics or KVM devices.
+root-owned build files. The workspace mount uses disabled SELinux labeling. The build container has
+no graphics or KVM devices.
 
-The base image is pinned by digest and direct Python package versions are pinned.
-APT packages and transitive Python dependencies are resolved during image build;
-this is a repeatable source procedure, **not a fully locked or bit-identical
-binary build**. Record the resulting container image ID with release evidence.
+The base image and direct Python package versions are pinned. APT packages
+and indirect Python dependencies are resolved when the image builds, so builds
+can differ. Record the container image ID when sharing a package.
 
 ## 2. Supply Microsoft build inputs
 
@@ -54,10 +50,9 @@ Then extract its verified build inputs:
 bash scripts/dev-container.sh run python3 scripts/extract_archived_wdk71.py
 ```
 
-The extractor's explicit `--download` option uses the archive URL recorded in
-its source when the ISO is absent. Network availability and rights to use these
-Microsoft inputs are external prerequisites. The source repository does not
-contain those downloads, a Windows installation, or a VM disk.
+If the ISO is missing, `--download` fetches it from the archive URL in the
+script. You need permission to use these Microsoft files. Downloads, Windows
+media and VM disks stay outside source control.
 
 ## 3. Build matching Linux host components
 
@@ -70,7 +65,7 @@ The first command builds and installs native DXVK plus Neptune-enabled
 virglrenderer into `host-linux/`, then runs the renderer initialization test.
 The second produces `triton-qemu/build-linux/qemu-system-x86_64`; it enables GTK,
 OpenGL, virglrenderer, KVM, SLIRP and PipeWire. The container includes the
-corresponding development packages. It does not install a system QEMU.
+corresponding development packages. The QEMU executable stays in the checkout.
 
 Defaults preserve the component build paths used by tests. For isolated builds,
 set absolute `TRITON_HOST_PREFIX`, `TRITON_DXVK_BUILD`,
@@ -84,8 +79,7 @@ bash scripts/dev-container.sh run env TRITON_HOST_PREFIX=/workspace/build/host \
 
 Pass the same prefix when building QEMU. Individual test runners may require
 explicit paths when using these overrides. `JOBS=4` is the default parallelism;
-`MESON` selects an alternative Meson executable. Never rebuild libraries mapped
-by a running VM; stop that VM or use separate output paths.
+`MESON` selects an alternative Meson executable. Stop the VM before rebuilding libraries it uses, or build to separate paths.
 
 ## 4. Build both guest architectures
 
@@ -96,10 +90,8 @@ bash scripts/dev-container.sh run python3 scripts/build_vista_kmd_linux.py --arc
 ```
 
 The UMD script builds x64 and x86 by default; `--arch x64` or `--arch x86`
-selects one. Keep D3D9/D3D10 DLLs, KMD, deployment service, INF/catalog and host
-protocol revision together. PE/import validation is a build check; it does not
-prove that either guest architecture boots or renders correctly. Verbose KMD
-serial tracing (`--verbose-trace`) is diagnostic and can distort performance.
+selects one. Package matching D3D9/D3D10 DLLs, KMD, deployment service, INF/catalog and host
+components together. Verbose KMD tracing (`--verbose-trace`) can slow the guest.
 
 ## 5. Test, package and install
 
@@ -108,19 +100,18 @@ Set `TZ` explicitly if the host timezone cannot be detected. Confirm that the
 guest clock is correct before installing: a shifted clock can reject the
 development certificate as not yet valid or expired.
 
-Run the default CPU regression manifest after source bootstrap:
+Run the CPU tests after source bootstrap:
 
 ```sh
 bash scripts/dev-container.sh run python3 scripts/test_public.py
 ```
 
-`python3 scripts/test_public.py --list` lists the explicit CPU-only selection.
+`python3 scripts/test_public.py --list` lists the CPU tests.
 See [the test index](../tests/README.md) for suite entry points and
 [the Vista test guide](../tests/vista/README.md) for individual CPU regression commands,
-explicit native GPU suites and guest probes. Native tests need the freshly built
-host libraries and real device access. The build wrapper intentionally does not
-pretend to provide a host NVIDIA driver or a display server. Do not run native
-GPU tests during game performance captures.
+native GPU tests and guest probes. Run GPU tests on the host with the built
+libraries and access to the chosen GPU. Keep them separate from VM performance
+captures.
 
 For x64 and x86 installers with temporary development signing identities:
 
@@ -130,20 +121,18 @@ bash scripts/dev-container.sh run bash scripts/ci_build_driver_iso.sh
 
 This also repeats prerequisite extraction and guest builds. Its archive download
 is unnecessary when the verified WDK ISO is already supplied. See [CI](CI.md)
-for artifact paths, signature limits and reproducibility details. Both KMD architectures are compiled and packaged. The x64 ISO includes x86
-compatibility DLLs; the separate x86 ISO targets a 32-bit guest. Neither package
-build establishes runtime compatibility for its guest architecture.
+for outputs and signing details. The x64 ISO includes WoW64 DLLs; the x86 ISO
+targets a 32-bit guest.
 
 Install only into a disposable Vista test VM, using [INSTALL-ISO.txt](INSTALL-ISO.txt)
-and the matching QEMU/backend from this source revision. Keep the VM's licensed
-installation media and disk outside version control. The Podman runtime launcher uses `VISTA_DISK` for your writable qcow2 image;
+and the matching QEMU/backend from this source revision. Keep installation media and VM disks outside version control. The Podman
+launcher uses `VISTA_DISK` for your writable qcow2 image;
 inspect `bash run-vm.sh --help` before launching. Set `VISTA_RENDER_NODE` for
 the intended host GPU and configure NVIDIA CDI when applicable. Audio defaults
 to `VISTA_AUDIO=auto`, which uses PipeWire when available; `none` disables it
-and `pipewire` requires it. Building a package does not start or modify a VM.
+and `pipewire` requires it.
 QEMU draw diagnostics are disabled by default; set `VISTA_DISPLAY_STATS=1`
-when investigating the display path. Those counters do not establish visible
-presentation performance.
+to log display draw counts.
 For nondefault build locations, map the build settings to the launcher's
 `VISTA_HOST_PREFIX` and `VISTA_QEMU_BUILD_DIR` overrides.
 
@@ -157,12 +146,11 @@ bash scripts/dev-container.sh run bash scripts/sign_vista_linux_package.sh
 
 The helper reads the key in place, derives the public certificate and service
 pins from that identity, verifies signatures/catalog membership, and stages
-media under `dist/persistent/`. It does not change a VM deployment pointer.
+media under `dist/persistent/`.
 Use `VISTA_SIGNING_DIRECTORY` inside the container to select a different mounted
 input directory. Keep private keys outside source control.
 
 ## 6. Check the result
 
-Build and package checks do not prove Vista application compatibility or smooth
-output in QEMU. Test the installed package with its matching host build and
-read the [current limits](STATUS.md).
+Test the installed package with its matching host build. See
+[current limits](STATUS.md) for compatibility and display status.

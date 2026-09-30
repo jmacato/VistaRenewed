@@ -1,82 +1,62 @@
 # Driver installer builds
 
-The Vista driver ISO GitHub Actions workflow builds and checks development
-installers on pull requests, configured branch/tag pushes and manual dispatch.
-See [the workflow](../.github/workflows/driver-iso.yml) for its current triggers
-and retention settings. It uploads artifacts; it does not publish a release,
-boot Vista, or certify graphics compatibility.
+[GitHub Actions](../.github/workflows/driver-iso.yml) builds installers on pull
+requests, branch and tag pushes, and manual runs. The workflow uploads build
+artifacts and logs.
 
-The `host-and-cpu` job restores pinned host sources, runs the explicit CPU
-manifest, and builds the Linux renderer and QEMU. The driver packaging job
-depends on that job succeeding, so a broken host build or failed CPU regression
-cannot produce an uploaded installer. Failed jobs retain their diagnostics.
+The `host-and-cpu` job restores source, runs CPU tests, builds the IE/MSHTML
+adapter, and compiles the Linux renderer and QEMU. The driver packaging job
+runs after that job passes. Vista runtime testing is a separate step.
 
 ## Build locally
 
-From the checkout root:
+From the repo root:
 
 ```sh
 bash scripts/dev-container.sh build
 bash scripts/dev-container.sh run bash scripts/ci_build_driver_iso.sh
 ```
 
-The build downloads hash-verified header inputs and, if absent, the pinned WDK
-7.1 archive. To avoid the WDK download, supply the verified ISO described in
-[BUILDING](BUILDING.md). Unavailable or mismatched inputs stop the build. SDK/WDK
-usage rights and network availability are external prerequisites.
+The build downloads the SDK/WDK headers and WDK 7.1 archive, checking their
+hashes. You can supply the WDK ISO yourself; see [BUILDING](BUILDING.md).
+Missing or mismatched inputs stop the build.
 
-The pipeline compiles x64 and x86 guest drivers, validates PE imports and INF
-registration, and packages both x64 and x86 installers. To repeat x86 packaging separately
-after both builds:
+The pipeline compiles x64 and x86 drivers, checks PE imports and INF entries,
+and packages both installers. To package x86 again after building the drivers:
 
 ```sh
 bash scripts/dev-container.sh run python3 scripts/package_vista_ci_iso.py --arch x86
 ```
 
-The x64 output is `dist/triton-vista-x64.iso`, `dist/SHA256SUMS`,
-`dist/build-info.json` and `dist/INSTALL.txt`. The x86 outputs are under
-`dist/x86/`. Package success is not proof of x86 guest compatibility.
+The x64 output is `dist/triton-vista-x64.iso`, with checksums, build information
+and install instructions in `dist/`. The x86 output is in `dist/x86/`.
 
-## Contents and checks
+## Package contents
 
-The x64 installer contains the KMD, native and WoW64 D3D9/D3D10 user-mode DLLs,
-runtime probes, deployment service, INF, signed catalog and public development
-certificate. It includes an installation command, license notices and
-instructions. This is a driver data disc, not bootable Windows media. It needs
-a matching Neptune-enabled QEMU, renderer and DXVK build.
+The x64 ISO contains the kernel driver, native and WoW64 D3D9/D3D10 DLLs,
+probes, deployment service, INF, signed catalog and public test certificate.
+The x86 ISO contains the 32-bit drivers. Both need the matching QEMU,
+renderer and DXVK builds from this project.
 
-The installer includes `NOTICES/SOURCE-NOTICES.txt`, a deterministic collection
-of existing copyright/SPDX source comment blocks from guest source components,
-packaging and guest tests. This is a conservative attribution superset, not an
-exact binary dependency inventory or a new license grant. Full existing license
-texts remain alongside it, together with `LICENSE-scope.md` and
-`MIT-original.txt` for the maintainer's original contributions. The persistent
-signing helper uses the same notice assembly.
+`NOTICES/SOURCE-NOTICES.txt` collects copyright and SPDX comments from the guest
+source, packaging and tests. The packages also include component license texts,
+`LICENSE-scope.md` and `MIT-original.txt`.
 
-Packaging validates catalog membership and signatures, extracts the finished
-ISO and checks it against the staging manifest. No GPU, KVM device, guest VM
-or persistent signing secret is needed. Build metadata records
-`guest_runtime_tested: false`; leave that false unless separately verified
-runtime evidence is attached to that exact artifact.
+Packaging checks signatures and catalog entries, then extracts the ISO and
+compares it with the staged files. Build information records
+`guest_runtime_tested: false` because this workflow does not run Vista.
 
-## Signing limitations
+## Signing
 
-Each package build creates a temporary self-signed development identity and
-embeds the public certificate's hash/thumbprint pins in its deployment service.
-The packager removes temporary private-key material. It does not supply WHQL
-certification or a production driver signature. The service and package retain
-Vista-compatible SHA-1/development signing behavior; follow the architecture's
-installation instructions and review the guest integrity-setting changes.
+Each CI build creates a temporary self-signed test certificate. Its deployment
+service checks the matching certificate and package signatures. Packaging
+removes the temporary private key. These are development packages without
+Microsoft certification.
 
-For a new package identity, restore a VM snapshot from before installation.
-Automatic upgrades across temporary signing identities are not established.
-Never substitute an unrelated certificate or weaken certificate-pin checks to
-make a package install.
+Restore a pre-install VM snapshot before testing a build with another test
+certificate. Keep the service and certificate from the same package together.
+See the ISO's install instructions for changes to Vista's boot settings.
 
-The container base digest and direct Python dependencies are pinned, but OS
-package resolution, certificate keys, signatures and timestamps can vary.
-Builds repeat the procedure; they do not promise identical ISO bytes. Record
-the source revision, source patch manifest, image ID and generated checksums.
-
-Compilation, signing and artifact validation remain separate from the actual
-Vista [runtime and display limits](STATUS.md).
+Package resolution, signing keys and timestamps can vary between builds.
+Keep the source revision, image ID and checksums with the package.
+For runtime limitations, see [current limits](STATUS.md).

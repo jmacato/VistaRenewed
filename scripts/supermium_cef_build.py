@@ -71,24 +71,24 @@ def configure():
         cef_link.unlink()
         old_cef.rename(cef_link)
         old_cef.symlink_to('src/cef', target_is_directory=True)
-    cross_patch = ROOT / 'scripts/supermium_cef_cross.patch'
+    cross_patch = ROOT / 'packaging/supermium-cef/supermium_cef_cross.patch'
     if git(SRC, 'apply', '--recount', '--reverse', '--check', str(cross_patch)).returncode:
         run(['git', 'apply', '--recount', '--check', cross_patch])
         run(['git', 'apply', '--recount', cross_patch])
     sdk = TOOLCHAIN / 'Windows Kits/10'
-    host_patch = ROOT / 'scripts/supermium_cef_host.patch'
+    host_patch = ROOT / 'packaging/supermium-cef/supermium_cef_host.patch'
     if git(SRC, 'apply', '--recount', '--reverse', '--check', str(host_patch)).returncode:
         run(['git', 'apply', '--recount', '--check', host_patch])
         run(['git', 'apply', '--recount', host_patch])
-    compile_patch = ROOT / 'scripts/supermium_cef_compile.patch'
+    compile_patch = ROOT / 'packaging/supermium-cef/supermium_cef_compile.patch'
     if git(SRC, 'apply', '--recount', '--reverse', '--check', str(compile_patch)).returncode:
         run(['git', 'apply', '--recount', '--check', compile_patch])
         run(['git', 'apply', '--recount', compile_patch])
-    rc_patch = ROOT / 'scripts/supermium_cef_rc.patch'
+    rc_patch = ROOT / 'packaging/supermium-cef/supermium_cef_rc.patch'
     if git(SRC, 'apply', '--recount', '--reverse', '--check', str(rc_patch)).returncode:
         run(['git', 'apply', '--recount', '--check', rc_patch])
         run(['git', 'apply', '--recount', rc_patch])
-    cdm_patch = ROOT / 'scripts/supermium_cef_cdm.patch'
+    cdm_patch = ROOT / 'packaging/supermium-cef/supermium_cef_cdm.patch'
     if git(SRC, 'apply', '--reverse', '--check', str(cdm_patch)).returncode:
         run(['git', 'apply', '--check', cdm_patch])
         run(['git', 'apply', cdm_patch])

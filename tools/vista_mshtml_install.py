@@ -22,7 +22,7 @@ KEY = rf'HKCU\Software\Classes\CLSID\{CLSID}\InprocServer32'
 OWNER = 'triton-mshtml-durable-v1'
 REMOTE_ROOT = r'C:\TritonSupermiumBridge\versions'
 ARTIFACTS = {
-    '32': ROOT / 'build' / 'triton-ie7-mshtml-activation-probe.dll',
+    '32': ROOT / 'build' / 'triton-mshtml-x86.dll',
     '64': ROOT / 'build' / 'triton-mshtml-x64.dll',
 }
 HASH_LOCAL = ROOT / 'build' / 'vista-mshtml-hash.exe'
@@ -155,11 +155,7 @@ def load_receipt():
 
 def build_payloads(container):
     subprocess.run([
-        sys.executable, str(ROOT / 'scripts/build_ie7_mshtml_activation_probe.py'), '--both'
-    ], cwd=ROOT, check=True)
-    subprocess.run([
-        str(ROOT / 'scripts/dev-container.sh'), 'run',
-        'bash', 'scripts/build_ie7_mshtml_navigation_test.sh'
+        sys.executable, str(ROOT / 'scripts/build_mshtml.py'), '--both'
     ], cwd=ROOT, check=True)
     subprocess.run([
         str(ROOT / 'scripts/dev-container.sh'), 'run',

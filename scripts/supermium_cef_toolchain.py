@@ -100,7 +100,7 @@ def verify():
                     '/clang:-ivfsoverlay', '/clang:' + str(overlay)]
         for include in includes:
             compiler.extend(['/imsvc', str(include)])
-        subprocess.run([*compiler, str(ROOT / 'scripts/supermium_cef_toolchain_smoke.cc'),
+        subprocess.run([*compiler, str(ROOT / 'packaging/supermium-cef/supermium_cef_toolchain_smoke.cc'),
                         '/Fo' + str(obj)], check=True)
         libraries = [vc / 'lib' / arch, vc / 'atlmfc/lib' / arch, sdk_lib / 'ucrt' / arch,
                      sdk_lib / 'um' / arch]

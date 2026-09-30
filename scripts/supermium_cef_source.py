@@ -49,7 +49,7 @@ def verify():
 def patch_text(name, merged=False):
     content = (BASE / 'cef/patch/patches' / (name + '.patch')).read_text()
     if merged:
-        contexts = json.loads((ROOT / 'scripts/supermium_cef_patch_context.json').read_text())
+        contexts = json.loads((ROOT / 'packaging/supermium-cef/supermium_cef_patch_context.json').read_text())
         for before, after in contexts.get(name, []):
             if content.count(before) != 1:
                 raise RuntimeError(f'{name}: expected one context match')

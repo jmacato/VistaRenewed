@@ -35,13 +35,12 @@ python3 tools/verify_vista_sidebar_gadgets.py --source
 python3 tools/verify_vista_sidebar_gadgets.py --guest
 ```
 
-The source check runs without a VM. The guest check tests the providers,
-checks the original pages and confirms that Sidebar is running.
+The source check runs without a VM. The guest check tests provider requests, compares the pages with their backups
+and checks the Sidebar process.
 
 For another VM, pass `--socket /absolute/path/to/control.sock` to the updater
 and verifier, plus `--vm-name NAME` to the guest verifier.
 
 The relay caches news and weather for ten minutes, location searches for
 one day, and rates for twelve hours. It uses the last cached response when
-an upstream service is unavailable. RSS descriptions are sanitized before
-being sent to the gadget.
+an upstream service is unavailable. The relay strips scripts and unsafe markup from RSS descriptions.

@@ -1,7 +1,7 @@
 # Windows Vista projects
 
-Code and tools for making Vista more useful today. The main projects are
-Triton graphics, Internet Explorer and Windows Sidebar.
+Three projects for Windows Vista: Triton graphics, Internet Explorer and
+Windows Sidebar.
 
 ## Triton graphics
 
@@ -17,12 +17,11 @@ backend. Compatibility and smooth display output are still in progress.
 
 ![IE/MSHTML prototype loading an HTTPS page on Vista](docs/images/ie.png)
 
-Work on connecting IE and MSHTML to a modern browser engine. Includes document
-adapters, test tools and Supermium/CEF build scripts. This is a prototype;
-the full CEF build is unfinished. The image is a real prototype capture from
-September 12, 2026.
+A prototype that connects IE and MSHTML to a modern browser engine, with
+document adapters, tests and Supermium/CEF build scripts. The full CEF build
+is unfinished. Screenshot: September 12, 2026.
 
-[Setup and status](docs/DESKTOP-MODULES.md#ie-and-mshtml)
+[Setup and status](docs/DESKTOP-MODULES.md)
 
 ## Windows Sidebar
 
@@ -31,7 +30,7 @@ September 12, 2026.
 New data providers for the original RSS, weather and currency gadgets.
 The tools keep the original gadget pages and back up files before changes.
 
-[Setup](docs/DESKTOP-MODULES.md#sidebar) · [Sidebar details](docs/VISTA_SIDEBAR_GADGETS.md)
+[Setup](docs/VISTA_SIDEBAR_GADGETS.md)
 
 ## Getting started
 
@@ -45,10 +44,7 @@ bash scripts/dev-container.sh build
 You need your own Vista installation. Windows media, SDK/WDK files, VM disks
 and private signing keys are not included.
 
-The repo also has desktop control, file transfer, tracing and Media Center
-tools. See the [desktop guide](docs/DESKTOP-MODULES.md),
-[test index](tests/README.md), [CI guide](docs/CI.md) and
+See the [build checks](tests/README.md), [CI guide](docs/CI.md) and
 [license notes](LICENSE.md).
 
-Screenshots show actual Vista applications. They do not prove full
-compatibility or display performance. [Capture notes](docs/images/README.md).
+[Screenshot dates](docs/images/README.md).

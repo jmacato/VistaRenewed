@@ -17,7 +17,7 @@ DEFINE_GUID(IID_IPersistHistory, 0x91a565c1, 0xe38f, 0x11d0, 0x94, 0xbf, 0x00, 0
 #include "mshtml_private_window.h"
 
 #ifndef TRITON_MSHTML_DLL_PATH
-#define TRITON_MSHTML_DLL_PATH L"C:\\TritonSupermiumBridge\\triton-ie7-mshtml-activation-probe.dll"
+#define TRITON_MSHTML_DLL_PATH L"C:\\TritonSupermiumBridge\\triton-mshtml-x86.dll"
 #endif
 
 typedef HRESULT (WINAPI *GetClass)(REFCLSID, REFIID, void **);

@@ -1,7 +1,7 @@
 # Vista control and file transfer
 
 The control service runs commands and transfers files over the VM's second
-serial port. It works without networking or Remote Desktop.
+serial port. IE installation and Sidebar updates use this service.
 
 ## Build and install
 
@@ -40,9 +40,8 @@ admin token when available. For another VM, place
 
 Only one job runs at a time. Use `run --detach` for a long job, then
 `status JOB_ID` to check it. The service keeps job output and status under
-`C:\ProgramData\TritonControl\jobs`. Reusing `run --id JOB_ID` checks that
-job rather than running it again. A job's child processes stop when the job
-ends or times out.
+`C:\ProgramData\TritonControl\jobs`. `run --id JOB_ID` returns the saved
+status of that job. A job's child processes stop when the job ends or times out.
 
 ## Larger uploads
 
@@ -61,21 +60,8 @@ this helper uses the default control socket. Transfers check SHA-256 before
 replacing the destination. The temporary HTTP server listens only inside the
 VM container; the control service stays on serial.
 
-## UI automation
-
-Build and copy the UI worker into the guest:
-
-```sh
-bash scripts/dev-container.sh run bash scripts/build_vista_uia.sh
-python3 tools/vista_control.py put build/vista-uia.exe 'C:\ProgramData\TritonControl\vista-uia.exe'
-python3 tools/vista_control.py uia tree
-```
-
-Use `uia --help` for focus, invoke and text actions. Actions require a window
-handle and the expected control name.
-
 ## Service updates
 
 Stage a new executable with `--stage-update`, then reboot to replace the
 installed service. `--uninstall` removes the service registration and its own
-Safe Mode entries, while leaving saved jobs and transport settings in place.
+Safe Mode entries. Saved jobs and serial transport settings remain.

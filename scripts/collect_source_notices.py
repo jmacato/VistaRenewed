@@ -60,19 +60,7 @@ def collect(root):
             groups[notice].append(path.relative_to(root).as_posix())
     if not groups:
         raise ValueError('No source notices found; refusing an empty attribution file')
-    header = '''Supplementary guest source notices
-
-These are existing copyright and SPDX comment blocks retained verbatim from
-this source tree. The scope conservatively includes the guest KMD/UMD source
-components, packaging and guest test sources, including code not compiled into
-this particular package. This is not an exact binary dependency inventory.
-Full component license texts accompany this file. A missing notice does not
-supply a license grant, prove public-domain status or resolve authorship.
-No new copyright ownership or licensing grant is asserted by this collection.
-Known build output directories, configured Meson build directories and external
-SDK/WDK inputs are excluded. Unmarked custom build output may require cleanup.
-
-'''
+    header = 'Supplementary guest source notices\n\nCopyright and SPDX comments copied from the guest drivers, packaging and\ntests. This includes source that may not be compiled into this package.\nComponent license texts accompany this file. Missing notices do not grant\npermission to use the code or establish its owner.\nBuild outputs and external SDK/WDK files are excluded.\n\n'
     entries = []
     for notice, paths in sorted(groups.items(), key=lambda item: (item[1][0], item[0])):
         entries.append('Source paths:\n' + ''.join(f'  {p}\n' for p in sorted(paths)) +

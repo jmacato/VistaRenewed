@@ -1,6 +1,6 @@
 # Screenshot notes
 
-These are real Vista screenshots. No generated artwork is used.
+Screenshots from Vista development builds.
 
 | Image | Capture | Shows |
 | --- | --- | --- |
@@ -9,8 +9,6 @@ These are real Vista screenshots. No generated artwork is used.
 | `sidebar.png` | September 30, 2026; QEMU screen capture, cropped | Original weather and currency gadgets using the replacement data providers |
 
 The Sidebar gadgets were moved onto the desktop before capture. Cropping
-removes unused desktop space; the displayed UI and values were not retouched.
-The IE capture is unchanged and comes from the earlier prototype run.
+removes unused desktop space. The IE image is the original prototype capture.
 
-These development captures illustrate the projects. They do not validate the
-latest public build or establish compatibility or visible frame rate.
+For compatibility and display status, see [current limits](../STATUS.md).
