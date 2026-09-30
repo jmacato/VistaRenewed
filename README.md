@@ -15,11 +15,11 @@ backend. Compatibility and smooth display output are still in progress.
 
 ## Internet Explorer
 
-![IE/MSHTML prototype loading an HTTPS page on Vista](docs/images/ie.png)
+[![YouTube at 0:20 in the Vista IE/MSHTML prototype](docs/images/ie.png)](https://youtu.be/95Qvo38lhAI?si=KXsyEoenFpbjFgtT&t=20)
 
 A prototype that connects IE and MSHTML to a modern browser engine, with
 document adapters, tests and Supermium/CEF build scripts. The full CEF build
-is unfinished. Screenshot: September 12, 2026.
+is unfinished. The screenshot shows YouTube paused at 0:20.
 
 [Setup and status](docs/DESKTOP-MODULES.md)
 
