@@ -1,4 +1,4 @@
-# Windows Vista projects
+# Vista Renewed
 
 Three projects for Windows Vista: Triton graphics, Internet Explorer and
 Windows Sidebar.

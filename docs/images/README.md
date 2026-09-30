@@ -1,6 +1,6 @@
 # Screenshot notes
 
-Screenshots from Vista development builds.
+Screenshots from [Vista Renewed](../../README.md) development builds.
 
 | Image | Capture | Shows |
 | --- | --- | --- |

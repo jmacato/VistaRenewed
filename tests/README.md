@@ -1,6 +1,7 @@
 # Build checks
 
-These checks cover Triton code, the build tools, IE setup and Sidebar providers.
+Build checks for [Vista Renewed](../README.md) cover Triton code, the build
+tools, IE setup and Sidebar providers.
 They run without starting a VM or GPU workload.
 
 ```sh

@@ -1,5 +1,7 @@
 # Pinned sources and patches
 
+Dependencies for [Vista Renewed](../README.md).
+
 Run `python3 scripts/bootstrap_sources.py` before building. It needs Python 3,
 Git and HTTPS access to the dependency repositories.
 
