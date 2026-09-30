@@ -27,6 +27,7 @@ struct npt_pending_blob {
    /* enum virgl_formats the exporting context created the texture with,
     * or 0 if unknown.  See virgl_resource::export_format. */
    uint32_t virgl_format;
+   struct virgl_attachment_layout layout;
 };
 
 /* Sync Map/Unmap bookkeeping.  Keyed by (resource_id, subresource):
@@ -61,6 +62,7 @@ struct npt_resource {
    } u;
 
    size_t size;
+   struct virgl_attachment_layout layout;
 };
 
 struct npt_context {
@@ -215,6 +217,11 @@ npt_context_import_resource(struct npt_context *ctx,
                             int fd,
                             uint64_t size);
 
+bool
+npt_context_import_resource_layout(struct npt_context *ctx, uint32_t res_id,
+    enum virgl_resource_fd_type fd_type, int fd, uint64_t size,
+    const struct virgl_attachment_layout *layout);
+
 void
 npt_context_destroy_resource(struct npt_context *ctx, uint32_t res_id);
 
@@ -229,14 +236,19 @@ npt_context_get_resource(struct npt_context *ctx, uint32_t res_id)
    return likely(entry) ? entry->data : NULL;
 }
 
-/* Takes ownership of the fd. */
+/* Idempotently release an unclaimed export. A claimed blob is owned by its
+ * virgl resource and is deliberately unaffected. */
+void npt_context_cancel_pending_blob(struct npt_context *ctx, uint64_t blob_id);
+
+/* Takes ownership of the fd only on success. */
 bool
 npt_context_register_pending_blob(struct npt_context *ctx,
                                   uint64_t blob_id,
                                   enum virgl_resource_fd_type fd_type,
                                   int fd,
                                   uint64_t size,
-                                  uint32_t virgl_format);
+                                  uint32_t virgl_format,
+                                  const struct virgl_attachment_layout *layout);
 
 /* Wake any wait_ring waiter on \p ring_id whose target seqno is
  * reached.  Called after each dispatched command. */

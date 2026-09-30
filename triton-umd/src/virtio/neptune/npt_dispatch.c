@@ -140,6 +140,38 @@ fill_unmap_cmd(struct npt_cmd_unmap_resource *cmd, uint64_t context_id,
    cmd->access_flags = access_flags;
 }
 
+/* Abort is synchronous: callers may recycle staging storage only after the
+ * backend has ended the rejected Map. Wire version 3 is required. */
+HRESULT
+npt_dispatch_resource_abort(struct npt_ring *ring, uint64_t context_id,
+                            uint64_t resource_id, uint32_t subresource)
+{
+   struct npt_cmd_unmap_resource cmd;
+   fill_unmap_cmd(&cmd, context_id, resource_id, subresource, 0, 0, 0,
+                  NPT_MAP_ACCESS_ABORT);
+   cmd.header.cmd_flags = NPT_CMD_FLAG_REPLY;
+   struct npt_ring_submit_command submit;
+   memset(&submit, 0, sizeof(submit));
+   struct npt_cs_encoder *enc = npt_ring_submit_command_init(
+      ring, &submit, &cmd, sizeof(cmd),
+      sizeof(struct npt_cmd_unmap_resource_reply));
+   if (!enc)
+      return NPT_E_FAIL;
+   enc->cur = (uint8_t *)&cmd + sizeof(cmd);
+   npt_ring_submit_command(ring, &submit);
+   struct npt_cs_decoder *dec = npt_ring_get_command_reply(ring, &submit);
+   HRESULT hr = NPT_E_FAIL;
+   if (dec && dec->cur && dec->end &&
+       (size_t)(dec->end - dec->cur) >= sizeof(struct npt_cmd_unmap_resource_reply)) {
+      const struct npt_cmd_unmap_resource_reply *reply =
+         (const struct npt_cmd_unmap_resource_reply *)dec->cur;
+      hr = (HRESULT)reply->header.cmd_return;
+   }
+   if (dec)
+      npt_ring_free_command_reply(ring, &submit);
+   return hr;
+}
+
 bool
 npt_dispatch_resource_unmap(struct npt_ring *ring, uint64_t context_id,
                             uint64_t resource_id, uint32_t subresource,
@@ -173,7 +205,8 @@ npt_dispatch_resource_update(struct npt_ring *ring, uint64_t resource_host_id,
                              uint32_t copy_size)
 {
    if (!ring || !resource_host_id || !data || !byte_size ||
-       !copy_size || copy_size > byte_size)
+       !copy_size || copy_size > byte_size ||
+       byte_size > UINT32_MAX - 7u - sizeof(struct npt_cmd_resource_update))
       return false;
 
    const uint32_t payload_aligned = (byte_size + 7u) & ~7u;
@@ -207,6 +240,53 @@ npt_dispatch_resource_update(struct npt_ring *ring, uint64_t resource_host_id,
     * the reserved byte_size region. */
    return npt_ring_submit_raw_with_payload(ring, &cmd, sizeof(cmd),
                                            data, copy_size, payload_aligned);
+}
+
+HRESULT
+npt_dispatch_resource_copy_color(void *context, void *dst_rtv, void *src_srv)
+{
+   if (!context || !dst_rtv || !src_srv)
+      return NPT_E_INVALIDARG;
+   struct npt_ring *ring = npt_com_self_ring(context);
+   struct npt_device *device = npt_com_self_device(context);
+   /* Views may use a TLS ring while the immediate context uses its own
+    * ring. Synchronous view creation has already registered their IDs. */
+   if (!ring || !device || npt_com_self_device(dst_rtv) != device ||
+       npt_com_self_device(src_srv) != device)
+      return NPT_E_INVALIDARG;
+
+   struct npt_cmd_resource_copy_color cmd = {0};
+   cmd.header.cmd_type = NPT_TRANSPORT_CMD_TYPE(
+      NPT_TRANSPORT_SUBGROUP_RESOURCE, NPT_TRANSPORT_RESOURCE_COPY_COLOR);
+   cmd.header.cmd_flags = NPT_CMD_FLAG_REPLY;
+   cmd.header.cmd_size = sizeof(cmd);
+   cmd.context_id = npt_com_self_id(context);
+   cmd.dst_rtv_id = npt_com_self_id(dst_rtv);
+   cmd.src_srv_id = npt_com_self_id(src_srv);
+   if (!cmd.context_id || !cmd.dst_rtv_id || !cmd.src_srv_id)
+      return NPT_E_INVALIDARG;
+
+   struct npt_ring_submit_command submit = {0};
+   struct npt_cs_encoder *enc = npt_ring_submit_command_init(
+      ring, &submit, &cmd, sizeof(cmd),
+      sizeof(struct npt_cmd_resource_copy_color_reply));
+   if (enc)
+      enc->cur = (uint8_t *)&cmd + sizeof(cmd);
+   npt_ring_submit_command(ring, &submit);
+
+   struct npt_cs_decoder *dec = npt_ring_get_command_reply(ring, &submit);
+   HRESULT hr = NPT_E_FAIL;
+   if (dec && dec->cur && dec->end &&
+       (size_t)(dec->end - dec->cur) >=
+          sizeof(struct npt_cmd_resource_copy_color_reply)) {
+      const struct npt_cmd_resource_copy_color_reply *reply =
+         (const struct npt_cmd_resource_copy_color_reply *)dec->cur;
+      if (reply->header.cmd_type == cmd.header.cmd_type)
+         hr = (HRESULT)reply->header.cmd_return;
+   }
+   if (dec)
+      npt_ring_free_command_reply(ring, &submit);
+   return hr;
 }
 
 /* ==========================================================================
@@ -303,6 +383,39 @@ npt_dispatch_clear_depth_stencil_rects(void *context, void *dsv,
  * ========================================================================== */
 
 HRESULT
+npt_dispatch_shared_cancel_export(struct npt_ring *ring, uint64_t blob_id)
+{
+   struct npt_cmd_shared_cancel_export cmd;
+   memset(&cmd, 0, sizeof(cmd));
+   cmd.header.cmd_type = NPT_TRANSPORT_CMD_TYPE(
+      NPT_TRANSPORT_SUBGROUP_SHARED, NPT_TRANSPORT_SHARED_CANCEL_EXPORT);
+   cmd.header.cmd_flags = NPT_CMD_FLAG_REPLY;
+   cmd.header.cmd_size = sizeof(cmd);
+   cmd.blob_id = blob_id;
+
+   struct npt_ring_submit_command submit;
+   memset(&submit, 0, sizeof(submit));
+   struct npt_cs_encoder *enc = npt_ring_submit_command_init(
+      ring, &submit, &cmd, sizeof(cmd),
+      sizeof(struct npt_cmd_shared_cancel_export_reply));
+   if (enc)
+      enc->cur = (uint8_t *)&cmd + sizeof(cmd);
+   npt_ring_submit_command(ring, &submit);
+   struct npt_cs_decoder *dec = npt_ring_get_command_reply(ring, &submit);
+   HRESULT hr = NPT_E_FAIL;
+   if (dec && dec->cur && dec->end &&
+       (size_t)(dec->end - dec->cur) >=
+          sizeof(struct npt_cmd_shared_cancel_export_reply)) {
+      const struct npt_cmd_shared_cancel_export_reply *reply =
+         (const struct npt_cmd_shared_cancel_export_reply *)dec->cur;
+      hr = (HRESULT)reply->header.cmd_return;
+   }
+   if (dec)
+      npt_ring_free_command_reply(ring, &submit);
+   return hr;
+}
+
+HRESULT
 npt_dispatch_shared_export_blob(struct npt_ring *ring, uint64_t texture_id,
                                 uint64_t blob_id, uint32_t data_res_id,
                                 uint32_t data_off)
@@ -376,6 +489,37 @@ npt_dispatch_shared_open_res(struct npt_ring *ring, uint64_t device_id,
    if (dec)
       npt_ring_free_command_reply(ring, &submit);
 
+   return hr;
+}
+
+HRESULT
+npt_dispatch_shared_query_layout(struct npt_ring *ring, uint32_t res_id,
+                                 struct npt_cmd_shared_query_layout_reply *out)
+{
+   struct npt_cmd_shared_query_layout cmd = {0};
+   cmd.header.cmd_type = NPT_TRANSPORT_CMD_TYPE(
+      NPT_TRANSPORT_SUBGROUP_SHARED, NPT_TRANSPORT_SHARED_QUERY_LAYOUT);
+   cmd.header.cmd_flags = NPT_CMD_FLAG_REPLY;
+   cmd.header.cmd_size = sizeof(cmd);
+   cmd.res_id = res_id;
+   struct npt_ring_submit_command submit = {0};
+   struct npt_cs_encoder *enc = npt_ring_submit_command_init(
+      ring, &submit, &cmd, sizeof(cmd), sizeof(*out));
+   if (enc)
+      enc->cur = (uint8_t *)&cmd + sizeof(cmd);
+   npt_ring_submit_command(ring, &submit);
+   struct npt_cs_decoder *dec = npt_ring_get_command_reply(ring, &submit);
+   HRESULT hr = NPT_E_FAIL;
+   if (dec && dec->cur && dec->end &&
+       (size_t)(dec->end - dec->cur) >= sizeof(*out)) {
+      const struct npt_cmd_shared_query_layout_reply *reply =
+         (const struct npt_cmd_shared_query_layout_reply *)dec->cur;
+      hr = (HRESULT)reply->header.cmd_return;
+      if (!NPT_FAILED(hr))
+         memcpy(out, reply, sizeof(*out));
+   }
+   if (dec)
+      npt_ring_free_command_reply(ring, &submit);
    return hr;
 }
 

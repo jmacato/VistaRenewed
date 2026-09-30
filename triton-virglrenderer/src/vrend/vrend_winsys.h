@@ -62,6 +62,8 @@ int vrend_winsys_get_attrs_for_texture(uint32_t tex_id, uint32_t format, int *fo
                                        bool *has_dmabuf_export,
                                        int *planes, uint64_t *modifier);
 int vrend_winsys_get_fd_for_texture(uint32_t tex_id, int *fd);
+int vrend_winsys_export_texture_query(uint32_t tex_id,
+                                      struct virgl_renderer_export_query *query);
 int vrend_winsys_get_fd_for_texture2(uint32_t tex_id, int *fd, int *stride, int *offset);
 
 uint32_t vrend_winsys_query_video_memory(void);

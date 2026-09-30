@@ -16,6 +16,62 @@
 #include "triton.h"
 #include "triton_log.h"
 
+/* Standard-primary exports may use RGBA storage for a logical BGRA mode.
+ * Retain the public format while selecting a view from the physical family. */
+DXGI_FORMAT
+tritonResourceHostViewFormat(PTRITON_RESOURCE r, DXGI_FORMAT format)
+{
+    if (!r->HostFormat)
+        return format;
+    const BOOL srgb = format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                      format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                      format == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8X8_UNORM: case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        switch (r->HostFormat) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            return srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : r->HostFormat;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+            return srgb ? DXGI_FORMAT_B8G8R8A8_UNORM_SRGB : r->HostFormat;
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+            return srgb ? DXGI_FORMAT_B8G8R8X8_UNORM_SRGB : r->HostFormat;
+        default: break;
+        }
+        break;
+    default: break;
+    }
+    return format;
+}
+
+/* GetDesc returns the old backing's physical format. A rotated ordinary
+ * resource can have HostFormat==0, so restore its logical family explicitly
+ * before choosing the new backing's view format. */
+static DXGI_FORMAT
+tritonResourceRecreatedViewFormat(PTRITON_RESOURCE r, DXGI_FORMAT format)
+{
+    TRITON_RESOURCE viewResource = *r;
+    if (!viewResource.HostFormat) {
+        switch (r->Format) {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+            viewResource.HostFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            break;
+        case DXGI_FORMAT_B8G8R8A8_UNORM:
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+            viewResource.HostFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            break;
+        case DXGI_FORMAT_B8G8R8X8_UNORM:
+        case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+            viewResource.HostFormat = DXGI_FORMAT_B8G8R8X8_UNORM;
+            break;
+        default: break;
+        }
+    }
+    return tritonResourceHostViewFormat(&viewResource, format);
+}
+
 /* ---------- per-resource view list + rotation support ---------- */
 
 void
@@ -61,6 +117,7 @@ tritonResourceRecreateViews(PTRITON_DEVICE pD, PTRITON_RESOURCE r)
             D3D11_RENDER_TARGET_VIEW_DESC d;
             if (!v->pRTV) break;
             ID3D11RenderTargetView_GetDesc(v->pRTV, &d);
+            d.Format = tritonResourceRecreatedViewFormat(r, d.Format);
             ID3D11RenderTargetView_Release(v->pRTV);
             v->pRTV = NULL;
             hr = ID3D11Device1_CreateRenderTargetView(pD->pDev1, r->pResource,
@@ -72,6 +129,7 @@ tritonResourceRecreateViews(PTRITON_DEVICE pD, PTRITON_RESOURCE r)
             D3D11_SHADER_RESOURCE_VIEW_DESC d;
             if (!v->pSRV) break;
             ID3D11ShaderResourceView_GetDesc(v->pSRV, &d);
+            d.Format = tritonResourceRecreatedViewFormat(r, d.Format);
             ID3D11ShaderResourceView_Release(v->pSRV);
             v->pSRV = NULL;
             hr = ID3D11Device1_CreateShaderResourceView(pD->pDev1, r->pResource,
@@ -83,6 +141,7 @@ tritonResourceRecreateViews(PTRITON_DEVICE pD, PTRITON_RESOURCE r)
             D3D11_DEPTH_STENCIL_VIEW_DESC d;
             if (!v->pDSV) break;
             ID3D11DepthStencilView_GetDesc(v->pDSV, &d);
+            d.Format = tritonResourceRecreatedViewFormat(r, d.Format);
             ID3D11DepthStencilView_Release(v->pDSV);
             v->pDSV = NULL;
             hr = ID3D11Device1_CreateDepthStencilView(pD->pDev1, r->pResource,
@@ -94,6 +153,7 @@ tritonResourceRecreateViews(PTRITON_DEVICE pD, PTRITON_RESOURCE r)
             D3D11_UNORDERED_ACCESS_VIEW_DESC d;
             if (!v->pUAV) break;
             ID3D11UnorderedAccessView_GetDesc(v->pUAV, &d);
+            d.Format = tritonResourceRecreatedViewFormat(r, d.Format);
             ID3D11UnorderedAccessView_Release(v->pUAV);
             v->pUAV = NULL;
             hr = ID3D11Device1_CreateUnorderedAccessView(pD->pDev1, r->pResource,
@@ -138,7 +198,7 @@ tritonCreateRenderTargetView(D3D10DDI_HDEVICE hDevice,
     v->pRTV                = NULL;
 
     D3D11_RENDER_TARGET_VIEW_DESC d = {};
-    d.Format = pArgs->Format;
+    d.Format = tritonResourceHostViewFormat(r, pArgs->Format);
 
     const BOOL fIsArray = (r->ArraySize > 1);
 
@@ -344,7 +404,7 @@ tritonCreateSRV(D3D10DDI_HDEVICE hDevice,
     v->pSRV      = NULL;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC d = {};
-    d.Format = pArgs->Format;
+    d.Format = tritonResourceHostViewFormat(r, pArgs->Format);
     const BOOL fIsArray = (r->ArraySize > 1);
     const BOOL fIsCubeArray = (r->ArraySize > 6);
     switch (pArgs->ResourceDimension) {
@@ -453,7 +513,7 @@ tritonCreateDSV(D3D10DDI_HDEVICE hDevice,
     v->pDSV      = NULL;
 
     D3D11_DEPTH_STENCIL_VIEW_DESC d = {};
-    d.Format = pArgs->Format;
+    d.Format = tritonResourceHostViewFormat(r, pArgs->Format);
     d.Flags  = pArgs->Flags;
     const BOOL fIsArray = (r->ArraySize > 1);
     switch (pArgs->ResourceDimension) {
@@ -535,7 +595,7 @@ tritonCreateUAV(D3D10DDI_HDEVICE hDevice,
     v->pUAV      = NULL;
 
     D3D11_UNORDERED_ACCESS_VIEW_DESC d = {};
-    d.Format = pArgs->Format;
+    d.Format = tritonResourceHostViewFormat(r, pArgs->Format);
     const BOOL fIsArray = (r->ArraySize > 1);
     switch (pArgs->ResourceDimension) {
     case D3D10DDIRESOURCE_BUFFER:
@@ -736,7 +796,7 @@ tritonCreateSRV_WDDM2_0(D3D10DDI_HDEVICE hDevice,
     v->pSRV      = NULL;
 
     D3D11_SHADER_RESOURCE_VIEW_DESC1 d = {};
-    d.Format = pArgs->Format;
+    d.Format = tritonResourceHostViewFormat(r, pArgs->Format);
     const BOOL fIsArray     = (r->ArraySize > 1);
     const BOOL fIsCubeArray = (r->ArraySize > 6);
     switch (pArgs->ResourceDimension) {
@@ -856,7 +916,7 @@ tritonCreateRenderTargetView_WDDM2_0(D3D10DDI_HDEVICE hDevice,
     v->pRTV                = NULL;
 
     D3D11_RENDER_TARGET_VIEW_DESC1 d = {};
-    d.Format = pArgs->Format;
+    d.Format = tritonResourceHostViewFormat(r, pArgs->Format);
     const BOOL fIsArray = (r->ArraySize > 1);
     switch (pArgs->ResourceDimension) {
     case D3D10DDIRESOURCE_BUFFER:
@@ -958,7 +1018,7 @@ tritonCreateUAV_WDDM2_0(D3D10DDI_HDEVICE hDevice,
     v->pUAV      = NULL;
 
     D3D11_UNORDERED_ACCESS_VIEW_DESC1 d = {};
-    d.Format = pArgs->Format;
+    d.Format = tritonResourceHostViewFormat(r, pArgs->Format);
     const BOOL fIsArray = (r->ArraySize > 1);
     switch (pArgs->ResourceDimension) {
     case D3D10DDIRESOURCE_BUFFER:

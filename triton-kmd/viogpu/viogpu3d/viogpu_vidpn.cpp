@@ -4,6 +4,7 @@
 #include "baseobj.h"
 #include "edid.h"
 #include "trace.h"
+#include "viogpu_vsync_timing.h"
 
 static const LONGLONG kVsyncPeriodFallback100ns = 166666LL; // 60 Hz
 
@@ -55,8 +56,11 @@ VioGpuVidPN::VioGpuVidPN(VioGpuAdapter *adapter)
     m_CustomModeIndex = 0;
     RtlZeroMemory(m_EDIDs, sizeof(m_EDIDs));
     m_bEDID = FALSE;
+    m_RefreshRate = 60;
+    m_ActiveRefreshRate = 60;
     m_pFrameBuf = NULL;
     m_pFlipThread = NULL;
+    m_pVsyncThread = NULL;
     InterlockedExchange(&m_shouldFlipStop, FALSE);
     InterlockedExchange(&m_vsyncEnabled, FALSE);
 
@@ -69,8 +73,10 @@ VioGpuVidPN::VioGpuVidPN(VioGpuAdapter *adapter)
     // signal cannot strand a source because TryPromoteFlip checks m_shouldFlip.
     KeInitializeEvent(&m_flipReadyEvent, SynchronizationEvent, FALSE);
     KeInitializeEvent(&m_flipExitEvent, NotificationEvent, TRUE);
-    // Auto-reset periodic tick; armed by the flip thread (see FlipThread for
-    // why the vsync cadence must not come from a wait timeout).
+    KeInitializeEvent(&m_vsyncExitEvent, NotificationEvent, TRUE);
+    KeInitializeEvent(&m_vsyncStopEvent, NotificationEvent, FALSE);
+    KeInitializeEvent(&m_vblankEvent, NotificationEvent, FALSE);
+    // The clock has its own thread so a blocking scanout copy cannot stall it.
     KeInitializeTimerEx(&m_vsyncTimer, SynchronizationTimer);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
@@ -189,41 +195,49 @@ NTSTATUS VioGpuVidPN::Start(ULONG *pNumberOfViews, ULONG *pNumberOfChildren)
     DbgPrint(TRACE_LEVEL_INFORMATION,
              ("<--- %s ColorFormat = %d\n", __FUNCTION__, m_CurrentModes[0].DispInfo.ColorFormat));
 
-    HANDLE threadHandle = 0;
     InterlockedExchange(&m_shouldFlipStop, FALSE);
     KeClearEvent(&m_flipReadyEvent);
-    KeClearEvent(&m_flipExitEvent);
+    KeClearEvent(&m_vsyncStopEvent);
     KeCancelTimer(&m_vsyncTimer);
-    Status = PsCreateSystemThread(&threadHandle, (ACCESS_MASK)0, NULL, (HANDLE)0, NULL, VioGpuVidPN::FlipThread, this);
-    if (!NT_SUCCESS(Status))
+    struct Worker
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("%s failed to create flip thread: 0x%X\n", __FUNCTION__, Status));
-        KeSetEvent(&m_flipExitEvent, IO_NO_INCREMENT, FALSE);
-        return Status;
-    }
-
-    Status = ObReferenceObjectByHandle(threadHandle,
-                                       0,
-                                       NULL,
-                                       KernelMode,
-                                       (PVOID *)(&m_pFlipThread),
-                                       NULL);
-    if (!NT_SUCCESS(Status))
+        PKSTART_ROUTINE routine;
+        PETHREAD *thread;
+        PKEVENT exit;
+    } workers[] = {
+        {VioGpuVidPN::FlipThread, &m_pFlipThread, &m_flipExitEvent},
+        {VioGpuVidPN::VsyncThread, &m_pVsyncThread, &m_vsyncExitEvent},
+    };
+    for (UINT i = 0; i < RTL_NUMBER_OF(workers); ++i)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s failed to reference flip thread: 0x%X\n", __FUNCTION__, Status));
-        InterlockedExchange(&m_shouldFlipStop, TRUE);
-        KeSetEvent(&m_flipReadyEvent, IO_NO_INCREMENT, FALSE);
-        // Wait on an event owned by this object.  Vista's display-driver
-        // headers do not declare ZwWaitForSingleObject, and the event also
-        // avoids retaining the raw thread handle past this local unwind.
-        KeWaitForSingleObject(&m_flipExitEvent,
-                              Executive,
-                              KernelMode,
-                              FALSE,
-                              NULL);
+        Worker &worker = workers[i];
+        HANDLE threadHandle = 0;
+        KeClearEvent(worker.exit);
+        Status = PsCreateSystemThread(&threadHandle, (ACCESS_MASK)0, NULL,
+                                       (HANDLE)0, NULL, worker.routine, this);
+        if (!NT_SUCCESS(Status))
+        {
+            KeSetEvent(worker.exit, IO_NO_INCREMENT, FALSE);
+            StopFlipThread();
+            return Status;
+        }
+        Status = ObReferenceObjectByHandle(threadHandle, 0, NULL, KernelMode,
+                                            (PVOID *)worker.thread, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            // The unreferenced worker must leave this object before unwind.
+            InterlockedExchange(&m_shouldFlipStop, TRUE);
+            KeSetEvent(&m_flipReadyEvent, IO_NO_INCREMENT, FALSE);
+            KeSetEvent(&m_vsyncStopEvent, IO_NO_INCREMENT, FALSE);
+            KeWaitForSingleObject(worker.exit, Executive, KernelMode, FALSE, NULL);
+        }
+        ZwClose(threadHandle);
+        if (!NT_SUCCESS(Status))
+        {
+            StopFlipThread();
+            return Status;
+        }
     }
-    ZwClose(threadHandle);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 
@@ -234,17 +248,20 @@ void VioGpuVidPN::StopFlipThread()
 {
     PAGED_CODE();
 
-    if (m_pFlipThread == NULL)
-    {
-        return;
-    }
-
     InterlockedExchange(&m_shouldFlipStop, TRUE);
-    KeCancelTimer(&m_vsyncTimer);
+    KeSetEvent(&m_vsyncStopEvent, IO_NO_INCREMENT, FALSE);
     KeSetEvent(&m_flipReadyEvent, IO_NO_INCREMENT, FALSE);
-    KeWaitForSingleObject(m_pFlipThread, Executive, KernelMode, FALSE, NULL);
-    ObDereferenceObject(m_pFlipThread);
-    m_pFlipThread = NULL;
+    PETHREAD *workers[] = {&m_pVsyncThread, &m_pFlipThread};
+    for (UINT i = 0; i < RTL_NUMBER_OF(workers); ++i)
+    {
+        if (*workers[i])
+        {
+            KeWaitForSingleObject(*workers[i], Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(*workers[i]);
+            *workers[i] = NULL;
+        }
+    }
+    KeCancelTimer(&m_vsyncTimer);
 }
 
 #if !defined(VIOGPU_TARGET_VISTA)
@@ -511,11 +528,42 @@ NTSTATUS VioGpuVidPN::CommitVidPn(_In_ CONST DXGKARG_COMMITVIDPN *CONST pCommitV
             goto CommitVidPnExit;
         }
 
+        // Latch the committed target's cadence, rather than continuing to
+        // interrupt at the desktop rate after a fullscreen mode change.
+        ULONG committedRate = 0;
+        {
+            D3DKMDT_HVIDPNTARGETMODESET set = 0;
+            CONST DXGK_VIDPNTARGETMODESET_INTERFACE *iface = NULL;
+            CONST D3DKMDT_VIDPN_TARGET_MODE *mode = NULL;
+            Status = pVidPnInterface->pfnAcquireTargetModeSet(
+                pCommitVidPn->hFunctionalVidPn, TargetId, &set, &iface);
+            if (!NT_SUCCESS(Status)) goto CommitVidPnExit;
+            Status = iface->pfnAcquirePinnedModeInfo(set, &mode);
+            if (NT_SUCCESS(Status) && mode)
+            {
+                const D3DDDI_RATIONAL rate = mode->VideoSignalInfo.VSyncFreq;
+                if (rate.Denominator &&
+                    (rate.Numerator == 60ull * rate.Denominator ||
+                     rate.Numerator == (ULONGLONG)m_RefreshRate * rate.Denominator))
+                    committedRate = rate.Numerator / rate.Denominator;
+                else
+                    Status = STATUS_GRAPHICS_INVALID_VIDPN_TARGETMODESET;
+                iface->pfnReleaseModeInfo(set, mode);
+            }
+            pVidPnInterface->pfnReleaseTargetModeSet(pCommitVidPn->hFunctionalVidPn, set);
+            if (NT_SUCCESS(Status) && !committedRate)
+                Status = STATUS_GRAPHICS_INVALID_VIDPN_TARGETMODESET;
+            if (!NT_SUCCESS(Status)) goto CommitVidPnExit;
+        }
         Status = SetSourceModeAndPath(pPinnedVidPnSourceModeInfo, pVidPnPresentPath);
         if (!NT_SUCCESS(Status))
         {
             goto CommitVidPnExit;
         }
+
+        InterlockedExchange(&m_ActiveRefreshRate, (LONG)committedRate);
+        InterlockedExchange(&m_rasterHeight,
+                            (LONG)m_CurrentModes[0].DispInfo.Height);
 
         Status = pVidPnTopologyInterface->pfnReleasePathInfo(hVidPnTopology, pVidPnPresentPath);
         if (!NT_SUCCESS(Status))
@@ -1459,27 +1507,23 @@ BOOLEAN VioGpuVidPN::IsDuplicateModeSize(UINT ModeIndex) const
     return FALSE;
 }
 
-VOID VioGpuVidPN::BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalInfo, PVIDEO_MODE_INFORMATION pModeInfo)
+VOID VioGpuVidPN::BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalInfo, PVIDEO_MODE_INFORMATION pModeInfo, ULONG RefreshRate)
 {
     PAGED_CODE();
 
-    // These are virtual modes, so use a zero-blanking 60 Hz timing model.
-    // Keep every field internally consistent: Vista's VidPn manager compares
-    // the complete signal tuple when it intersects monitor and target modes.
-    // The old code advertised the 148.5 MHz/67.5 kHz timing of 1080p for every
-    // resolution (including 640x480), which cannot describe the declared
-    // 60 Hz signal and prevents a stable cofunctional mode set.
-    const ULONG RefreshRate = 60;
+    // Monitor and target mode sets must contain identical timing tuples.
     RtlZeroMemory(pVideoSignalInfo, sizeof(*pVideoSignalInfo));
     pVideoSignalInfo->VideoStandard = D3DKMDT_VSS_OTHER;
     pVideoSignalInfo->TotalSize.cx = pModeInfo->VisScreenWidth;
-    pVideoSignalInfo->TotalSize.cy = pModeInfo->VisScreenHeight;
-    pVideoSignalInfo->ActiveSize = pVideoSignalInfo->TotalSize;
+    pVideoSignalInfo->TotalSize.cy = pModeInfo->VisScreenHeight +
+                                     VioGpuBlankingLines(pModeInfo->VisScreenHeight);
+    pVideoSignalInfo->ActiveSize.cx = pModeInfo->VisScreenWidth;
+    pVideoSignalInfo->ActiveSize.cy = pModeInfo->VisScreenHeight;
     pVideoSignalInfo->VSyncFreq.Numerator = RefreshRate;
     pVideoSignalInfo->VSyncFreq.Denominator = 1;
     pVideoSignalInfo->HSyncFreq.Numerator = RefreshRate * pVideoSignalInfo->TotalSize.cy;
     pVideoSignalInfo->HSyncFreq.Denominator = 1;
-    pVideoSignalInfo->PixelRate = (SIZE_T)RefreshRate *
+    pVideoSignalInfo->PixelRate = (ULONGLONG)RefreshRate *
                                   pVideoSignalInfo->TotalSize.cx *
                                   pVideoSignalInfo->TotalSize.cy;
     pVideoSignalInfo->ScanLineOrdering = D3DDDI_VSSLO_PROGRESSIVE;
@@ -1530,41 +1574,47 @@ NTSTATUS VioGpuVidPN::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INT
         }
 
         PVIDEO_MODE_INFORMATION pModeInfo = HavePinnedSource ? pPinnedMode : &m_ModeInfo[ModeIndex];
-        pVidPnTargetModeInfo = NULL;
-        Status = pVidPnTargetModeSetInterface->pfnCreateNewModeInfo(hVidPnTargetModeSet, &pVidPnTargetModeInfo);
-        if (!NT_SUCCESS(Status))
+        // Legacy fullscreen clients commonly request 60 Hz explicitly.
+        // Keep it alongside the preferred cadence, including pinned rasters.
+        const ULONG rates[] = {m_RefreshRate, 60};
+        for (UINT rateIndex = 0; rateIndex < (m_RefreshRate == 60 ? 1u : 2u); ++rateIndex)
         {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("pfnCreateNewModeInfo failed with Status = 0x%X, hVidPnTargetModeSet = %llu",
-                      Status,
-                      LONG_PTR(hVidPnTargetModeSet)));
-            return Status;
-        }
-        BuildVideoSignalInfo(&pVidPnTargetModeInfo->VideoSignalInfo, pModeInfo);
-
-        pVidPnTargetModeInfo->Preference = D3DKMDT_MP_NOTPREFERRED; // TODO: another logic for prefferred mode. Maybe
-                                                                    // the pinned source mode
-
-        Status = pVidPnTargetModeSetInterface->pfnAddMode(hVidPnTargetModeSet, pVidPnTargetModeInfo);
-        if (!NT_SUCCESS(Status))
-        {
-            const NTSTATUS AddStatus = Status;
-            if (Status != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
+            pVidPnTargetModeInfo = NULL;
+            Status = pVidPnTargetModeSetInterface->pfnCreateNewModeInfo(hVidPnTargetModeSet, &pVidPnTargetModeInfo);
+            if (!NT_SUCCESS(Status))
             {
                 DbgPrint(TRACE_LEVEL_ERROR,
-                         ("pfnAddMode failed with Status = 0x%X, hVidPnTargetModeSet = 0x%llu, pVidPnTargetModeInfo = "
-                          "%p\n",
+                         ("pfnCreateNewModeInfo failed with Status = 0x%X, hVidPnTargetModeSet = %llu",
                           Status,
-                          LONG_PTR(hVidPnTargetModeSet),
-                          pVidPnTargetModeInfo));
+                          LONG_PTR(hVidPnTargetModeSet)));
+                return Status;
             }
+            BuildVideoSignalInfo(&pVidPnTargetModeInfo->VideoSignalInfo, pModeInfo, rates[rateIndex]);
 
-            const NTSTATUS ReleaseStatus =
-                pVidPnTargetModeSetInterface->pfnReleaseModeInfo(hVidPnTargetModeSet, pVidPnTargetModeInfo);
-            NT_ASSERT(NT_SUCCESS(ReleaseStatus));
-            if (AddStatus != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
+            pVidPnTargetModeInfo->Preference = D3DKMDT_MP_NOTPREFERRED; // TODO: another logic for prefferred mode. Maybe
+                                                                        // the pinned source mode
+
+            Status = pVidPnTargetModeSetInterface->pfnAddMode(hVidPnTargetModeSet, pVidPnTargetModeInfo);
+            if (!NT_SUCCESS(Status))
             {
-                return AddStatus;
+                const NTSTATUS AddStatus = Status;
+                if (Status != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR,
+                             ("pfnAddMode failed with Status = 0x%X, hVidPnTargetModeSet = 0x%llu, pVidPnTargetModeInfo = "
+                              "%p\n",
+                              Status,
+                              LONG_PTR(hVidPnTargetModeSet),
+                              pVidPnTargetModeInfo));
+                }
+
+                const NTSTATUS ReleaseStatus =
+                    pVidPnTargetModeSetInterface->pfnReleaseModeInfo(hVidPnTargetModeSet, pVidPnTargetModeInfo);
+                NT_ASSERT(NT_SUCCESS(ReleaseStatus));
+                if (AddStatus != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
+                {
+                    return AddStatus;
+                }
             }
         }
     }
@@ -1572,135 +1622,43 @@ NTSTATUS VioGpuVidPN::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INT
     return STATUS_SUCCESS;
 }
 
-NTSTATUS VioGpuVidPN::AddSingleMonitorMode(_In_ CONST DXGKARG_RECOMMENDMONITORMODES *CONST pRecommendMonitorModes)
+NTSTATUS VioGpuVidPN::AddSingleMonitorMode(_In_ CONST DXGKARG_RECOMMENDMONITORMODES *CONST args)
 {
     PAGED_CODE();
-
-    NTSTATUS Status = STATUS_SUCCESS;
-    D3DKMDT_MONITOR_SOURCE_MODE *pMonitorSourceMode = NULL;
-    PVIDEO_MODE_INFORMATION pVbeModeInfo = NULL;
-
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-
-    Status = pRecommendMonitorModes->pMonitorSourceModeSetInterface->pfnCreateNewModeInfo(pRecommendMonitorModes->hMonitorSourceModeSet,
-                                                                                          &pMonitorSourceMode);
-    if (!NT_SUCCESS(Status))
+    const ULONG rates[] = {m_RefreshRate, 60};
+    // Put the current raster first and mark only its preferred cadence preferred.
+    for (UINT ordinal = 0; ordinal <= GetModeCount(); ++ordinal)
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("pfnCreateNewModeInfo failed with Status = 0x%X, hMonitorSourceModeSet = 0x%llu\n",
-                  Status,
-                  LONG_PTR(pRecommendMonitorModes->hMonitorSourceModeSet)));
-        return Status;
-    }
-
-    pVbeModeInfo = &m_ModeInfo[m_CurrentModeIndex];
-
-    BuildVideoSignalInfo(&pMonitorSourceMode->VideoSignalInfo, pVbeModeInfo);
-    pMonitorSourceMode->Origin = D3DKMDT_MCO_DRIVER;
-    pMonitorSourceMode->Preference = D3DKMDT_MP_PREFERRED;
-    pMonitorSourceMode->ColorBasis = D3DKMDT_CB_SRGB;
-    pMonitorSourceMode->ColorCoeffDynamicRanges.FirstChannel = 8;
-    pMonitorSourceMode->ColorCoeffDynamicRanges.SecondChannel = 8;
-    pMonitorSourceMode->ColorCoeffDynamicRanges.ThirdChannel = 8;
-    // A display target has RGB channels but no alpha channel.
-    pMonitorSourceMode->ColorCoeffDynamicRanges.FourthChannel = 0;
-
-    Status = pRecommendMonitorModes->pMonitorSourceModeSetInterface->pfnAddMode(pRecommendMonitorModes->hMonitorSourceModeSet,
-                                                                                pMonitorSourceMode);
-    if (!NT_SUCCESS(Status))
-    {
-        if (Status != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
-        {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("pfnAddMode failed with Status = 0x%X, hMonitorSourceModeSet = 0x%llu, pMonitorSourceMode = "
-                      "0x%p\n",
-                      Status,
-                      LONG_PTR(pRecommendMonitorModes->hMonitorSourceModeSet),
-                      pMonitorSourceMode));
-        }
-        else
-        {
-            Status = STATUS_SUCCESS;
-        }
-
-        NTSTATUS TempStatus = pRecommendMonitorModes->pMonitorSourceModeSetInterface->pfnReleaseModeInfo(pRecommendMonitorModes->hMonitorSourceModeSet,
-                                                                                                         pMonitorSourceMode);
-        UNREFERENCED_PARAMETER(TempStatus);
-        NT_ASSERT(NT_SUCCESS(TempStatus));
-        return Status;
-    }
-
-    for (UINT Idx = 0; Idx < GetModeCount(); ++Idx)
-    {
-        // The preferred mode was added above.  Adding it a second time is not
-        // useful and older VidPn managers are particularly strict about mode
-        // set ownership during this callback.
-        if ((Idx == m_CurrentModeIndex) || IsDuplicateModeSize(Idx) ||
-            ((m_ModeInfo[Idx].VisScreenWidth == m_ModeInfo[m_CurrentModeIndex].VisScreenWidth) &&
-             (m_ModeInfo[Idx].VisScreenHeight == m_ModeInfo[m_CurrentModeIndex].VisScreenHeight)))
-        {
+        const UINT index = ordinal ? ordinal - 1 : m_CurrentModeIndex;
+        if (ordinal && (IsDuplicateModeSize(index) ||
+            (m_ModeInfo[index].VisScreenWidth == m_ModeInfo[m_CurrentModeIndex].VisScreenWidth &&
+             m_ModeInfo[index].VisScreenHeight == m_ModeInfo[m_CurrentModeIndex].VisScreenHeight)))
             continue;
-        }
-
-        pVbeModeInfo = &m_ModeInfo[Idx];
-
-        Status = pRecommendMonitorModes->pMonitorSourceModeSetInterface->pfnCreateNewModeInfo(pRecommendMonitorModes->hMonitorSourceModeSet,
-                                                                                              &pMonitorSourceMode);
-        if (!NT_SUCCESS(Status))
+        for (UINT r = 0; r < (m_RefreshRate == 60 ? 1u : 2u); ++r)
         {
-            DbgPrint(TRACE_LEVEL_ERROR,
-                     ("pfnCreateNewModeInfo failed with Status = 0x%X, hMonitorSourceModeSet = 0x%llu\n",
-                      Status,
-                      LONG_PTR(pRecommendMonitorModes->hMonitorSourceModeSet)));
-            return Status;
-        }
-
-        DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("%s: add pref mode, dimensions %ux%u, taken from DxgkCbAcquirePostDisplayOwnership at StartDevice\n",
-                  __FUNCTION__,
-                  pVbeModeInfo->VisScreenWidth,
-                  pVbeModeInfo->VisScreenHeight));
-
-        BuildVideoSignalInfo(&pMonitorSourceMode->VideoSignalInfo, pVbeModeInfo);
-
-        pMonitorSourceMode->Origin = D3DKMDT_MCO_DRIVER;
-        pMonitorSourceMode->Preference = D3DKMDT_MP_NOTPREFERRED;
-        pMonitorSourceMode->ColorBasis = D3DKMDT_CB_SRGB;
-        pMonitorSourceMode->ColorCoeffDynamicRanges.FirstChannel = 8;
-        pMonitorSourceMode->ColorCoeffDynamicRanges.SecondChannel = 8;
-        pMonitorSourceMode->ColorCoeffDynamicRanges.ThirdChannel = 8;
-        pMonitorSourceMode->ColorCoeffDynamicRanges.FourthChannel = 0;
-
-        Status = pRecommendMonitorModes->pMonitorSourceModeSetInterface->pfnAddMode(pRecommendMonitorModes->hMonitorSourceModeSet,
-                                                                                    pMonitorSourceMode);
-        if (!NT_SUCCESS(Status))
-        {
-            const NTSTATUS AddStatus = Status;
-            if (Status != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
+            D3DKMDT_MONITOR_SOURCE_MODE *mode = NULL;
+            NTSTATUS status = args->pMonitorSourceModeSetInterface->pfnCreateNewModeInfo(
+                args->hMonitorSourceModeSet, &mode);
+            if (!NT_SUCCESS(status)) return status;
+            BuildVideoSignalInfo(&mode->VideoSignalInfo, &m_ModeInfo[index], rates[r]);
+            mode->Origin = D3DKMDT_MCO_DRIVER;
+            mode->Preference = !ordinal && !r ? D3DKMDT_MP_PREFERRED : D3DKMDT_MP_NOTPREFERRED;
+            mode->ColorBasis = D3DKMDT_CB_SRGB;
+            mode->ColorCoeffDynamicRanges.FirstChannel = 8;
+            mode->ColorCoeffDynamicRanges.SecondChannel = 8;
+            mode->ColorCoeffDynamicRanges.ThirdChannel = 8;
+            mode->ColorCoeffDynamicRanges.FourthChannel = 0;
+            status = args->pMonitorSourceModeSetInterface->pfnAddMode(args->hMonitorSourceModeSet, mode);
+            if (!NT_SUCCESS(status))
             {
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("pfnAddMode failed with Status = 0x%X, hMonitorSourceModeSet = 0x%llu, pMonitorSourceMode = "
-                          "0x%p\n",
-                          Status,
-                          LONG_PTR(pRecommendMonitorModes->hMonitorSourceModeSet),
-                          pMonitorSourceMode));
+                const NTSTATUS release = args->pMonitorSourceModeSetInterface->pfnReleaseModeInfo(
+                    args->hMonitorSourceModeSet, mode);
+                NT_ASSERT(NT_SUCCESS(release));
+                if (status != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET) return status;
             }
-
-            const NTSTATUS ReleaseStatus =
-                pRecommendMonitorModes->pMonitorSourceModeSetInterface->pfnReleaseModeInfo(
-                    pRecommendMonitorModes->hMonitorSourceModeSet,
-                    pMonitorSourceMode);
-            NT_ASSERT(NT_SUCCESS(ReleaseStatus));
-            if (AddStatus != STATUS_GRAPHICS_MODE_ALREADY_IN_MODESET)
-            {
-                return AddStatus;
-            }
-            Status = STATUS_SUCCESS;
         }
     }
-
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
-    return Status;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS VioGpuVidPN::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *CONST pEnumCofuncModality)
@@ -2405,6 +2363,9 @@ int VioGpuVidPN::ProcessEdid(void)
     {
         FixEdid();
     }
+    m_RefreshRate = m_bEDID ? VioGpuPreferredRefreshRate(GetEdidData(0), sizeof(m_EDIDs[0])) : 60;
+    InterlockedExchange(&m_ActiveRefreshRate, (LONG)m_RefreshRate);
+    DbgPrint(TRACE_LEVEL_ERROR, ("Triton display refresh=%lu Hz\n", m_RefreshRate));
     return AddEdidModes();
 }
 
@@ -2736,8 +2697,8 @@ NTSTATUS VioGpuVidPN::CompletePendingFlip()
 
 BOOLEAN VioGpuVidPN::TryPromoteFlipLocked()
 {
-    // Entered only from the flip thread at PASSIVE_LEVEL: the scanout emitted
-    // below (FlushToScreen) is PAGE code.
+    // Entered by the flip or command worker with a fast mutex (APC_LEVEL).
+    // The scanout is pageable and may wait; it must never run on the clock.
     VIOGPU_ASSERT_CHK(KeGetCurrentIrql() < DISPATCH_LEVEL);
 
     // Consume the arm first. A concurrent producer sets it again after it
@@ -2749,9 +2710,11 @@ BOOLEAN VioGpuVidPN::TryPromoteFlipLocked()
 
     VioGpuAllocation *res = NULL;
     PHYSICAL_ADDRESS address = {};
+    VioGpuTraceTag traceTag = {};
 
     KIRQL oldIrql = AcquireSourceLock();
     address = m_sourceAddress;
+    traceTag = m_sourceTraceTag;
     res = m_sourceRes;
     if (res)
     {
@@ -2778,6 +2741,7 @@ BOOLEAN VioGpuVidPN::TryPromoteFlipLocked()
 #endif
         );
     NTSTATUS status;
+    VioGpuTraceScope traceScope(traceTag);
     if (canScanout)
     {
         status = res->FlushToScreen(0);
@@ -2810,6 +2774,7 @@ BOOLEAN VioGpuVidPN::TryPromoteFlipLocked()
     // tell dxgkrnl this flip retired.
     oldIrql = AcquireSourceLock();
     m_displayedAddress = address;
+    m_displayedTraceTag = traceTag;
     m_displayedAddressValid = canScanout;
     ReleaseSourceLock(oldIrql);
 
@@ -2820,14 +2785,13 @@ BOOLEAN VioGpuVidPN::TryPromoteFlipLocked()
 
 void VioGpuVidPN::Flip()
 {
-    TryPromoteFlip();
-
     if (InterlockedCompareExchange(&m_vsyncEnabled, FALSE, FALSE) == FALSE)
     {
         return;
     }
 
     DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt = {};
+    VioGpuTraceTag traceTag = {};
     interrupt.InterruptType = DXGK_INTERRUPT_CRTC_VSYNC;
 
     interrupt.CrtcVsync.VidPnTargetId = 0;
@@ -2855,22 +2819,26 @@ void VioGpuVidPN::Flip()
         interrupt.CrtcVsync.PhysicalAddress = m_displayedAddressValid
                                                   ? m_displayedAddress
                                                   : noAddress;
+        traceTag = m_displayedTraceTag;
         ReleaseSourceLock(vsyncIrql);
     }
 
-    m_pAdapter->NotifyInterrupt(&interrupt, true);
+    NTSTATUS status = m_pAdapter->NotifyInterrupt(&interrupt, true);
+    if (traceTag.run != VioGpuTraceRun()) {
+        traceTag = VioGpuTraceTag{};
+        traceTag.run = VioGpuTraceRun();
+    }
+    VioGpuTraceRecord(TT_VBLANK, traceTag, interrupt.CrtcVsync.PhysicalAddress.QuadPart, (ULONG)status);
 }
 
 D3DDDI_RATIONAL VioGpuVidPN::GetActiveRefreshRate() const
 {
     D3DDDI_RATIONAL rate = {0, 0};
-    // m_ModeInfo/m_CurrentModeIndex point at the active mode. Our
-    // builds emit a fixed 60 Hz signal (see BuildVideoSignalInfo);
-    // surface that to UMD when a source is pinned, otherwise leave
-    // the rate unset so the caller picks a default.
+    // Match the cadence advertised in every virtual mode signal tuple.
     if (m_ModeInfo && m_CurrentModeIndex < m_ModeCount)
     {
-        rate.Numerator = 60;
+        rate.Numerator = (ULONG)InterlockedCompareExchange(
+            const_cast<volatile LONG *>(&m_ActiveRefreshRate), 0, 0);
         rate.Denominator = 1;
     }
     return rate;
@@ -2878,60 +2846,140 @@ D3DDDI_RATIONAL VioGpuVidPN::GetActiveRefreshRate() const
 
 void VioGpuVidPN::FlipThread(void *ctx)
 {
+    VioGpuVidPN *vidpn = reinterpret_cast<VioGpuVidPN *>(ctx);
+    for (;;)
+    {
+        KeWaitForSingleObject(&vidpn->m_flipReadyEvent, Executive, KernelMode,
+                              FALSE, NULL);
+        if (InterlockedCompareExchange(&vidpn->m_shouldFlipStop, FALSE, FALSE))
+            break;
+        vidpn->TryPromoteFlip();
+    }
+    KeSetEvent(&vidpn->m_flipExitEvent, IO_NO_INCREMENT, FALSE);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
+// QPC measures the actual interval on Vista; interrupt time is only updated
+// on clock ticks. Split the conversion so uptime cannot overflow the product.
+static ULONGLONG VioGpuVsyncNow(ULONGLONG frequency)
+{
+    ULONGLONG counter = KeQueryPerformanceCounter(NULL).QuadPart;
+    return (counter / frequency) * 10000000ULL +
+           ((counter % frequency) * 10000000ULL) / frequency;
+}
+
+void VioGpuVidPN::PublishRasterTiming(ULONGLONG epoch, ULONGLONG period)
+{
+    KIRQL irql = AcquireSourceLock();
+    m_rasterEpoch100ns = epoch;
+    m_rasterPeriod100ns = period;
+    ReleaseSourceLock(irql);
+}
+
+NTSTATUS VioGpuVidPN::GetScanLine(DXGKARG_GETSCANLINE *args)
+{
+    if (!args || args->VidPnTargetId != 0)
+        return STATUS_INVALID_PARAMETER;
+    ULONG height = (ULONG)InterlockedCompareExchange(&m_rasterHeight, 0, 0);
+    if (!height) return STATUS_INVALID_DEVICE_STATE;
+    LARGE_INTEGER frequency;
+    KeQueryPerformanceCounter(&frequency);
+    ULONGLONG now = VioGpuVsyncNow(frequency.QuadPart);
+    KIRQL irql = AcquireSourceLock();
+    ULONGLONG epoch = m_rasterEpoch100ns;
+    ULONGLONG period = m_rasterPeriod100ns;
+    ReleaseSourceLock(irql);
+    bool blank;
+    args->ScanLine = VioGpuRasterLine(now, epoch, period, height, &blank);
+    args->InVerticalBlank = blank ? TRUE : FALSE;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS VioGpuVidPN::BeginSynchronizedFlip(UINT interval)
+{
+    if (interval == 0 || interval > 4)
+        return STATUS_INVALID_PARAMETER;
+    if (InterlockedCompareExchange(&m_synchronizedFlip, TRUE, FALSE) != FALSE)
+        return STATUS_DEVICE_BUSY;
+    ULONG first = (ULONG)InterlockedCompareExchange(&m_vblankSequence, 0, 0);
+    LARGE_INTEGER frequency;
+    KeQueryPerformanceCounter(&frequency);
+    ULONGLONG deadline = VioGpuVsyncNow(frequency.QuadPart) + 20000000ULL;
+    PVOID events[2] = {&m_vblankEvent, &m_vsyncStopEvent};
+    for (;;)
+    {
+        KeClearEvent(&m_vblankEvent);
+        if (InterlockedCompareExchange(&m_shouldFlipStop, 0, 0))
+        {
+            InterlockedExchange(&m_synchronizedFlip, FALSE);
+            return STATUS_CANCELLED;
+        }
+        ULONG current = (ULONG)InterlockedCompareExchange(&m_vblankSequence, 0, 0);
+        if ((ULONG)(current - first) >= interval)
+            return STATUS_SUCCESS;
+        ULONGLONG now = VioGpuVsyncNow(frequency.QuadPart);
+        if (now >= deadline)
+        {
+            InterlockedExchange(&m_synchronizedFlip, FALSE);
+            return STATUS_IO_TIMEOUT;
+        }
+        LARGE_INTEGER timeout;
+        timeout.QuadPart = -(LONGLONG)(deadline - now);
+        NTSTATUS status = KeWaitForMultipleObjects(2, events, WaitAny,
+            Executive, KernelMode, FALSE, &timeout, NULL);
+        if (status != STATUS_WAIT_0)
+        {
+            InterlockedExchange(&m_synchronizedFlip, FALSE);
+            return status == STATUS_TIMEOUT ? STATUS_IO_TIMEOUT : STATUS_CANCELLED;
+        }
+    }
+}
+
+void VioGpuVidPN::EndSynchronizedFlip()
+{
+    // Called by the single command worker after publishing DMA completion.
+    // Emit the deferred vblank before allowing the timer to report another.
+    Flip();
+    InterlockedExchange(&m_synchronizedFlip, FALSE);
+}
+
+void VioGpuVidPN::VsyncThread(void *ctx)
+{
     VIOGPU_ASSERT_CHK(KeGetCurrentIrql() < DISPATCH_LEVEL);
 
     VioGpuVidPN *vidpn = reinterpret_cast<VioGpuVidPN *>(ctx);
-    PVOID waitObjects[2] = {&vidpn->m_vsyncTimer, &vidpn->m_flipReadyEvent};
+    PVOID waitObjects[2] = {&vidpn->m_vsyncTimer, &vidpn->m_vsyncStopEvent};
+    LARGE_INTEGER frequency;
+    KeQueryPerformanceCounter(&frequency);
 
-    // This thread IS the display: it emits every scanout and reports every
-    // vsync.  At default priority it starves whenever a benchmark saturates
-    // the vCPUs.  Real display drivers run this work at DIRQL/DPC; the
-    // closest a system thread gets is the realtime band, where it preempts
-    // any time-sharing workload thread but still yields to DPCs and other
-    // realtime work.
+    // Only bounded clock/interrupt work runs here. Copies and host waits run
+    // on the separate flip worker, keeping the cadence independent of them.
     KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
 
     // Force the first loop iteration to program the timer (the thread can be
     // restarted after ReleasePostDisplayOwnership, and the previous run
     // cancelled it on exit).
     vidpn->m_vsyncTimerPeriod100ns = 0;
+    ULONGLONG nextVsync = 0;
 
     for (;;)
     {
-        // The vsync tick comes from a PERIODIC timer, not from a wait
-        // timeout.  A relative timeout restarts the full period on every
-        // wake, and m_flipReadyEvent can fire for every source latch. Under
-        // load their inter-arrival can stay below the
-        // refresh period, a timeout-based tick then never fires, and per the
-        // MMIO-flip contract (DxgkDdiSetVidPnSourceAddress: completion is
-        // reported only by the CRTC_VSYNC interrupt's effective scan
-        // address) every queued flip stops completing: the screen freezes on
-        // one frame while rendering continues.  The periodic timer keeps
-        // ticking no matter how often the event fires.
-        //
-        // Re-program only when a mode change alters the refresh rate.  The
-        // ms rounding of KeSetTimerEx's Period is fine: this is a synthetic
-        // cadence for dxgkrnl, not a hardware vblank.
+        // Arm against a retained deadline, not a rounded periodic ms value.
+        // A 17 ms periodic timer drifts and can run at ~32 Hz on Vista's
+        // coarse clock. Source-ready wakes must not reset this deadline.
         LONGLONG period100ns = VsyncPeriodFromRefresh(vidpn->GetActiveRefreshRate());
         if (period100ns != vidpn->m_vsyncTimerPeriod100ns)
         {
             vidpn->m_vsyncTimerPeriod100ns = period100ns;
+            nextVsync = VioGpuVsyncNow(frequency.QuadPart) + period100ns;
+            vidpn->PublishRasterTiming(nextVsync - period100ns, period100ns);
             LARGE_INTEGER due;
             due.QuadPart = -period100ns;
-            LONG periodMs = (LONG)((period100ns + 5000) / 10000);
-            if (periodMs < 1)
-            {
-                periodMs = 1;
-            }
-            KeSetTimerEx(&vidpn->m_vsyncTimer, due, periodMs, NULL);
+            KeSetTimer(&vidpn->m_vsyncTimer, due, NULL);
         }
 
-        // Timer tick -> Flip() (vsync interrupt + promote). Source-ready
-        // wake -> TryPromoteFlip() only, so a new source scans out without
-        // sitting out the rest of the
-        // period, but no extra vsync is reported. Dxgkrnl needs a steady
-        // refresh cadence. Extra source-ready vsyncs would corrupt its flip
-        // accounting.
+        // Source-ready events belong to the copy worker. They cannot reset
+        // this deadline or manufacture additional vblank interrupts.
         NTSTATUS wait = KeWaitForMultipleObjects(2,
                                                  waitObjects,
                                                  WaitAny,
@@ -2946,16 +2994,37 @@ void VioGpuVidPN::FlipThread(void *ctx)
         }
         if (wait == STATUS_WAIT_0)
         {
-            vidpn->Flip();
-        }
-        else
-        {
-            vidpn->TryPromoteFlip();
+            ULONGLONG now = VioGpuVsyncNow(frequency.QuadPart);
+            // Vista relative timers can wake before their requested interval.
+            // Re-arm the remaining interval without reporting an early tick.
+            if (now >= nextVsync)
+            {
+                vidpn->PublishRasterTiming(nextVsync +
+                    ((now - nextVsync) / period100ns) * period100ns, period100ns);
+                InterlockedIncrement(&vidpn->m_vblankSequence);
+                VioGpuTraceTag tickTag = {};
+                tickTag.run = VioGpuTraceRun();
+                VioGpuTraceRecord(TT_VSYNC_TICK, tickTag,
+                    (ULONG)vidpn->m_vblankSequence, (ULONG)vidpn->m_vsyncEnabled,
+                    (ULONG)vidpn->m_synchronizedFlip);
+                if (!InterlockedCompareExchange(&vidpn->m_synchronizedFlip, 0, 0))
+                    vidpn->Flip();
+                KeSetEvent(&vidpn->m_vblankEvent, IO_NO_INCREMENT, FALSE);
+                // DIRQL MMIO flips cannot set a dispatcher event. Pick up
+                // their arm here, and retry failed copies on subsequent ticks.
+                if (InterlockedCompareExchange(&vidpn->m_shouldFlip, 0, 0))
+                    KeSetEvent(&vidpn->m_flipReadyEvent, IO_NO_INCREMENT, FALSE);
+                now = VioGpuVsyncNow(frequency.QuadPart);
+            }
+            nextVsync = VioGpuNextVsyncDeadline(nextVsync, now, period100ns);
+            LARGE_INTEGER due;
+            due.QuadPart = -(LONGLONG)(nextVsync - now);
+            KeSetTimer(&vidpn->m_vsyncTimer, due, NULL);
         }
     }
 
     KeCancelTimer(&vidpn->m_vsyncTimer);
-    KeSetEvent(&vidpn->m_flipExitEvent, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(&vidpn->m_vsyncExitEvent, IO_NO_INCREMENT, FALSE);
     PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
@@ -2973,6 +3042,7 @@ NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS 
     KIRQL oldIrql = AcquireSourceLock();
     VioGpuAllocation *oldRes = m_sourceRes;
     m_sourceAddress = pSetVidPnSourceAddress->PrimaryAddress;
+    m_sourceTraceTag = VioGpuTraceTag{};
     m_sourceRes = newRes;
     ReleaseSourceLock(oldIrql);
 
@@ -3014,8 +3084,10 @@ void VioGpuVidPN::RearmFlipIfScanout(VioGpuAllocation *res)
     // are never re-flushed -- the display freezes on the modeset frame.
     // Re-arm the vsync flip when a blt destination IS the current scanout
     // source so FlushToScreen re-emits SET_SCANOUT + RESOURCE_FLUSH.
+    VioGpuTraceTag traceTag = VioGpuTraceThreadTag();
     KIRQL oldIrql = AcquireSourceLock();
     BOOLEAN isScanout = (m_sourceRes == res);
+    if (isScanout) m_sourceTraceTag = traceTag;
     ReleaseSourceLock(oldIrql);
 
     if (isScanout)
@@ -3024,7 +3096,7 @@ void VioGpuVidPN::RearmFlipIfScanout(VioGpuAllocation *res)
         KeSetEvent(&m_flipReadyEvent, IO_NO_INCREMENT, FALSE);
     }
 }
-void VioGpuVidPN::SetScanoutSource(VioGpuAllocation *res, PHYSICAL_ADDRESS addr)
+void VioGpuVidPN::SetScanoutSource(VioGpuAllocation *res)
 {
     // Only the full-screen desktop primary may become the scanout source.
     // DWM can present its cursor (e.g. 32x32) and individual windows
@@ -3040,7 +3112,8 @@ void VioGpuVidPN::SetScanoutSource(VioGpuAllocation *res, PHYSICAL_ADDRESS addr)
     }
 
     LONG sourceGeneration = InterlockedIncrement(&m_sourceGeneration);
-    SetScanoutSourceIfGeneration(res, addr, sourceGeneration);
+    PHYSICAL_ADDRESS unused = {};
+    SetScanoutSourceIfGeneration(res, unused, sourceGeneration, FALSE);
 }
 
 BOOLEAN VioGpuVidPN::IsScanoutSourceCompatible(VioGpuAllocation *res) const
@@ -3064,26 +3137,27 @@ BOOLEAN VioGpuVidPN::SetScanoutSourceIfGeneration(
     PHYSICAL_ADDRESS address = {};
     if (dmaFlip && res)
         address = res->m_SegmentAddress;
-    return SetScanoutSourceIfGeneration(res, address, sourceGeneration);
+    static LONG addressTraceBudget = 32;
+    if (dmaFlip && InterlockedDecrement(&addressTraceBudget) >= 0)
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("TRITON-FLIP-ADDRESS src=%u addr=%I64x vsync=%u\n",
+                  res ? res->GetId() : 0, address.QuadPart,
+                  (UINT)InterlockedCompareExchange(&m_vsyncEnabled, 0, 0)));
+    return SetScanoutSourceIfGeneration(res, address, sourceGeneration, dmaFlip);
 }
 
 BOOLEAN VioGpuVidPN::SetScanoutSourceIfGeneration(
-    VioGpuAllocation *res, PHYSICAL_ADDRESS addr, LONG sourceGeneration)
+    VioGpuAllocation *res, PHYSICAL_ADDRESS addr, LONG sourceGeneration, BOOLEAN addressValid)
 {
+    VioGpuTraceTag traceTag = VioGpuTraceThreadTag();
     if (!IsScanoutSourceCompatible(res))
     {
         return FALSE;
     }
 
-    // Mirror SetVidPnSourceAddress's refcount/swap discipline.  Blob
-    // scanout is keyed by res_id, so the flip latch does not need a
-    // PrimaryAddress -- but m_sourceAddress must be left ALONE: it is
-    // what the vsync interrupt reports back to dxgkrnl, and dxgkrnl
-    // completes a queued SetVidPnSourceAddress flip only when a vsync
-    // reports that flip's address.  Zeroing it here let a blob latch
-    // race a concurrent MMIO flip (e.g. dxgkrnl reverting to the
-    // standard shared primary when a device died) and park it forever:
-    // display-path TDR with an idle engine (submitted==completed).
+    // A DMA flip supplies a segment address, including the valid offset zero.
+    // Blt/creation promotion supplies no address and must preserve the last
+    // scheduler address. Vsync echoes it to retire the corresponding flip.
     if (res)
     {
         res->AddRef();
@@ -3101,7 +3175,8 @@ BOOLEAN VioGpuVidPN::SetScanoutSourceIfGeneration(
     }
     VioGpuAllocation *oldRes = m_sourceRes;
     m_sourceRes = res;
-    if (addr.QuadPart != 0)
+    m_sourceTraceTag = traceTag;
+    if (addressValid)
     {
         m_sourceAddress = addr;
     }

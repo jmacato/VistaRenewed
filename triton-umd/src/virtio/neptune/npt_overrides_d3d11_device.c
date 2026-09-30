@@ -19,6 +19,10 @@
 #include "npt_object.h"
 #include "npt_overrides.h"
 #include "npt_resource.h"
+#include "npt_ring.h"
+
+#include <stdlib.h>
+#include <string.h>
 
 /* Per-device storage: caches the immediate-context wrapper so repeat
  * GetImmediateContextN calls don't burn an async create + COM_RELEASE.
@@ -41,6 +45,120 @@ static void npt_d3d11_device_aux_init(struct npt_com_base *com,
 
 /* Sentinel cookie matching the host library's stub. */
 #define NPT_DEVICE_REMOVED_COOKIE 0xdeadbeef
+#define NPT_INITIAL_UPDATE_CHUNK_BYTES (4u << 20)
+
+/* Initial data is submitted after the create command because the wire
+ * protocol cannot marshal an unsized pSysMem pointer.  A failed upload must
+ * poison both rings so a deferred Create cannot be observed as a successful
+ * resource with undefined contents. */
+static void
+npt_initial_upload_failed(struct npt_device *dev, struct npt_ring *ring)
+{
+   if (!dev)
+      return;
+   if (ring)
+      atomic_store_explicit(&ring->failed, true, memory_order_release);
+   if (dev->ring)
+      atomic_store_explicit(&dev->ring->failed, true, memory_order_release);
+}
+
+static uint32_t
+npt_full_mip_levels(uint32_t width, uint32_t height, uint32_t depth)
+{
+   uint32_t largest = width;
+   if (height > largest) largest = height;
+   if (depth > largest) largest = depth;
+   uint32_t levels = 1;
+   while (largest > 1u) {
+      largest >>= 1;
+      ++levels;
+   }
+   return levels;
+}
+
+/* RESOURCE_UPDATE is capped at 64 MiB by the host.  Large initial texture
+ * payloads are therefore packed into row-aligned boxes.  This is deliberately
+ * separate from the ordinary small upload path: it never exposes application
+ * padding to the host, and each command stays below the wire cap. */
+static bool
+npt_upload_texture_initial_split(struct npt_device *dev, uint64_t tex_id,
+                                 uint32_t subresource,
+                                 const D3D11_SUBRESOURCE_DATA *d,
+                                 uint32_t width, uint32_t height,
+                                 uint32_t depth, uint32_t rows,
+                                 uint32_t row_bytes, uint32_t block_height)
+{
+   if (!d || !d->pSysMem || !rows || !row_bytes ||
+       row_bytes > NPT_INITIAL_UPDATE_CHUNK_BYTES || !d->SysMemPitch ||
+       d->SysMemPitch < row_bytes ||
+       (depth > 1u && (!d->SysMemSlicePitch ||
+                       d->SysMemSlicePitch <
+                          (uint64_t)d->SysMemPitch * (rows - 1u) + row_bytes)))
+      return false;
+
+   const uint64_t slice_extent =
+      (uint64_t)(rows - 1u) * d->SysMemPitch + row_bytes;
+   if (!depth || (uint64_t)(depth - 1u) >
+          (UINT64_MAX - slice_extent) / (depth > 1u ? d->SysMemSlicePitch : 1u))
+      return false;
+   const uint64_t extent =
+      (uint64_t)(depth - 1u) * d->SysMemSlicePitch + slice_extent;
+   if (extent > SIZE_MAX || extent - 1u > UINTPTR_MAX - (uintptr_t)d->pSysMem)
+      return false;
+
+   const uint32_t max_rows = NPT_INITIAL_UPDATE_CHUNK_BYTES / row_bytes;
+   if (!max_rows)
+      return false;
+   const size_t packed_bytes = (size_t)max_rows * row_bytes;
+   uint8_t *packed = malloc(packed_bytes);
+   if (!packed)
+      return false;
+
+   bool ok = true;
+   const uint64_t slice_pitch = depth > 1u
+      ? d->SysMemSlicePitch : (uint64_t)d->SysMemPitch * rows;
+   for (uint32_t z = 0; ok && z < depth; ++z) {
+      const uint64_t slice_offset = (uint64_t)z * slice_pitch;
+      if (slice_offset > UINTPTR_MAX - (uintptr_t)d->pSysMem) {
+         ok = false;
+         break;
+      }
+      const uint8_t *slice = (const uint8_t *)d->pSysMem + slice_offset;
+      for (uint32_t y = 0; ok && y < rows;) {
+         const uint32_t count =
+            (rows - y < max_rows) ? rows - y : max_rows;
+         const uint64_t source_offset = (uint64_t)y * d->SysMemPitch;
+         if (source_offset > UINTPTR_MAX - (uintptr_t)slice) {
+            ok = false;
+            break;
+         }
+         const uint8_t *source = slice + source_offset;
+         for (uint32_t row = 0; row < count; ++row)
+            memcpy(packed + (size_t)row * row_bytes,
+                   source + (size_t)row * d->SysMemPitch, row_bytes);
+
+         const uint64_t top64 = (uint64_t)y * block_height;
+         const uint64_t bottom64 =
+            (uint64_t)((y + count < rows) ? y + count : rows) * block_height;
+         if (top64 >= height || bottom64 <= top64 ||
+             bottom64 > UINT32_MAX)
+            ok = false;
+         else {
+            const D3D11_BOX box = {
+               0, (uint32_t)top64, z, width,
+               (uint32_t)(bottom64 > height ? height : bottom64), z + 1u
+            };
+            const uint32_t bytes = count * row_bytes;
+            ok = npt_dispatch_resource_update(
+               npt_device_method_ring(dev), tex_id, subresource,
+               row_bytes, bytes, &box, packed, bytes, bytes);
+         }
+         y += count;
+      }
+   }
+   free(packed);
+   return ok;
+}
 
 #define NPT_REGISTER_OVERRIDE_D3D11_DEVICE5(m, f) \
    NPT_REGISTER_OVERRIDE(id3d11device5, m, f)
@@ -98,14 +216,34 @@ dev_CreateBuffer_override(void *self,
    if (NPT_SUCCEEDED(hr) && raw && pInitialData && pInitialData->pSysMem &&
        pDesc && pDesc->ByteWidth > 0) {
       /* MSDN: SysMemPitch / SysMemSlicePitch ignored for buffers. */
-      npt_dispatch_resource_update(npt_device_method_ring(dev),
-                                   (uint64_t)(uintptr_t)raw,
-                                   /*subresource=*/0,
-                                   /*row_pitch=*/0,
-                                   /*depth_pitch=*/0,
-                                   /*box=*/NULL,
-                                   pInitialData->pSysMem,
-                                   pDesc->ByteWidth, pDesc->ByteWidth);
+      struct npt_ring *ring = npt_device_method_ring(dev);
+      bool uploaded = true;
+      const uint32_t bytes = pDesc->ByteWidth;
+      if (pDesc->BindFlags & D3D11_BIND_CONSTANT_BUFFER &&
+          bytes > (64u << 20)) {
+         uploaded = false;
+      } else if (bytes <= (64u << 20)) {
+         uploaded = npt_dispatch_resource_update(ring, (uint64_t)(uintptr_t)raw,
+                                                  /*subresource=*/0,
+                                                  /*row_pitch=*/0,
+                                                  /*depth_pitch=*/0,
+                                                  /*box=*/NULL,
+                                                  pInitialData->pSysMem,
+                                                  bytes, bytes);
+      } else {
+         for (uint32_t offset = 0; uploaded && offset < bytes;) {
+            const uint32_t count =
+               (bytes - offset < NPT_INITIAL_UPDATE_CHUNK_BYTES)
+               ? bytes - offset : NPT_INITIAL_UPDATE_CHUNK_BYTES;
+            const D3D11_BOX box = { offset, 0, 0, offset + count, 1, 1 };
+            uploaded = npt_dispatch_resource_update(
+               ring, (uint64_t)(uintptr_t)raw, 0, 0, 0, &box,
+               (const uint8_t *)pInitialData->pSysMem + offset, count, count);
+            offset += count;
+         }
+      }
+      if (!uploaded)
+         npt_initial_upload_failed(dev, ring);
    }
 
    if (NPT_SUCCEEDED(hr) && raw) {
@@ -113,8 +251,10 @@ dev_CreateBuffer_override(void *self,
          npt_com_get_or_wrap_or_release(dev, &NPT_IID_ID3D11Buffer,
                                         (uint64_t)(uintptr_t)raw,
                                         (struct npt_com_base *)self);
-      if (b && pDesc)
+      if (b && pDesc) {
          npt_d3d11_buffer_set_byte_width(b, pDesc->ByteWidth);
+         npt_d3d11_buffer_set_bind_flags(b, pDesc->BindFlags);
+      }
       if (ppBuffer) {
          *ppBuffer = (ID3D11Buffer *)b;
       } else if (b) {
@@ -141,7 +281,7 @@ dev_CreateBuffer_override(void *self,
  * app's pitches already account for the format, so no block-size
  * scaling of the pitch is needed -- only the row count, since one row
  * of memory covers four texel rows under block compression. */
-static void
+static bool
 npt_upload_texture_initial_data(struct npt_device *dev,
                                 uint64_t tex_id,
                                 const D3D11_SUBRESOURCE_DATA *init,
@@ -150,11 +290,14 @@ npt_upload_texture_initial_data(struct npt_device *dev,
                                 uint32_t mip_levels, DXGI_FORMAT format)
 {
    if (!init || !num_subresources)
-      return;
+      return true;
+   if (!mip_levels || mip_levels > 32u || !width || !height || !depth)
+      return false;
+   bool ok = true;
    for (uint32_t sub = 0; sub < num_subresources; sub++) {
       const D3D11_SUBRESOURCE_DATA *d = &init[sub];
       if (!d->pSysMem)
-         continue;
+         return false;
       const uint32_t mip = sub % mip_levels;
       const uint32_t mw = width  > (1u << mip) ? (width  >> mip) : 1u;
       const uint32_t mh = height > (1u << mip) ? (height >> mip) : 1u;
@@ -163,39 +306,48 @@ npt_upload_texture_initial_data(struct npt_device *dev,
       const uint32_t last_row = npt_dxgi_format_row_bytes(format, mw);
       const bool tight = last_row &&
          rows == npt_dxgi_format_block_rows(format, mh);
-      uint64_t full = 0, copy = 0;
-      if (depth > 1u) {
-         if (!d->SysMemSlicePitch)
-            continue;
-         const uint64_t strides =
-            (uint64_t)d->SysMemSlicePitch * (md - 1u);
-         const uint64_t slice = (uint64_t)d->SysMemPitch * rows;
-         full = strides + (slice ? slice : d->SysMemSlicePitch);
-         copy = tight && d->SysMemPitch
-            ? strides + (uint64_t)d->SysMemPitch * (rows - 1u) + last_row
-            : full;
-      } else if (height > 1u) {
-         if (!d->SysMemPitch)
-            continue;
-         full = (uint64_t)d->SysMemPitch * rows;
-         copy = tight
-            ? (uint64_t)d->SysMemPitch * (rows - 1u) + last_row
-            : full;
-      } else {
-         /* A single row: neither pitch carries information D3D
-          * promises. */
-         full = copy = last_row;
-      }
-      if (copy > full)
-         copy = full;
-      if (full == 0 || copy == 0 || full > (uint64_t)(64u << 20))
+      /* Strides describe this mip, not its base-level dimensions. A
+       * one-row mip and a one-slice mip need no following stride. */
+      const uint32_t row_pitch = rows > 1u ? d->SysMemPitch : last_row;
+      if (!rows || !row_pitch || row_pitch < last_row)
+         return false;
+      const uint64_t slice = (uint64_t)row_pitch * rows;
+      const uint64_t slice_copy = tight
+         ? (uint64_t)row_pitch * (rows - 1u) + last_row : slice;
+      const uint64_t strides = md > 1u
+         ? (uint64_t)d->SysMemSlicePitch * (md - 1u) : 0;
+      if ((md > 1u && d->SysMemSlicePitch < slice_copy) ||
+          strides > UINT64_MAX - slice)
+         return false;
+      const uint64_t full = strides + slice;
+      const uint64_t copy = strides + slice_copy;
+      if (!copy || copy > SIZE_MAX ||
+          copy - 1u > UINTPTR_MAX - (uintptr_t)d->pSysMem)
+         return false;
+      if (full > (uint64_t)(64u << 20)) {
+         /* A plane is a single modern resource layout; its chroma plane
+          * cannot be addressed by a D3D11_BOX row split.  D3D9/10 do not
+          * expose these formats, so keep the modern bounded path explicit. */
+         const bool planar =
+            npt_dxgi_format_subresource_rows(format, mh) !=
+            npt_dxgi_format_block_rows(format, mh);
+         D3D11_SUBRESOURCE_DATA normalized = *d;
+         normalized.SysMemPitch = row_pitch;
+         if (planar || !npt_upload_texture_initial_split(
+               dev, tex_id, sub, &normalized, mw, mh, md, rows, last_row,
+               npt_dxgi_format_block_height(format))) {
+            ok = false;
+         }
          continue;
-      npt_dispatch_resource_update(npt_device_method_ring(dev), tex_id, sub,
-                                   d->SysMemPitch, d->SysMemSlicePitch,
-                                   /*box=*/NULL,
-                                   d->pSysMem, (uint32_t)full,
-                                   (uint32_t)copy);
+      }
+      if (!npt_dispatch_resource_update(npt_device_method_ring(dev), tex_id, sub,
+                                        row_pitch, md > 1u ? d->SysMemSlicePitch : 0,
+                                        /*box=*/NULL,
+                                        d->pSysMem, (uint32_t)full,
+                                        (uint32_t)copy))
+         ok = false;
    }
+   return ok;
 }
 
 /* Shared post-Create for CreateTexture{1,2,3}D{,1}; only the desc-fill
@@ -215,12 +367,14 @@ finish_create_texture(void *self,
    const uint64_t raw_id  = (uint64_t)(uintptr_t)raw;
 
    if (pInitialData) {
-      const uint32_t mips = desc->mip_levels ? desc->mip_levels : 1u;
+      const uint32_t mips = desc->mip_levels ? desc->mip_levels :
+         npt_full_mip_levels(desc->width, desc->height, desc->depth);
       const uint32_t arr  = desc->array_size ? desc->array_size : 1u;
-      npt_upload_texture_initial_data(dev, raw_id,
-                                      pInitialData, mips * arr,
-                                      desc->width, desc->height, desc->depth,
-                                      mips, desc->format);
+      if (!npt_upload_texture_initial_data(dev, raw_id,
+                                           pInitialData, mips * arr,
+                                           desc->width, desc->height, desc->depth,
+                                           mips, desc->format))
+         npt_initial_upload_failed(dev, npt_device_method_ring(dev));
    }
 
    struct npt_d3d11_texture *t = (struct npt_d3d11_texture *)
@@ -599,9 +753,26 @@ dev3_GetImmediateContext3_override(void *self,
    dev_get_immediate_context_cached(self, 3, (void **)ppImmediateContext);
 }
 
+/* This is a query, not an asynchronous state setter. The generated default
+ * discards the host HRESULT and returns S_OK, masking device removal. */
+static HRESULT NPT_STDMETHODCALLTYPE
+dev_GetDeviceRemovedReason_override(void *self)
+{
+   struct npt_device *dev = npt_com_self_device(self);
+   struct npt_ring *ring = npt_com_self_ring(self);
+   const HRESULT removed = (HRESULT)0x887A0005; /* DXGI_ERROR_DEVICE_REMOVED */
+   if (!dev || !npt_ring_is_healthy(dev->ring) || !npt_ring_is_healthy(ring))
+      return removed;
+   HRESULT hr = npt_call_ID3D11Device_GetDeviceRemovedReason(ring,
+                                                            npt_com_self_id(self));
+   return npt_ring_is_healthy(dev->ring) && npt_ring_is_healthy(ring) ? hr : removed;
+}
+
 void
 npt_overrides_d3d11_device_init(void)
 {
+   NPT_REGISTER_OVERRIDE_D3D11_DEVICE(GetDeviceRemovedReason,
+                                      dev_GetDeviceRemovedReason_override);
    NPT_REGISTER_OVERRIDE_D3D11_DEVICE (CreateBuffer,
                                        dev_CreateBuffer_override);
    NPT_REGISTER_OVERRIDE_D3D11_DEVICE (CreateTexture1D,

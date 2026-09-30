@@ -22,9 +22,11 @@ for package, expected in packages.items():
     record = root / f'{package}.json'
     if not args.force and record.exists():
         previous = json.loads(record.read_text())
-        files = list((root / package / 'c/Include').rglob('*'))
+        package_root = root / package
+        actual_files = {str(p.relative_to(package_root)): hashlib.sha256(p.read_bytes()).hexdigest()
+                        for p in (package_root / 'c/Include').rglob('*') if p.is_file()}
         if (previous.get('package_sha256') == expected and
-                sum(p.is_file() for p in files) == previous.get('extracted_headers')):
+                previous.get('files') and actual_files == previous['files']):
             print(f'{package}: pinned headers already present')
             continue
     url = f'https://api.nuget.org/v3-flatcontainer/{package}/{version}/{package}.{version}.nupkg'
@@ -37,18 +39,33 @@ for package, expected in packages.items():
         if actual != expected:
             raise SystemExit(f'{package}: package SHA-256 mismatch')
         archive.seek(0)
-        count = 0
-        with zipfile.ZipFile(archive) as entries:
-            for name in entries.namelist():
-                relative = Path(name)
-                if not name.startswith('c/Include/') or name.endswith('/'):
-                    continue
-                if relative.is_absolute() or '..' in relative.parts:
-                    raise SystemExit(f'Unsafe archive path: {name}')
-                destination = root / package / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(entries.read(name))
-                count += 1
+        files = {}
+        with tempfile.TemporaryDirectory(prefix='.headers-', dir=root) as temporary:
+            stage = Path(temporary) / 'package'
+            with zipfile.ZipFile(archive) as entries:
+                for name in entries.namelist():
+                    relative = Path(name)
+                    if not name.startswith('c/Include/') or name.endswith('/'):
+                        continue
+                    if relative.is_absolute() or '..' in relative.parts:
+                        raise SystemExit(f'Unsafe archive path: {name}')
+                    destination = stage / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    data = entries.read(name)
+                    destination.write_bytes(data)
+                    files[str(relative)] = hashlib.sha256(data).hexdigest()
+            if not files:
+                raise SystemExit(f'{package}: archive contains no SDK headers')
+            previous_tree = Path(temporary) / 'previous'
+            target = root / package
+            if target.exists():
+                target.rename(previous_tree)
+            try:
+                stage.rename(target)
+            except OSError:
+                if previous_tree.exists():
+                    previous_tree.rename(target)
+                raise
     record.write_text(json.dumps({'url': url, 'package_sha256': actual,
-                                 'extracted_headers': count}, indent=2) + '\n')
-    print(f'{package}: verified package, extracted {count} headers')
+                                 'extracted_headers': len(files), 'files': files}, indent=2) + '\n')
+    print(f'{package}: verified package, extracted {len(files)} headers')

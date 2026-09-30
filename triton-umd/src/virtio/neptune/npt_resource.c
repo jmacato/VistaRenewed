@@ -10,6 +10,11 @@
 #include "npt_ring.h"
 #include "npt_shmem_pool.h"
 
+#include "neptune-protocol/npt_protocol_client_id3d11resource.h"
+#include "neptune-protocol/npt_protocol_client_id3d11texture1d.h"
+#include "neptune-protocol/npt_protocol_client_id3d11texture2d.h"
+#include "neptune-protocol/npt_protocol_client_id3d11texture3d.h"
+
 #include "util/list.h"
 
 #include <stdlib.h>
@@ -171,12 +176,23 @@ npt_d3d_map_ring_alloc_shmem(struct npt_d3d_map_ring *r,
 {
    if (!aligned_slot_size)
       return false;
-   if (r->aligned_slot_size && r->aligned_slot_size != aligned_slot_size) {
-      npt_log("d3d_map_ring: size drift %u->%u (unsupported)",
-              r->aligned_slot_size, aligned_slot_size);
-      return false;
+   if (aligned_slot_size > r->aligned_slot_size && r->active_count) {
+      if (r->is_mapped)
+         return false;
+      /* A larger host pitch can require a larger slot. Retire every queued
+       * rename upload before releasing its staging storage. */
+      for (uint32_t i = 0; i < r->active_count; i++) {
+         if (r->slots[i].in_flight) {
+            struct npt_ring *ring = r->slots[i].pending_ring
+               ? r->slots[i].pending_ring : r->com->base.device->ring;
+            if (npt_ring_wait_seqno(ring, r->slots[i].pending_seqno) == UINT32_MAX)
+               return false;
+         }
+      }
+      npt_d3d_map_ring_fini(r);
    }
-   r->aligned_slot_size = aligned_slot_size;
+   if (aligned_slot_size > r->aligned_slot_size)
+      r->aligned_slot_size = aligned_slot_size;
    for (uint32_t i = 0; i < NPT_D3D_MAP_SLOT_INIT; i++) {
       if (!alloc_slot_locked(r, i))
          return false;
@@ -306,11 +322,26 @@ npt_d3d11_buffer_get_byte_width(struct npt_d3d11_buffer *b)
    return aux ? aux->byte_width : 0;
 }
 
+void
+npt_d3d11_buffer_set_bind_flags(struct npt_d3d11_buffer *b, uint32_t flags)
+{
+   struct npt_d3d11_buffer_aux *aux = buf_aux(b);
+   if (aux) aux->bind_flags = flags;
+}
+
+uint32_t
+npt_d3d11_buffer_get_bind_flags(struct npt_d3d11_buffer *b)
+{
+   const struct npt_d3d11_buffer_aux *aux = buf_aux(b);
+   return aux ? aux->bind_flags : 0;
+}
+
 bool
 npt_d3d11_buffer_ensure_map_shmem(struct npt_d3d11_buffer *b)
 {
    struct npt_d3d11_buffer_aux *aux = buf_aux(b);
    if (!aux || !aux->byte_width) return false;
+   if (aux->byte_width > UINT32_MAX - 63u) return false;
    const uint32_t slot_size = (aux->byte_width + 63u) & ~63u;
    return npt_d3d_map_ring_alloc_shmem(&aux->map_ring, slot_size);
 }
@@ -416,6 +447,7 @@ npt_d3d11_texture_aux_destroy(void *aux_raw)
 {
    struct npt_d3d11_texture_aux *aux = aux_raw;
    npt_d3d_map_ring_fini(&aux->map_ring);
+   mtx_destroy(&aux->desc_mutex);
    free(aux);
 }
 
@@ -425,6 +457,8 @@ npt_d3d11_texture_aux_init(struct npt_com_base *com,
 {
    struct npt_d3d11_texture_aux *aux = com->aux;
    aux->com = com;
+   mtx_init(&aux->desc_mutex, mtx_plain);
+   atomic_init(&aux->desc_state, 0);
    npt_d3d_map_ring_init(&aux->map_ring, com);
    com->aux_destroy = npt_d3d11_texture_aux_destroy;
    aux->mip_levels = 1;
@@ -438,8 +472,17 @@ npt_d3d11_texture_cast(void *resource)
 {
    if (!resource) return NULL;
    struct npt_com_base *com = resource;
-   if (com->aux_destroy != npt_d3d11_texture_aux_destroy) return NULL;
-   return (struct npt_d3d11_texture *)resource;
+   if (!com->aux) return NULL;
+   /* QueryInterface tier aliases share their ancestor's aux and deliberately
+    * have no destructor. Match the first owning ancestor, just as the COM
+    * cache does, and never reinterpret another family's side storage. */
+   for (struct npt_com_base *owner = com; owner; owner = owner->base.parent) {
+      if (!owner->aux_destroy)
+         continue;
+      return owner->aux_destroy == npt_d3d11_texture_aux_destroy &&
+         owner->aux == com->aux ? (struct npt_d3d11_texture *)resource : NULL;
+   }
+   return NULL;
 }
 
 uint32_t
@@ -564,10 +607,16 @@ format_block_height(DXGI_FORMAT fmt)
 }
 
 uint32_t
+npt_dxgi_format_block_height(DXGI_FORMAT fmt)
+{
+   return format_block_height(fmt);
+}
+
+uint32_t
 npt_dxgi_format_block_rows(DXGI_FORMAT fmt, uint32_t texel_rows)
 {
    const uint32_t bh = format_block_height(fmt);
-   return (texel_rows + bh - 1u) / bh;
+   return texel_rows / bh + (texel_rows % bh != 0);
 }
 
 /* Bytes actually occupied by one row of blocks: the tight
@@ -577,6 +626,7 @@ npt_dxgi_format_block_rows(DXGI_FORMAT fmt, uint32_t texel_rows)
 uint32_t
 npt_dxgi_format_row_bytes(DXGI_FORMAT fmt, uint32_t texel_width)
 {
+   uint64_t bytes;
    switch ((int)fmt) {
    case DXGI_FORMAT_BC1_TYPELESS:
    case DXGI_FORMAT_BC1_UNORM:
@@ -584,7 +634,7 @@ npt_dxgi_format_row_bytes(DXGI_FORMAT fmt, uint32_t texel_width)
    case DXGI_FORMAT_BC4_TYPELESS:
    case DXGI_FORMAT_BC4_UNORM:
    case DXGI_FORMAT_BC4_SNORM:
-      return ((texel_width + 3u) / 4u) * 8u;
+      bytes = ((uint64_t)texel_width + 3u) / 4u * 8u; break;
    case DXGI_FORMAT_BC2_TYPELESS:
    case DXGI_FORMAT_BC2_UNORM:
    case DXGI_FORMAT_BC2_UNORM_SRGB:
@@ -600,26 +650,41 @@ npt_dxgi_format_row_bytes(DXGI_FORMAT fmt, uint32_t texel_width)
    case DXGI_FORMAT_BC7_TYPELESS:
    case DXGI_FORMAT_BC7_UNORM:
    case DXGI_FORMAT_BC7_UNORM_SRGB:
-      return ((texel_width + 3u) / 4u) * 16u;
+      bytes = ((uint64_t)texel_width + 3u) / 4u * 16u; break;
    case DXGI_FORMAT_R8G8_B8G8_UNORM:
    case DXGI_FORMAT_G8R8_G8B8_UNORM:
    case DXGI_FORMAT_YUY2:
       /* Packed pairs: 32 bits per two texels. */
-      return ((texel_width + 1u) / 2u) * 4u;
+      bytes = ((uint64_t)texel_width + 1u) / 2u * 4u; break;
    case DXGI_FORMAT_Y210:
    case DXGI_FORMAT_Y216:
       /* Packed pairs: 64 bits per two texels. */
-      return ((texel_width + 1u) / 2u) * 8u;
+      bytes = ((uint64_t)texel_width + 1u) / 2u * 8u; break;
    case DXGI_FORMAT_AYUV:
    case DXGI_FORMAT_Y410:
-      return texel_width * 4u;
+      bytes = (uint64_t)texel_width * 4u; break;
    case DXGI_FORMAT_Y416:
-      return texel_width * 8u;
+      bytes = (uint64_t)texel_width * 8u; break;
+   case DXGI_FORMAT_NV12:
+   case DXGI_FORMAT_420_OPAQUE:
+      /* The luma plane establishes the source row pitch.  The
+       * interleaved chroma plane has the same byte pitch for NV12 and is
+       * covered by npt_dxgi_format_subresource_rows. */
+      bytes = texel_width; break;
+   case DXGI_FORMAT_NV11:
+      /* Four luma samples per interleaved chroma pair. Legal widths are
+       * multiples of four; the whole footprint includes chroma padding. */
+      bytes = ((uint64_t)texel_width + 3u) / 4u * 4u; break;
+   case DXGI_FORMAT_P010:
+   case DXGI_FORMAT_P016:
+      bytes = (uint64_t)texel_width * 2u; break;
    case DXGI_FORMAT_R1_UNORM:
-      return (texel_width + 7u) / 8u;
+      bytes = ((uint64_t)texel_width + 7u) / 8u; break;
    default:
-      return texel_width * npt_dxgi_format_bytes_per_pixel(fmt);
+      bytes = (uint64_t)texel_width * npt_dxgi_format_bytes_per_pixel(fmt);
+      break;
    }
+   return bytes <= UINT32_MAX ? (uint32_t)bytes : 0;
 }
 
 uint32_t
@@ -644,16 +709,28 @@ npt_dxgi_format_subresource_rows(DXGI_FORMAT fmt, uint32_t height)
    }
 }
 
-void
-npt_d3d11_texture_set_desc(struct npt_d3d11_texture *t,
-                           const struct npt_d3d11_texture_desc *d)
+static void
+texture_publish_desc(struct npt_d3d11_texture *t,
+                       const struct npt_d3d11_texture_desc *d,
+                       bool extended)
 {
    struct npt_d3d11_texture_aux *aux = tex_aux(t);
    if (!aux || !d) return;
    aux->width = d->width;
    aux->height = d->height ? d->height : 1;
    aux->depth = d->depth ? d->depth : 1;
-   aux->mip_levels = d->mip_levels ? d->mip_levels : 1;
+   if (d->mip_levels) {
+      aux->mip_levels = d->mip_levels;
+   } else {
+      uint32_t largest = aux->width;
+      if (aux->height > largest) largest = aux->height;
+      if (aux->depth > largest) largest = aux->depth;
+      aux->mip_levels = 1;
+      while (largest > 1u) {
+         largest >>= 1;
+         ++aux->mip_levels;
+      }
+   }
    aux->array_size = d->array_size ? d->array_size : 1;
    aux->format = d->format;
    aux->bytes_per_pixel = npt_dxgi_format_bytes_per_pixel(d->format);
@@ -664,6 +741,17 @@ npt_d3d11_texture_set_desc(struct npt_d3d11_texture *t,
    aux->sample_count = d->sample_count ? d->sample_count : 1;
    aux->sample_quality = d->sample_quality;
    aux->texture_layout = d->texture_layout;
+   atomic_store_explicit(&aux->desc_state, extended ? 2u : 1u,
+                          memory_order_release);
+}
+
+void
+npt_d3d11_texture_set_desc(struct npt_d3d11_texture *t,
+                           const struct npt_d3d11_texture_desc *d)
+{
+   /* Creation/import callers own an unpublished wrapper and know its full
+    * description. In particular base CreateTexture implies UNDEFINED layout. */
+   texture_publish_desc(t, d, true);
 }
 
 void
@@ -760,7 +848,145 @@ bool
 npt_d3d11_texture_has_desc(const struct npt_d3d11_texture *t)
 {
    const struct npt_d3d11_texture_aux *aux = tex_aux(t);
-   return aux && aux->bytes_per_pixel != 0;
+   return aux && atomic_load_explicit(&aux->desc_state, memory_order_acquire) &&
+      aux->width && aux->height && aux->depth &&
+      npt_dxgi_format_row_bytes(aux->format, aux->width) != 0;
+}
+
+bool
+npt_d3d11_texture_ensure_desc(struct npt_d3d11_texture *t,
+                              D3D11_RESOURCE_DIMENSION dimension,
+                              bool extended)
+{
+   struct npt_d3d11_texture_aux *aux = tex_aux(t);
+   if (!aux)
+      return false;
+   const unsigned needed = extended ? 2u : 1u;
+   if (atomic_load_explicit(&aux->desc_state, memory_order_acquire) >= needed)
+      return true;
+
+   mtx_lock(&aux->desc_mutex);
+   unsigned state = atomic_load_explicit(&aux->desc_state, memory_order_acquire);
+   if (state >= needed) {
+      mtx_unlock(&aux->desc_mutex);
+      return true;
+   }
+
+   bool ok = false;
+   struct npt_ring *ring = npt_com_self_ring(t);
+   if (!npt_ring_is_healthy(ring))
+      goto done;
+   if (dimension == D3D11_RESOURCE_DIMENSION_UNKNOWN)
+      npt_id3d11resource_default_GetType(t, &dimension);
+
+   struct npt_d3d11_texture_desc d = {0};
+   d.height = d.depth = d.array_size = d.sample_count = 1;
+   switch (dimension) {
+   case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+      D3D11_TEXTURE1D_DESC desc = {0};
+      npt_id3d11texture1d_default_GetDesc(t, &desc);
+      d.width = desc.Width;
+      d.mip_levels = desc.MipLevels;
+      d.array_size = desc.ArraySize;
+      d.format = desc.Format;
+      d.usage = desc.Usage;
+      d.bind_flags = desc.BindFlags;
+      d.cpu_access_flags = desc.CPUAccessFlags;
+      d.misc_flags = desc.MiscFlags;
+      extended = true;
+      break;
+   }
+   case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+      D3D11_TEXTURE2D_DESC1 desc = {0};
+      if (extended) {
+         npt_id3d11texture2d1_default_GetDesc1(t, &desc);
+      } else {
+         D3D11_TEXTURE2D_DESC base = {0};
+         npt_id3d11texture2d_default_GetDesc(t, &base);
+         desc.Width = base.Width;
+         desc.Height = base.Height;
+         desc.MipLevels = base.MipLevels;
+         desc.ArraySize = base.ArraySize;
+         desc.Format = base.Format;
+         desc.SampleDesc = base.SampleDesc;
+         desc.Usage = base.Usage;
+         desc.BindFlags = base.BindFlags;
+         desc.CPUAccessFlags = base.CPUAccessFlags;
+         desc.MiscFlags = base.MiscFlags;
+      }
+      d.width = desc.Width;
+      d.height = desc.Height;
+      d.mip_levels = desc.MipLevels;
+      d.array_size = desc.ArraySize;
+      d.format = desc.Format;
+      d.sample_count = desc.SampleDesc.Count;
+      d.sample_quality = desc.SampleDesc.Quality;
+      d.usage = desc.Usage;
+      d.bind_flags = desc.BindFlags;
+      d.cpu_access_flags = desc.CPUAccessFlags;
+      d.misc_flags = desc.MiscFlags;
+      d.texture_layout = desc.TextureLayout;
+      break;
+   }
+   case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+      D3D11_TEXTURE3D_DESC1 desc = {0};
+      if (extended) {
+         npt_id3d11texture3d1_default_GetDesc1(t, &desc);
+      } else {
+         D3D11_TEXTURE3D_DESC base = {0};
+         npt_id3d11texture3d_default_GetDesc(t, &base);
+         desc.Width = base.Width;
+         desc.Height = base.Height;
+         desc.Depth = base.Depth;
+         desc.MipLevels = base.MipLevels;
+         desc.Format = base.Format;
+         desc.Usage = base.Usage;
+         desc.BindFlags = base.BindFlags;
+         desc.CPUAccessFlags = base.CPUAccessFlags;
+         desc.MiscFlags = base.MiscFlags;
+      }
+      d.width = desc.Width;
+      d.height = desc.Height;
+      d.depth = desc.Depth;
+      d.mip_levels = desc.MipLevels;
+      d.format = desc.Format;
+      d.usage = desc.Usage;
+      d.bind_flags = desc.BindFlags;
+      d.cpu_access_flags = desc.CPUAccessFlags;
+      d.misc_flags = desc.MiscFlags;
+      d.texture_layout = desc.TextureLayout;
+      break;
+   }
+   default:
+      goto done;
+   }
+   /* The generated void thunks leave zeroed output on a failed RPC. Never
+    * publish that output, or claim a healthy descriptor after transport loss. */
+   if (!npt_ring_is_healthy(ring) || !d.width || !d.height || !d.depth ||
+       !d.mip_levels || d.mip_levels > 32 || !d.array_size ||
+       !d.sample_count || d.format == DXGI_FORMAT_UNKNOWN)
+      goto done;
+   if (!state) {
+      texture_publish_desc(t, &d, extended);
+   } else {
+      /* Readers may already use the published base fields. Only the
+       * previously unknown layout can change during an extended query. */
+      if (aux->width != d.width || aux->height != d.height ||
+          aux->depth != d.depth || aux->mip_levels != d.mip_levels ||
+          aux->array_size != d.array_size || aux->format != d.format ||
+          aux->sample_count != d.sample_count ||
+          aux->sample_quality != d.sample_quality || aux->usage != d.usage ||
+          aux->bind_flags != d.bind_flags ||
+          aux->cpu_access_flags != d.cpu_access_flags ||
+          aux->misc_flags != d.misc_flags)
+         goto done;
+      aux->texture_layout = d.texture_layout;
+      atomic_store_explicit(&aux->desc_state, 2u, memory_order_release);
+   }
+   ok = true;
+done:
+   mtx_unlock(&aux->desc_mutex);
+   return ok;
 }
 
 bool
@@ -768,8 +994,7 @@ npt_d3d11_texture_is_mappable(const struct npt_d3d11_texture *t)
 {
    const struct npt_d3d11_texture_aux *aux = tex_aux(t);
    if (!aux) return false;
-   if (aux->bytes_per_pixel == 0 ||
-       aux->width == 0 || aux->height == 0 || aux->depth == 0)
+   if (!npt_d3d11_texture_has_desc(t))
       return false;
    if (aux->usage == D3D11_USAGE_DYNAMIC)
       return (aux->cpu_access_flags & D3D11_CPU_ACCESS_WRITE) != 0;
@@ -782,7 +1007,7 @@ npt_d3d11_texture_is_mappable(const struct npt_d3d11_texture *t)
 static inline uint32_t
 mip_dim(uint32_t base, uint32_t mip)
 {
-   return base > (1u << mip) ? (base >> mip) : 1u;
+   return mip < 32u && (base >> mip) ? (base >> mip) : 1u;
 }
 
 static uint32_t
@@ -806,9 +1031,88 @@ npt_d3d11_texture_get_subresource_byte_size(const struct npt_d3d11_texture *t,
    const uint32_t rows =
       npt_dxgi_format_subresource_rows(aux->format, mip_dim(aux->height, mip));
    const uint32_t d = mip_dim(aux->depth, mip);
-   const uint64_t size = (uint64_t)row_pitch * rows * d;
-   /* 0 also means "cannot size this" to both callers. */
-   return size <= 0xffffffffu ? (uint32_t)size : 0;
+   const uint64_t slice = (uint64_t)row_pitch * rows;
+   /* Reject before multiplying by depth so malformed dimensions cannot wrap. */
+   if (!d || slice > UINT32_MAX / d)
+      return 0;
+   return (uint32_t)(slice * d);
+}
+
+/* A mapped volume may pad between slices. Only the last slice uses its
+ * row footprint; DepthPitch describes the distance between earlier slices. */
+uint32_t
+npt_d3d11_texture_get_subresource_map_byte_size(const struct npt_d3d11_texture *t,
+                                                uint32_t subresource,
+                                                uint32_t row_pitch,
+                                                uint32_t depth_pitch)
+{
+   const struct npt_d3d11_texture_aux *aux = tex_aux(t);
+   if (!aux) return 0;
+   const uint32_t mip = texture_subresource_mip(aux, subresource);
+   const uint32_t rows =
+      npt_dxgi_format_subresource_rows(aux->format, mip_dim(aux->height, mip));
+   const uint32_t depth = mip_dim(aux->depth, mip);
+   const uint32_t row_bytes =
+      npt_dxgi_format_row_bytes(aux->format, mip_dim(aux->width, mip));
+   const uint64_t slice = (uint64_t)row_pitch * rows;
+   if (!row_bytes || row_pitch < row_bytes || !slice || slice > UINT32_MAX)
+      return 0;
+   if (depth <= 1)
+      return (uint32_t)slice;
+   if (depth_pitch < slice ||
+       (uint64_t)(depth - 1) > (UINT32_MAX - slice) / depth_pitch)
+      return 0;
+   return (uint32_t)((uint64_t)depth_pitch * (depth - 1) + slice);
+}
+
+/* Validated update region in texels, with its memory-row geometry. The
+ * descriptor, not a caller-supplied box, bounds all source offset arithmetic. */
+bool
+npt_d3d11_texture_get_update_layout(const struct npt_d3d11_texture *t,
+                                    uint32_t subresource, const D3D11_BOX *box,
+                                    D3D11_BOX *region, uint32_t *row_bytes,
+                                    uint32_t *rows, uint32_t *block_height,
+                                    bool *planar)
+{
+   const struct npt_d3d11_texture_aux *aux = tex_aux(t);
+   if (!aux || !aux->width || !aux->height || !aux->depth ||
+       !aux->mip_levels || aux->mip_levels > 32 || !aux->array_size ||
+       (uint64_t)subresource >= (uint64_t)aux->mip_levels * aux->array_size)
+      return false;
+   const uint32_t mip = texture_subresource_mip(aux, subresource);
+   const uint32_t width = mip_dim(aux->width, mip);
+   const uint32_t height = mip_dim(aux->height, mip);
+   const uint32_t depth = mip_dim(aux->depth, mip);
+   *region = (D3D11_BOX){0, 0, 0, width, height, depth};
+   if (box) {
+      if (box->left >= box->right || box->top >= box->bottom ||
+          box->front >= box->back || box->right > width ||
+          box->bottom > height || box->back > depth)
+         return false;
+      *region = *box;
+   }
+   *block_height = format_block_height(aux->format);
+   if (*block_height > 1 &&
+       ((region->left % 4u) || (region->top % 4u) ||
+        (region->right != width && region->right % 4u) ||
+        (region->bottom != height && region->bottom % 4u)))
+      return false;
+   *row_bytes = npt_dxgi_format_row_bytes(aux->format,
+                                          region->right - region->left);
+   *rows = npt_dxgi_format_block_rows(aux->format,
+                                      region->bottom - region->top);
+   const uint32_t full_rows =
+      npt_dxgi_format_subresource_rows(aux->format, height);
+   *planar = full_rows != npt_dxgi_format_block_rows(aux->format, height);
+   if (*planar) {
+      /* D3D9/10 do not expose planar resources. Keep the modern full-plane
+       * path intact; a rectangular split cannot address chroma rows. */
+      if (region->left || region->top || region->right != width ||
+          region->bottom != height || region->front || region->back != 1)
+         return false;
+      *rows = full_rows;
+   }
+   return *row_bytes && *rows;
 }
 
 /* Sizes of a no-box UpdateSubresource transfer.  The return value is
@@ -886,23 +1190,30 @@ npt_d3d11_texture_get_format(const struct npt_d3d11_texture *t)
 }
 
 bool
+npt_d3d11_texture_grow_map_shmem(struct npt_d3d11_texture *t, uint32_t min_size)
+{
+   struct npt_d3d11_texture_aux *aux = tex_aux(t);
+   if (!aux || !min_size || min_size > UINT32_MAX - 63u)
+      return false;
+   return npt_d3d_map_ring_alloc_shmem(&aux->map_ring,
+                                       (min_size + 63u) & ~63u);
+}
+
+bool
 npt_d3d11_texture_ensure_map_shmem(struct npt_d3d11_texture *t)
 {
    if (!npt_d3d11_texture_is_mappable(t)) return false;
    struct npt_d3d11_texture_aux *aux = tex_aux(t);
    if (!aux) return false;
-   const uint32_t row_bytes = aux->width * aux->bytes_per_pixel;
-   const uint32_t aligned_row_pitch = (row_bytes + 255u) & ~255u;
-   const uint64_t per_slot = (uint64_t)aligned_row_pitch *
-                             (uint64_t)aux->height *
-                             (uint64_t)aux->depth;
-   const uint64_t aligned_slot = (per_slot + 63u) & ~(uint64_t)63u;
-   /* Per-slot cap; slots are lazily allocated up to NPT_D3D_MAP_SLOT_MAX. */
-   if (per_slot == 0 || aligned_slot > (uint64_t)(64u << 20)) {
-      npt_log("texture_ensure_map_shmem: bad size");
+   const uint32_t row_bytes = npt_dxgi_format_row_bytes(aux->format, aux->width);
+   const uint64_t aligned_row_pitch = ((uint64_t)row_bytes + 255u) & ~(uint64_t)255u;
+   const uint32_t rows = npt_dxgi_format_subresource_rows(aux->format, aux->height);
+   const uint64_t slice = aligned_row_pitch * rows;
+   /* The protocol uses 32-bit byte extents; actual allocation failure, rather
+    * than an arbitrary 64 MiB policy, limits otherwise representable slots. */
+   if (!row_bytes || !aux->depth || slice > (UINT32_MAX - 63u) / aux->depth)
       return false;
-   }
-   return npt_d3d_map_ring_alloc_shmem(&aux->map_ring, (uint32_t)aligned_slot);
+   return npt_d3d11_texture_grow_map_shmem(t, (uint32_t)(slice * aux->depth));
 }
 
 uint32_t npt_d3d11_texture_get_map_shmem_res_id(const struct npt_d3d11_texture *t)

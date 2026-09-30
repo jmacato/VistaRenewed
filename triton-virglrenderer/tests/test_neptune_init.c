@@ -87,7 +87,8 @@ test_neptune_get_capset(void)
    struct virgl_renderer_capset_neptune caps;
    memset(&caps, 0xff, sizeof(caps));
    virgl_renderer_fill_caps(VIRTGPU_DRM_CAPSET_NEPTUNE, 0, &caps);
-   EXPECT(caps.wire_format_version == 2u);
+   /* The paired Vista guest requires the color-copy revision. */
+   EXPECT(caps.wire_format_version == 4u);
 
    teardown();
    return 1;

@@ -364,7 +364,8 @@ render_state_create_resource(uint32_t ctx_id,
                              int *out_res_fd,
                              uint32_t *out_map_info,
                              struct virgl_resource_vulkan_info *out_vulkan_info,
-                             uint32_t *out_export_format)
+                             uint32_t *out_export_format,
+                             struct virgl_attachment_layout *out_layout)
 {
    struct render_context *ctx = render_state_lookup_context(ctx_id);
    if (!ctx)
@@ -382,7 +383,7 @@ render_state_create_resource(uint32_t ctx_id,
    case RENDER_BACKEND_NEPTUNE:
       return npt_renderer_create_resource(ctx_id, res_id, blob_id, blob_size,
                                           blob_flags, out_fd_type, out_res_fd,
-                                          out_map_info, out_export_format);
+                                          out_map_info, out_export_format, out_layout);
 #endif
    default:
       return false;
@@ -394,7 +395,8 @@ render_state_import_resource(uint32_t ctx_id,
                              uint32_t res_id,
                              enum virgl_resource_fd_type fd_type,
                              int fd,
-                             uint64_t size)
+                             uint64_t size,
+                             const struct virgl_attachment_layout *layout)
 {
    struct render_context *ctx = render_state_lookup_context(ctx_id);
    if (!ctx)
@@ -408,7 +410,7 @@ render_state_import_resource(uint32_t ctx_id,
 #endif
 #ifdef ENABLE_NEPTUNE
    case RENDER_BACKEND_NEPTUNE:
-      return npt_renderer_import_resource(ctx_id, res_id, fd_type, fd, size);
+      return npt_renderer_import_resource_layout(ctx_id, res_id, fd_type, fd, size, layout);
 #endif
    default:
       return false;

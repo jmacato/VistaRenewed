@@ -229,17 +229,17 @@ static BOOLEAN IsLinear32BppVirtioFormat(ULONG format)
 
 // The shared-texture descriptor crosses two user/kernel boundaries and is
 // later used to create a host texture and a scanout.  Treat every field as
-// untrusted.  The Vista D3D9 path deliberately supports only the two linear
-// 32-bpp formats used for DWM surfaces; accepting a wider descriptor here
-// would let the producer and consumer disagree about pitch or channel order.
+// untrusted. Shared textures include higher precision colour data as well as
+// DWM surfaces. Only the existing 32-bpp display formats may be primaries.
+// Keep this allowlist aligned with the host export/import format contract so
+// the producer and consumer agree about pitch and channel order.
 static BOOLEAN IsValidVistaSharedTexture(
     const VIOGPU_RESOURCE_SHARED_TEXTURE_OPTIONS *options,
     ULONGLONG allocationSize)
 {
 #if !defined(VIOGPU_TARGET_VISTA)
     // Keep the existing modern Triton ABI broad.  The Vista package has a
-    // smaller, audited format contract because its D3D9 UMD exposes only two
-    // shared 32-bpp formats.
+    // smaller, audited format contract for typed shared colour surfaces.
     return options != NULL && options->blob_id != 0 &&
            options->width != 0 && options->height != 0 &&
            options->plane_count != 0 && options->plane_count <= 4 &&
@@ -248,15 +248,18 @@ static BOOLEAN IsValidVistaSharedTexture(
 #else
     const ULONG dxgiBgra8 = 87; // DXGI_FORMAT_B8G8R8A8_UNORM
     const ULONG dxgiBgrx8 = 88; // DXGI_FORMAT_B8G8R8X8_UNORM
+    const ULONG dxgiRgba8 = 28; // DXGI_FORMAT_R8G8B8A8_UNORM
     const ULONG requiredBindFlags = 0x28; // D3D11_BIND_SRV | D3D11_BIND_RT
     const ULONG requiredMiscFlags = 0x2;  // D3D11_RESOURCE_MISC_SHARED
     ULONG expectedScanoutFormat;
+    ULONG bytesPerPixel = 4;
     ULONGLONG rowBytes;
     ULONGLONG roundedSize;
 
     if (options == NULL || options->blob_id == 0 ||
         options->primary > 1 || options->width == 0 || options->height == 0 ||
-        options->width > 4096 || options->height > 4096 ||
+        options->width > (options->primary ? 4096u : 8192u) ||
+        options->height > (options->primary ? 4096u : 8192u) ||
         options->mip_levels != 1 || options->array_size != 1 ||
         options->sample_count != 1 || options->usage != 0 ||
         options->bind_flags != requiredBindFlags ||
@@ -279,6 +282,31 @@ static BOOLEAN IsValidVistaSharedTexture(
     {
         expectedScanoutFormat = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
     }
+    else if (options->format == dxgiRgba8)
+    {
+        expectedScanoutFormat = VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM;
+    }
+    else if (!options->primary && options->format == 29) // RGBA8 sRGB
+    {
+        expectedScanoutFormat = 104; // VIRGL_FORMAT_R8G8B8A8_SRGB
+    }
+    else if (!options->primary && options->format == 91) // BGRA8 sRGB
+    {
+        expectedScanoutFormat = 100; // VIRGL_FORMAT_B8G8R8A8_SRGB
+    }
+    else if (!options->primary && options->format == 93) // BGRX8 sRGB
+    {
+        expectedScanoutFormat = 101; // VIRGL_FORMAT_B8G8R8X8_SRGB
+    }
+    else if (!options->primary && options->format == 24) // RGB10A2 UNORM
+    {
+        expectedScanoutFormat = 8; // VIRGL_FORMAT_R10G10B10A2_UNORM
+    }
+    else if (!options->primary && options->format == 10) // RGBA16 FLOAT
+    {
+        expectedScanoutFormat = 94; // VIRGL_FORMAT_R16G16B16A16_FLOAT
+        bytesPerPixel = 8;
+    }
     else
     {
         return FALSE;
@@ -291,7 +319,7 @@ static BOOLEAN IsValidVistaSharedTexture(
         return FALSE;
     }
 
-    rowBytes = (ULONGLONG)options->width * 4;
+    rowBytes = (ULONGLONG)options->width * bytesPerPixel;
     if (options->planes[0].offset > MAXULONG ||
         options->planes[0].pitch > MAXULONG ||
         options->planes[0].pitch < rowBytes ||
@@ -713,7 +741,7 @@ NTSTATUS VioGpuAllocation::AttachFrameBufferBackingLocked(
     const ULONGLONG segmentSize = m_adapter->GetFrameBufferSize();
     const ULONGLONG roundedSize =
         (m_Size + PAGE_SIZE - 1) & ~((ULONGLONG)PAGE_SIZE - 1);
-    if (!m_IsPrimary || m_IsBlob || roundedSize == 0 ||
+    if (!m_IsPrimary || (m_IsBlob && !m_IsShared) || roundedSize == 0 ||
         roundedSize > MAXULONG || segmentAddress.QuadPart < segmentBase)
     {
         return STATUS_INVALID_PARAMETER;
@@ -725,6 +753,19 @@ NTSTATUS VioGpuAllocation::AttachFrameBufferBackingLocked(
             MAXULONGLONG - offset)
     {
         return STATUS_INVALID_PARAMETER;
+    }
+
+    if (m_IsShared)
+    {
+        // The BAR supplies Vista's CPU-visible primary backing. The HOST3D
+        // blob retains its exported host storage and must not receive a
+        // RESOURCE_ATTACH_BACKING command for this separate CPU mapping.
+        if (m_pMDL != NULL || m_BackingAttachedToHost)
+        {
+            return STATUS_INVALID_DEVICE_STATE;
+        }
+        m_DxPhysicalAddress = (SIZE_T)offset;
+        return STATUS_SUCCESS;
     }
 
     if (m_BackingAttachedToHost && m_pMDL == NULL &&
@@ -1281,23 +1322,16 @@ NTSTATUS VioGpuAllocation::FlushToScreen(UINT scan_id)
             return STATUS_INVALID_DEVICE_STATE;
         }
         GPU_RECT rect = {0, 0, m_3dOptions.width, m_3dOptions.height};
-        NTSTATUS status = VioGpuQueueResourceFlush(&m_adapter->ctrlQueue,
-                                                   m_Id, rect);
-        if (!NT_SUCCESS(status))
-        {
-            return status;
-        }
-        status = VioGpuQueueScanout(&m_adapter->ctrlQueue,
-                                    scan_id,
-                                    m_Id,
-                                    m_3dOptions.width,
-                                    m_3dOptions.height,
-                                    0,
-                                    0);
-        if (!NT_SUCCESS(status))
-        {
-            return status;
-        }
+        // FLUSH publishes only scanouts already bound to this resource.
+        // Ordinary flip-chain buffers need the same bind-before-flush order
+        // as blobs; otherwise a new buffer's update is silently discarded.
+        NTSTATUS status = VioGpuQueueScanout(&m_adapter->ctrlQueue,
+                                             scan_id, m_Id,
+                                             m_3dOptions.width, m_3dOptions.height,
+                                             0, 0);
+        if (!NT_SUCCESS(status)) return status;
+        status = VioGpuQueueResourceFlush(&m_adapter->ctrlQueue, m_Id, rect);
+        if (!NT_SUCCESS(status)) return status;
     }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d\n", __FUNCTION__, m_Id));
@@ -1724,11 +1758,11 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
                 VioGpuAdapter::SHMEM_SEGMENT_SET;
             break;
         case VIOGPU_RESOURCE_TYPE_SHARED:
-            // Reside in the CPU-visible aperture (segment 1) with DXGK-supplied
-            // backing pages, like a 3D allocation. The pages are never read --
-            // the content is the host texture's dmabuf -- but segment 1 both
-            // satisfies the video memory manager for a shareable allocation and
-            // lets dxgkrnl accept a primary as a VidPnSource scanout target.
+            // Vista constructs a primary's CPU mapping from the segment's
+            // CpuTranslatedAddress. An aperture has no fixed CPU address;
+            // placing a primary there would map unrelated physical RAM.
+            // Keep primary CPU backing in the framebuffer BAR, independently
+            // of the shared texture's exported HOST3D storage.
             DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s shared res_id=%d blob_id=0x%llx size=%d %dx%d primary=%d\n",
                                            __FUNCTION__,
                                            allocation->GetId(),
@@ -1738,14 +1772,28 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
                                            resourceExchange->OptionsShared.height,
                                            resourceExchange->OptionsShared.primary));
             allocationInfo->EvictionSegmentSet = 0;
-            allocationInfo->PreferredSegment.SegmentId0 =
-                VioGpuAdapter::APERTURE_SEGMENT_ID;
+#if defined(VIOGPU_TARGET_VISTA)
+            if (allocation->IsPrimary())
+            {
+                allocationInfo->PreferredSegment.SegmentId0 =
+                    VioGpuAdapter::FRAMEBUFFER_SEGMENT_ID;
+                allocationInfo->SupportedReadSegmentSet =
+                    VioGpuAdapter::FRAMEBUFFER_SEGMENT_SET;
+                allocationInfo->SupportedWriteSegmentSet =
+                    VioGpuAdapter::FRAMEBUFFER_SEGMENT_SET;
+            }
+            else
+#endif
+            {
+                allocationInfo->PreferredSegment.SegmentId0 =
+                    VioGpuAdapter::APERTURE_SEGMENT_ID;
+                allocationInfo->SupportedReadSegmentSet =
+                    VioGpuAdapter::APERTURE_SEGMENT_SET;
+                allocationInfo->SupportedWriteSegmentSet =
+                    VioGpuAdapter::APERTURE_SEGMENT_SET;
+            }
             allocationInfo->PreferredSegment.Direction0 = 0;
             allocationInfo->Flags.CpuVisible = TRUE;
-            allocationInfo->SupportedReadSegmentSet =
-                VioGpuAdapter::APERTURE_SEGMENT_SET;
-            allocationInfo->SupportedWriteSegmentSet =
-                VioGpuAdapter::APERTURE_SEGMENT_SET;
             if (resourceExchange->OptionsShared.primary)
             {
                 primaryAllocation = allocation;
@@ -1759,11 +1807,18 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     {
         pCreateAllocation->hResource = resource->ToHandle();
     }
+#if defined(VIOGPU_TARGET_VISTA)
+    // Allocation is not a display-ownership transition. Selecting a new
+    // primary here exposes unrendered pixels and increments the generation
+    // behind queued flips. SetVidPnSourceAddress and ordered Present
+    // completion are the authoritative scanout transitions on Vista.
+    UNREFERENCED_PARAMETER(primaryAllocation);
+#else
     if (primaryAllocation != NULL)
     {
-        // Publish a primary only after the complete allocation array succeeds.
         adapter->vidpn.SetScanoutSource(primaryAllocation);
     }
+#endif
 
     return STATUS_SUCCESS;
 
@@ -1785,15 +1840,16 @@ CreateAllocationFailed:
 
 // Minimal DXGI_FORMAT -> D3DDDIFORMAT mapping for the shared-allocation
 // describe path. Numeric DXGI values avoid an interface-only dxgiformat.h
-// dependency in the miniport. Unknown formats fall back to A8R8G8B8, the
-// layout DWM's shared surfaces use.
+// dependency in the miniport. Unknown formats are not valid shared resources.
 static D3DDDIFORMAT VioGpuDxgiFormatToD3DDDI(UINT dxgiFormat)
 {
     switch (dxgiFormat) {
-    case 87: /* DXGI_FORMAT_B8G8R8A8_UNORM */ return D3DDDIFMT_A8R8G8B8;
-    case 88: /* DXGI_FORMAT_B8G8R8X8_UNORM */ return D3DDDIFMT_X8R8G8B8;
-    case 28: /* DXGI_FORMAT_R8G8B8A8_UNORM */ return D3DDDIFMT_A8B8G8R8;
-    default:                                  return D3DDDIFMT_A8R8G8B8;
+    case 87: case 91: /* BGRA8 UNORM / sRGB */ return D3DDDIFMT_A8R8G8B8;
+    case 88: case 93: /* BGRX8 UNORM / sRGB */ return D3DDDIFMT_X8R8G8B8;
+    case 28: case 29: /* RGBA8 UNORM / sRGB */ return D3DDDIFMT_A8B8G8R8;
+    case 24: /* DXGI_FORMAT_R10G10B10A2_UNORM */ return D3DDDIFMT_A2B10G10R10;
+    case 10: /* DXGI_FORMAT_R16G16B16A16_FLOAT */ return D3DDDIFMT_A16B16G16R16F;
+    default: return D3DDDIFMT_UNKNOWN;
     }
 }
 
@@ -1804,6 +1860,19 @@ NTSTATUS VioGpuAllocation::DescribeAllocation(DXGKARG_DESCRIBEALLOCATION *pDescr
 
     auto lock_guard = LockGuard();
 
+    // Refresh rate: active VidPN mode's rate if a source is pinned,
+    // otherwise 60/1 as a safe default.
+    D3DDDI_RATIONAL refresh = m_adapter->vidpn.GetActiveRefreshRate();
+    if (refresh.Numerator && refresh.Denominator)
+    {
+        pDescribeAllocation->RefreshRate = refresh;
+    }
+    else
+    {
+        pDescribeAllocation->RefreshRate.Numerator = 60;
+        pDescribeAllocation->RefreshRate.Denominator = 1;
+    }
+
     if (m_IsShared) {
         // Host-COM-backed share: dimensions/format come from the producer's
         // descriptor; there is no virtio resource to query.
@@ -1813,8 +1882,6 @@ NTSTATUS VioGpuAllocation::DescribeAllocation(DXGKARG_DESCRIBEALLOCATION *pDescr
         pDescribeAllocation->Format = VioGpuDxgiFormatToD3DDDI(m_SharedFormat);
         pDescribeAllocation->MultisampleMethod.NumQualityLevels = 0;
         pDescribeAllocation->MultisampleMethod.NumSamples = 1;
-        pDescribeAllocation->RefreshRate.Numerator = 60;
-        pDescribeAllocation->RefreshRate.Denominator = 1;
         return STATUS_SUCCESS;
     }
 
@@ -1851,19 +1918,6 @@ NTSTATUS VioGpuAllocation::DescribeAllocation(DXGKARG_DESCRIBEALLOCATION *pDescr
     {
         pDescribeAllocation->MultisampleMethod.NumQualityLevels = 0;
         pDescribeAllocation->MultisampleMethod.NumSamples = 1;
-    }
-
-    // Refresh rate: active VidPN mode's rate if a source is pinned,
-    // otherwise 60/1 as a safe default.
-    D3DDDI_RATIONAL refresh = m_adapter->vidpn.GetActiveRefreshRate();
-    if (refresh.Numerator && refresh.Denominator)
-    {
-        pDescribeAllocation->RefreshRate = refresh;
-    }
-    else
-    {
-        pDescribeAllocation->RefreshRate.Numerator = 60;
-        pDescribeAllocation->RefreshRate.Denominator = 1;
     }
 
     return STATUS_SUCCESS;
@@ -2135,7 +2189,7 @@ NTSTATUS VioGpuAllocation::PagingTransfer(
         const ULONGLONG segmentSize = m_adapter->GetFrameBufferSize();
         const ULONGLONG roundedAllocationSize =
             (m_Size + PAGE_SIZE - 1) & ~((ULONGLONG)PAGE_SIZE - 1);
-        if (!m_IsPrimary || m_IsBlob || roundedAllocationSize == 0 ||
+        if (!m_IsPrimary || (m_IsBlob && !m_IsShared) || roundedAllocationSize == 0 ||
             segmentAddress.QuadPart < segmentBase)
         {
             return STATUS_INVALID_PARAMETER;
@@ -2241,7 +2295,7 @@ NTSTATUS VioGpuAllocation::PagingFill(
             pBuildPagingBuffer->Fill.Destination.SegmentAddress.QuadPart;
         const ULONGLONG roundedAllocationSize =
             (m_Size + PAGE_SIZE - 1) & ~((ULONGLONG)PAGE_SIZE - 1);
-        if (!m_IsPrimary || m_IsBlob || roundedAllocationSize == 0 ||
+        if (!m_IsPrimary || (m_IsBlob && !m_IsShared) || roundedAllocationSize == 0 ||
             segmentAddress < segmentBase)
         {
             return STATUS_INVALID_PARAMETER;

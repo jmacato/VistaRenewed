@@ -13971,13 +13971,19 @@ int vrend_renderer_export_query(struct pipe_resource *pres,
    (void)res;
 #endif
 
-   /*
-    * Implementations that support eglExportDMABUFImageMESA can also export certain resources.
-    * This is omitted currently since virgl_renderer_get_fd_for_texture supports that use case.
-    */
    export_query->out_num_fds = 0;
    export_query->out_fourcc = 0;
    export_query->out_modifier = DRM_FORMAT_MOD_INVALID;
+   for (unsigned i = 0; i < 4; i++) {
+      export_query->out_fds[i] = -1;
+      export_query->out_strides[i] = 0;
+      export_query->out_offsets[i] = 0;
+   }
+   // GL-backed standard primaries do not necessarily have a GBM allocation.
+   // Export their actual EGL layout, rather than guessing linear width*4.
+   if (res->target == GL_TEXTURE_2D &&
+       vrend_winsys_export_texture_query(res->gl_id, export_query) == 0)
+      return 0;
    if (export_query->in_export_fds)
       return -EINVAL;
 

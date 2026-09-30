@@ -7,6 +7,7 @@ triton9_src = files(
   'triton9_ddi.c',
   'triton9_guids.c',
   'triton9_resource.c',
+  'triton9_trace.c',
   'triton9_format.c',
   'triton9_unsupported.c',
   'triton9_output.c',
@@ -14,6 +15,7 @@ triton9_src = files(
   'triton9_query.cpp',
   'triton9_state.cpp',
   'triton9_shader.cpp',
+  'triton9_fixed.cpp',
   '../triton/tritonDxbc.c',
   '../triton/tritonSharedBridge.c',
 )
@@ -34,6 +36,7 @@ triton9_shaderconv_src = files(
 triton9_incs = [
   npt_incs,
   include_directories('.'),
+  include_directories('../../../../../triton-kmd/viogpu/shared'),
   include_directories('..'),
   include_directories('../triton'),
   include_directories('third_party/d3d9on12-shaderconverter/Inc'),

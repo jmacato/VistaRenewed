@@ -1090,7 +1090,7 @@ void virtio_gpu_process_cmdq(VirtIOGPU *g)
     struct virtio_gpu_ctrl_command *cmd;
     VirtIOGPUClass *vgc = VIRTIO_GPU_GET_CLASS(g);
 
-    if (g->processing_cmdq) {
+    if (g->reset_pending || g->processing_cmdq) {
         return;
     }
     g->processing_cmdq = true;
@@ -1645,9 +1645,17 @@ static void virtio_gpu_reset_bh(VirtIOGPU *g)
     uint32_t resource_id;
     Error *local_err = NULL;
     int i = 0;
+    bool reset_ok = true;
 
     if (!g->reset_pending) {
         return;
+    }
+
+    if (vgc->reset) {
+        reset_ok = vgc->reset(g);
+    }
+    if (!reset_ok) {
+        goto discard_commands;
     }
 
     QTAILQ_FOREACH_SAFE(res, &g->reslist, next, tmp) {
@@ -1661,9 +1669,14 @@ static void virtio_gpu_reset_bh(VirtIOGPU *g)
             /* error_report_err frees the error object for us */
             error_report_err(local_err);
             local_err = NULL;
+            if (virtio_gpu_find_resource(g, resource_id)) {
+                reset_ok = false;
+                break;
+            }
         }
     }
 
+discard_commands:
     while (!QTAILQ_EMPTY(&g->cmdq)) {
         cmd = QTAILQ_FIRST(&g->cmdq);
         QTAILQ_REMOVE(&g->cmdq, cmd, next);
@@ -1677,12 +1690,17 @@ static void virtio_gpu_reset_bh(VirtIOGPU *g)
         g_free(cmd);
     }
 
-    for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
-        dpy_gfx_replace_surface(g->parent_obj.scanout[i].con, NULL);
+    if (reset_ok) {
+        for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
+            dpy_gfx_replace_surface(g->parent_obj.scanout[i].con, NULL);
+        }
+        virtio_gpu_base_reset(VIRTIO_GPU_BASE(g));
     }
 
-    virtio_gpu_base_reset(VIRTIO_GPU_BASE(g));
-
+    /*
+     * Complete the reset request even if the renderer retained its storage.
+     * Its failure block remains set until a later explicit reset recovers.
+     */
     g->reset_pending = false;
 }
 

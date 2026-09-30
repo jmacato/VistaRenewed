@@ -36,17 +36,27 @@ inputs_by_arch = {
     'x64': {
         'viogpu3d.sys': root / 'build/kmd-x64/viogpu3d.sys',
         'neptune_d3d9.dll': root / 'triton-umd/build-vista-linux-x64/src/virtio/neptune/vista-d3d9/neptune_d3d9.dll',
+        'neptune_d3d10.dll': root / 'triton-umd/build-vista-linux-x64/src/virtio/neptune/vista-d3d10/neptune_d3d10.dll',
         'neptune_d3d9_wow.dll': root / 'triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d9/neptune_d3d9.dll',
+        'neptune_d3d10_wow.dll': root / 'triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d10/neptune_d3d10.dll',
         'triton9_runtime_probe_x64.exe': root / 'triton-umd/build-vista-linux-x64/src/virtio/neptune/vista-d3d9/triton9_runtime_probe.exe',
         'viogpu3d-diagnostic.inf': root / 'packaging/viogpu3d-diagnostic.inf',
     },
     'x86': {
         'viogpu3d.sys': root / 'build/kmd-x86/viogpu3d.sys',
         'neptune_d3d9.dll': root / 'triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d9/neptune_d3d9.dll',
+        'neptune_d3d10.dll': root / 'triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d10/neptune_d3d10.dll',
         'triton9_runtime_probe_x86.exe': root / 'triton-umd/build-vista-linux-x86/src/virtio/neptune/vista-d3d9/triton9_runtime_probe.exe',
         'viogpu3d-diagnostic.inf': root / 'packaging/viogpu3d-diagnostic-x86.inf',
     },
 }
+for package_arch in ('x64', 'x86'):
+    for probe_arch in (('x64', 'x86') if package_arch == 'x64' else ('x86',)):
+        for probe in ('runtime', 'present'):
+            name = f'triton10_{probe}_probe_{probe_arch}.exe'
+            inputs_by_arch[package_arch][name] = root / (
+                f'triton-umd/build-vista-linux-{probe_arch}/src/virtio/neptune/'
+                f'vista-d3d10/triton10_{probe}_probe.exe')
 inputs = inputs_by_arch[arch]
 for path in inputs.values():
     if not path.is_file():
@@ -117,6 +127,8 @@ with tempfile.TemporaryDirectory(prefix='triton-ci-signing-') as temporary:
     }.items():
         shutil.copy2(source, notices/name)
     shutil.copytree(root/'triton-umd/licenses', notices/'mesa-licenses')
+    run('python3', 'scripts/collect_source_notices.py', '--root', root,
+        '--output', notices/'SOURCE-NOTICES.txt')
     run('python3', 'scripts/stage_vista_linux_media.py', '--package', package,
         '--arch', arch,
         '--certificate', cert, '--publications', publications, '--no-activate',

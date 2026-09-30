@@ -63,7 +63,8 @@ struct npt_reply_header {
  * virgl_renderer_capset_neptune.wire_format_version; the guest compares
  * against its own copy and refuses to attach on mismatch.  Bump the
  * JSON's version when an incompatible wire change lands. */
-#define NPT_PROTOCOL_WIRE_VERSION 2u
+/* Local paired transport revision: query-neutral GPU color conversion. */
+#define NPT_PROTOCOL_WIRE_VERSION 4u
 
 /* ================================================================== */
 /* Interface IIDs                                                      */

@@ -8,7 +8,7 @@ Class=Display
 ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
 Provider=%RHEL%
 CatalogFile=viogpu3d-vista-x64.cat
-DriverVer = 08/11/2026,7.14.1.0
+DriverVer = 08/11/2026,7.15.1.0
 
 [ControlFlags]
 ExcludeFromSelect=*
@@ -25,7 +25,9 @@ TritonVistaDeploy_Files = 11
 [SourceDisksFiles]
 viogpu3d.sys = 1
 neptune_d3d9.dll = 1
+neptune_d3d10.dll = 1
 neptune_d3d9_wow.dll = 1
+neptune_d3d10_wow.dll = 1
 triton-vista-deploy.exe = 1
 
 [Manufacturer]
@@ -39,9 +41,11 @@ viogpu3d.sys,,,2
 
 [VioGpu3D_Files.UsermodeNative]
 neptune_d3d9.dll,,,0x00004000
+neptune_d3d10.dll,,,0x00004000
 
 [VioGpu3D_Files.UsermodeWow]
 neptune_d3d9_wow.dll,,,0x00004000
+neptune_d3d10_wow.dll,,,0x00004000
 
 [TritonVistaDeploy_Files]
 triton-vista-deploy.exe,,,0x00004000
@@ -70,9 +74,9 @@ ErrorControl=%SERVICE_ERROR_NORMAL%
 ServiceBinary=%11%\triton-vista-deploy.exe --service
 
 [VioGpu3D_DeviceSettings]
-HKR,,UserModeDriverName,%REG_MULTI_SZ%,neptune_d3d9.dll
-HKR,,UserModeDriverNameWow,%REG_MULTI_SZ%,neptune_d3d9_wow.dll
-HKR,,InstalledDisplayDrivers,%REG_MULTI_SZ%,neptune_d3d9
+HKR,,UserModeDriverName,%REG_MULTI_SZ%,neptune_d3d9.dll,neptune_d3d10.dll
+HKR,,UserModeDriverNameWow,%REG_MULTI_SZ%,neptune_d3d9_wow.dll,neptune_d3d10_wow.dll
+HKR,,InstalledDisplayDrivers,%REG_MULTI_SZ%,neptune_d3d9,neptune_d3d10
 HKR,,VgaCompatible,%REG_DWORD%,0
 HKR,,CapabilityOverride,%REG_DWORD%,0x8
 

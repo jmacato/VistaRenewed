@@ -118,7 +118,11 @@ if npt_is_windows and get_option('npt_vista_d3d9')
   subdir('vista-d3d9')
 endif
 
-if npt_is_windows and not get_option('npt_vista_d3d9')
+if npt_is_windows and get_option('npt_vista_d3d10')
+  subdir('vista-d3d10')
+endif
+
+if npt_is_windows and not get_option('npt_vista_d3d9') and not get_option('npt_vista_d3d10')
   # Windows: produce d3d11.dll and dxgi.dll as native DLLs for Wine
   # (MinGW cross-compile, installed to Wine prefix system32 like dxvk).
   # The nptunix.dll helper builtin provides unixlib access.

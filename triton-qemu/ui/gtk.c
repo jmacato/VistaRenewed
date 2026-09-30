@@ -475,15 +475,34 @@ static void gd_cursor_define(DisplayChangeListener *dcl,
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
     GdkPixbuf *pixbuf;
     GdkCursor *cursor;
+    guchar *pixels;
+    int stride;
 
     if (!gtk_widget_get_realized(vc->gfx.drawing_area)) {
         return;
     }
 
-    pixbuf = gdk_pixbuf_new_from_data((guchar *)(c->data),
-                                      GDK_COLORSPACE_RGB, true, 8,
-                                      c->width, c->height, c->width * 4,
-                                      NULL, NULL);
+    pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, true, 8,
+                          c->width, c->height);
+    pixels = gdk_pixbuf_get_pixels(pixbuf);
+    stride = gdk_pixbuf_get_rowstride(pixbuf);
+    /*
+     * QEMU cursor words are 0xAARRGGBB; GdkPixbuf needs RGBA bytes.
+     * Convert into the pixbuf's own storage without changing the cursor
+     * shared with other display listeners. Preserve alpha and the hotspot.
+     */
+    for (int y = 0; y < c->height; y++) {
+        guchar *row = pixels + y * stride;
+
+        for (int x = 0; x < c->width; x++) {
+            uint32_t pixel = c->data[y * c->width + x];
+
+            row[x * 4 + 0] = (pixel >> 16) & 0xff;
+            row[x * 4 + 1] = (pixel >> 8) & 0xff;
+            row[x * 4 + 2] = pixel & 0xff;
+            row[x * 4 + 3] = pixel >> 24;
+        }
+    }
     cursor = gdk_cursor_new_from_pixbuf
         (gtk_widget_get_display(vc->gfx.drawing_area),
          pixbuf, c->hot_x, c->hot_y);
@@ -689,6 +708,7 @@ static const DisplayChangeListenerOps dcl_egl_ops = {
 
     .dpy_gl_scanout_disable  = gd_egl_scanout_disable,
     .dpy_gl_scanout_texture  = gd_egl_scanout_texture,
+    .dpy_gl_texture_read_sync = true,
     .dpy_gl_scanout_dmabuf   = gd_egl_scanout_dmabuf,
     .dpy_gl_cursor_dmabuf    = gd_egl_cursor_dmabuf,
     .dpy_gl_cursor_position  = gd_egl_cursor_position,
@@ -1500,10 +1520,7 @@ static gboolean gd_tab_window_close(GtkWidget *widget, GdkEvent *event,
         eglDestroySurface(qemu_egl_display, vc->gfx.esurface);
         vc->gfx.esurface = NULL;
     }
-    if (vc->gfx.ectx) {
-        eglDestroyContext(qemu_egl_display, vc->gfx.ectx);
-        vc->gfx.ectx = NULL;
-    }
+    /* Keep the context and its renderer share group across reparenting. */
 #endif
     return TRUE;
 }
@@ -1539,10 +1556,7 @@ static void gd_menu_untabify(GtkMenuItem *item, void *opaque)
             eglDestroySurface(qemu_egl_display, vc->gfx.esurface);
             vc->gfx.esurface = NULL;
         }
-        if (vc->gfx.ectx) {
-            eglDestroyContext(qemu_egl_display, vc->gfx.ectx);
-            vc->gfx.ectx = NULL;
-        }
+        /* Keep the context and its renderer share group across reparenting. */
 #endif
         gd_widget_reparent(s->notebook, vc->window, vc->tab_item);
 
@@ -2296,7 +2310,24 @@ static GSList *gd_vc_gfx_init(GtkDisplayState *s, VirtualConsole *vc,
             vc->gfx.dgc.ops = &gl_area_ctx_ops;
         } else {
 #ifdef CONFIG_X11
+            EGLint visual_id;
+            GdkVisual *visual;
+
+            if (!eglGetConfigAttrib(qemu_egl_display, qemu_egl_config,
+                                    EGL_NATIVE_VISUAL_ID, &visual_id)) {
+                error_report("egl: cannot query the window visual: %s",
+                             qemu_egl_get_error_string());
+                exit(1);
+            }
+            visual = gdk_x11_screen_lookup_visual(gdk_screen_get_default(),
+                                                 visual_id);
+            if (!visual) {
+                error_report("egl: X11 visual %d is unavailable", visual_id);
+                exit(1);
+            }
             vc->gfx.drawing_area = gtk_drawing_area_new();
+            /* GTK's default visual may not match the EGL configuration. */
+            gtk_widget_set_visual(vc->gfx.drawing_area, visual);
             /*
              * gtk_widget_set_double_buffered() was deprecated in 3.14.
              * It is required for opengl rendering on X11 though.  A

@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright 2026 Turing Software LLC
  * SPDX-License-Identifier: MIT
  *
@@ -26,6 +26,12 @@
  * and the SDK header pulls in slot-count macros lazily in a way that
  * breaks under our include order. */
 #define __D3D10EFFECT_H__
+#define __WINE_D3D10EFFECT_H
+#if defined(NPT_D3D10_RUNTIME_DDI)
+/* The modern D3D10 header declares a pointer to this later kernel type.
+ * Vista never dereferences that union member. */
+typedef struct _D3DDDI_OPENALLOCATIONINFO2 D3DDDI_OPENALLOCATIONINFO2;
+#endif
 
 #include <d3d10umddi.h>
 #include <d3d11_3.h>
@@ -43,6 +49,7 @@ extern "C" {
 
 typedef struct TRITON_ADAPTER {
     D3D10DDI_HRTADAPTER          hRTAdapter;
+    D3DDDI_ADAPTERCALLBACKS       callbacks;
 } TRITON_ADAPTER, *PTRITON_ADAPTER;
 
 struct TRITON_SHADER;
@@ -51,6 +58,7 @@ struct TRITON_ELEMENTLAYOUT;
 typedef struct TRITON_DEVICE {
     D3D10DDI_HRTDEVICE              hRTDevice;
     UINT                            uIfVersion;
+    UINT                            textFilterWidth, textFilterHeight;
     PTRITON_ADAPTER                 pAdapter;
     D3DDDI_DEVICECALLBACKS          KTCallbacks;
 
@@ -216,6 +224,8 @@ typedef struct TRITON_DEVICE {
  * DRM_FORMAT_MOD_LINEAR so scanout consumers without modifier plumbing can
  * import it.  Value is ABI with the host dxvk build. */
 #define TRITON_D3D11_MISC_LINEAR_EXPORT 0x40000000u
+/* Native DXVK one-plane export, preserving the backend's DRM modifier. */
+#define TRITON_D3D11_MISC_SINGLE_PLANE_EXPORT 0x20000000u
 
 static inline void tritonSetError(PTRITON_DEVICE pD, HRESULT hr)
 {
@@ -270,6 +280,10 @@ typedef struct TRITON_RESOURCE {
      * textures and primaries; 0 otherwise).  Owned by the creator;
      * consumers leave it 0 (the runtime owns their opened allocation). */
     D3DKMT_HANDLE          hKMAllocation;
+    /* Standard-primary opens borrow the runtime allocation for Present. */
+    BOOL                   BorrowedKMAllocation;
+    /* Actual imported color format; zero when equal to the logical format. */
+    DXGI_FORMAT            HostFormat;
 
     /* TRUE when the resource is shared (creator) or opened (consumer). */
     BOOL                   IsShared;
@@ -281,6 +295,10 @@ typedef struct TRITON_RESOURCE {
     D3DKMT_HANDLE          hImportResKmt;
 
     ID3D11Resource        *pResource;
+    /* MSAA presentation: views target pResource; the KM blob exports this
+     * single-sample resolve texture. NULL for ordinary/single-sample storage. */
+    ID3D11Resource        *pPresentResource;
+    DXGI_FORMAT           PresentFormat;
 
     /* Head of the intrusive list of live views wrapping this resource. */
     TRITON_VIEWLINK       *pViewList;
@@ -350,6 +368,7 @@ typedef enum TRITON_SHADER_KIND {
 
 typedef struct TRITON_QUERY {
     ID3D11Query       *pQuery;
+    D3D10DDI_QUERY     type;
 } TRITON_QUERY, *PTRITON_QUERY;
 
 typedef struct TRITON_SHADER {
@@ -372,6 +391,12 @@ typedef struct TRITON_SHADER {
 void tritonResourceLinkView(PTRITON_RESOURCE r, TRITON_VIEWLINK *l,
                             TRITON_VIEW_KIND kind);
 void tritonViewUnlink(TRITON_VIEWLINK *l);
+HRESULT tritonResourceCopyConverted(PTRITON_DEVICE pD,
+                                     PTRITON_RESOURCE dst, UINT dstSubresource,
+                                     UINT x, UINT y, UINT z,
+                                     PTRITON_RESOURCE src, UINT srcSubresource,
+                                     const D3D11_BOX *box, DXGI_FORMAT resolveFormat);
+DXGI_FORMAT tritonResourceHostViewFormat(PTRITON_RESOURCE r, DXGI_FORMAT format);
 HRESULT tritonResourceRecreateViews(PTRITON_DEVICE pD, PTRITON_RESOURCE r);
 
 #ifdef __cplusplus

@@ -14,6 +14,7 @@
 #include "triton.h"
 #include "triton_log.h"
 #include "tritonDxbc.h"
+#include "tritonD3D10.h"
 #include "npt_workaround.h"  /* npt_host_workaround_flags() + NPT_WA_* bits */
 
 /* Declared early so tritonVsSetShader can call it. */
@@ -437,7 +438,7 @@ static const TritonDxbcSig *tritonDxbcFindSig(const TritonDxbcSig *p, UINT cnt,
  *     Stream, BufferStridesInBytes[NumStrides], RasterizedStream. */
 
 SIZE_T APIENTRY
-tritonCalcPrivateGSWithSOSize(D3D10DDI_HDEVICE hDev, const VOID *pArgs)
+tritonCalcPrivateGSWithSOSize(D3D10DDI_HDEVICE hDev, const VOID *pArgs, const VOID *pSigs)
 {
     return sizeof(TRITON_SHADER);
 }
@@ -457,12 +458,10 @@ tritonCreateGSWithSO_11(D3D10DDI_HDEVICE hDevice,
     s->cbBytecode     = 0;
     s->u.pDeviceChild = NULL;
     s->cookie         = ++pD->nextShaderCookie;
-    /* ID3D11Device1::CreateGeometryShaderWithStreamOutput mandates
-     * non-NULL bytecode; SO-alias shaders (no bytecode, decls only) have
-     * no equivalent. */
-    if (!pArgs->pShaderCode) {
-        TR_LOG("CreateGSWithSO: NULL pShaderCode (SO-alias shader unsupported)");
-        tritonSetError(pD, E_NOTIMPL);
+    if (!pArgs || (pArgs->NumEntries && !pArgs->pOutputStreamDecl) ||
+        pArgs->NumStrides > D3D11_SO_BUFFER_SLOT_COUNT ||
+        (pArgs->NumStrides && !pArgs->BufferStridesInBytes)) {
+        tritonSetError(pD, E_INVALIDARG);
         return;
     }
     if (pArgs->NumEntries > D3D11_SO_STREAM_COUNT * D3D11_SO_OUTPUT_COMPONENT_COUNT) {
@@ -471,7 +470,7 @@ tritonCreateGSWithSO_11(D3D10DDI_HDEVICE hDevice,
         return;
     }
 
-    const SIZE_T cbTokens = tritonShaderTokenBytes(pArgs->pShaderCode);
+    const SIZE_T cbTokens = pArgs->pShaderCode ? tritonShaderTokenBytes(pArgs->pShaderCode) : 0;
     TritonStageSigs sigs;
     tritonUnpackSigs(pSigsRaw, FALSE, &sigs);
 
@@ -483,12 +482,15 @@ tritonCreateGSWithSO_11(D3D10DDI_HDEVICE hDevice,
     }
 
     SIZE_T cbDxbc = 0;
-    void *pDxbc = tritonBuildDxbc(pArgs->pShaderCode, cbTokens,
+    void *pDxbc = pArgs->pShaderCode ? tritonBuildDxbc(pArgs->pShaderCode, cbTokens,
                                    sigs.pIn,  sigs.cIn,
                                    sigs.pOut, sigs.cOut,
                                    NULL, 0,
                                    tritonSigStride(pD),
-                                   &cbDxbc);
+                                   &cbDxbc) :
+        tritonD3D10BuildSOAlias(sigs.pOut ? sigs.pOut : sigs.pIn,
+                              sigs.pOut ? sigs.cOut : sigs.cIn,
+                              tritonSigStride(pD), &cbDxbc);
     if (!pDxbc) {
         TR_LOG("CreateGSWithSO: tritonBuildDxbc failed");
         tritonSetError(pD, E_OUTOFMEMORY);
@@ -558,10 +560,18 @@ tritonCreateGSWithSO_11(D3D10DDI_HDEVICE hDevice,
                 elemBase = start;
         }
 
-        if (!sig)
-            TR_LOG("CreateGSWithSO: SO entry %u (stream %u reg %u mask 0x%x) has "
-                   "no output-signature match; emitting a gap",
-                   i, src->Stream, src->RegisterIndex, src->RegisterMask);
+        /* Only the documented sentinel denotes a gap. A lost signature
+         * match must not silently shift/corrupt the application's SO data. */
+        if ((!sig && src->RegisterIndex != ~0u) || !count ||
+            (m >> start) != ((1u << count) - 1u) ||
+            src->OutputSlot >= D3D11_SO_BUFFER_SLOT_COUNT ||
+            src->Stream >= D3D11_SO_STREAM_COUNT) {
+            if (soEntries != soStack) HeapFree(GetProcessHeap(), 0, soEntries);
+            HeapFree(GetProcessHeap(), 0, s->pBytecode);
+            s->pBytecode = NULL; s->cbBytecode = 0;
+            tritonSetError(pD, E_INVALIDARG);
+            return;
+        }
 
         D3D11_SO_DECLARATION_ENTRY *dst = &soEntries[i];
         dst->Stream         = src->Stream;
@@ -681,7 +691,7 @@ void tritonResolveInputLayout(PTRITON_DEVICE pD)
         return;
     }
 
-    D3D11_INPUT_ELEMENT_DESC descs[D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENTS_COMPONENTS];
+    D3D11_INPUT_ELEMENT_DESC descs[D3D10_IA_VERTEX_INPUT_STRUCTURE_ELEMENTS_COMPONENTS];
     if (e->NumElements > (sizeof(descs) / sizeof(descs[0]))) {
         TR_LOG("ResolveInputLayout: %u elements exceeds cap", e->NumElements);
         tritonUnbindReconVs(pD);
@@ -690,9 +700,9 @@ void tritonResolveInputLayout(PTRITON_DEVICE pD)
 
     /* Collect the matched entries to synthesise a signature describing
      * exactly this element set (see below). */
-    const char *sigNames[D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENTS_COMPONENTS];
-    UINT        sigSemIdx[D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENTS_COMPONENTS];
-    UINT        sigRegs[D3D11_IA_VERTEX_INPUT_STRUCTURE_ELEMENTS_COMPONENTS];
+    const char *sigNames[D3D10_IA_VERTEX_INPUT_STRUCTURE_ELEMENTS_COMPONENTS];
+    UINT        sigSemIdx[D3D10_IA_VERTEX_INPUT_STRUCTURE_ELEMENTS_COMPONENTS];
+    UINT        sigRegs[D3D10_IA_VERTEX_INPUT_STRUCTURE_ELEMENTS_COMPONENTS];
     UINT        cMatched = 0;
 
     for (UINT i = 0; i < e->NumElements; ++i) {

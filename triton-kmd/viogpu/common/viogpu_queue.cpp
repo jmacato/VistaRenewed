@@ -29,6 +29,9 @@
 
 #include "viogpu_queue.h"
 #include "baseobj.h"
+#if defined(VIOGPU_TARGET_VISTA) && defined(VIOGPU_3D)
+#include "viogpu_trace.h"
+#endif
 #if !DBG
 #include "viogpu_queue.tmh"
 #endif
@@ -1420,6 +1423,19 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
         return (UINT)-1;
     }
 
+#if defined(VIOGPU_TARGET_VISTA) && defined(VIOGPU_3D)
+    if (VioGpuTraceRun() && buf->size >= sizeof(GPU_CTRL_HDR)) {
+        PGPU_CTRL_HDR header = (PGPU_CTRL_HDR)buf->buf;
+        /* The protocol ignores fence_id when FENCE is clear. During an
+         * opt-in capture it carries a unique correlation cookie without
+         * adding a command or requesting an additional GPU fence. */
+        if (!header->fence_id)
+            header->fence_id = InterlockedIncrement64(&m_FenceIdr);
+        VioGpuTraceQueue(TT_QUEUE_SEND, header->fence_id, header->type,
+                         header->ctx_id, header->flags);
+    }
+#endif
+
     UINT outCapacity = VioGpuSgElementCount(buf->buf, buf->size) +
                        VioGpuSgElementCount(buf->data_buf, buf->data_size);
     UINT inCapacity = VioGpuSgElementCount(buf->resp_buf, buf->resp_size);
@@ -1507,6 +1523,14 @@ PGPU_VBUFFER CtrlQueue::DequeueBuffer(_Out_ UINT *len)
         m_pBuf->AddRef(buf);
     }
     Unlock(SavedIrql);
+#if defined(VIOGPU_TARGET_VISTA) && defined(VIOGPU_3D)
+    if (buf && buf->size >= sizeof(GPU_CTRL_HDR)) {
+        PGPU_CTRL_HDR header = (PGPU_CTRL_HDR)buf->buf;
+        PGPU_CTRL_HDR response = (PGPU_CTRL_HDR)buf->resp_buf;
+        VioGpuTraceQueue(TT_QUEUE_RECV, header->fence_id, header->type,
+                         header->ctx_id, response ? response->type : 0);
+    }
+#endif
     if (buf == NULL)
     {
         *len = 0;
@@ -2167,31 +2191,19 @@ PAGED_CODE_SEG_END
 
 UINT CrsrQueue::QueueCursor(PGPU_VBUFFER buf)
 {
-    //    PAGED_CODE();
-
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-
-    UINT res = 0;
-    KIRQL SavedIrql;
-
-    VirtIOBufferDescriptor sg[1];
-    int outcnt = 0;
-    UINT ret = 0;
-
-    ASSERT(buf->size <= PAGE_SIZE);
-    if (BuildSGElement(&sg[outcnt], (PVOID)buf->buf, buf->size))
-    {
-        outcnt++;
-    }
-
-    ASSERT(outcnt);
-    Lock(&SavedIrql);
-    ret = AddBuf(&sg[0], outcnt, 0, buf, NULL, 0);
-    Kick();
-    Unlock(SavedIrql);
-
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s vbuf = %p outcnt = %d, ret = %d\n", __FUNCTION__, buf, outcnt, ret));
-    return res;
+    if (!buf) return (UINT)-1;
+    // Inline commands can straddle a page even when smaller than one page.
+    VirtIOBufferDescriptor sg[2];
+    UINT count = 0;
+    if (!VioGpuBuildSgRange(sg, 2, &count, buf->buf, buf->size))
+        return VioGpuFailQueueBuffer(this, buf);
+    KIRQL irql;
+    Lock(&irql);
+    int ret = AddBuf(sg, count, 0, buf, NULL, 0);
+    if (ret >= 0) Kick();
+    Unlock(irql);
+    if (ret < 0) return VioGpuFailQueueBuffer(this, buf);
+    return ret;
 }
 
 PGPU_VBUFFER CrsrQueue::DequeueCursor(_Out_ UINT *len)

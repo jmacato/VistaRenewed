@@ -28,6 +28,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Authoritative host image layout accompanying a DMA-BUF attachment.
+ * A zero plane_count means the resource has no image-layout metadata. */
+struct virgl_attachment_layout {
+   uint32_t width, height, fourcc, plane_count;
+   uint64_t modifier;
+   uint32_t strides[4];
+   uint32_t offsets[4];
+};
+
 struct iovec;
 struct pipe_resource;
 struct virgl_context;
@@ -118,6 +127,8 @@ struct virgl_resource {
     * bytes need this instead.
     */
    uint32_t export_format;
+   /* Preserved across proxy creation and attachment, never guessed from fd. */
+   struct virgl_attachment_layout export_layout;
 
    void *private_data;
 };

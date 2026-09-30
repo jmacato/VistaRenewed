@@ -71,7 +71,8 @@ npt_renderer_create_resource(uint32_t ctx_id,
                              enum virgl_resource_fd_type *out_fd_type,
                              int *out_res_fd,
                              uint32_t *out_map_info,
-                             uint32_t *out_export_format);
+                             uint32_t *out_export_format,
+                             struct virgl_attachment_layout *out_layout);
 
 bool
 npt_renderer_import_resource(uint32_t ctx_id,
@@ -79,6 +80,11 @@ npt_renderer_import_resource(uint32_t ctx_id,
                              enum virgl_resource_fd_type fd_type,
                              int fd,
                              uint64_t size);
+
+bool
+npt_renderer_import_resource_layout(uint32_t ctx_id, uint32_t res_id,
+    enum virgl_resource_fd_type fd_type, int fd, uint64_t size,
+    const struct virgl_attachment_layout *layout);
 
 void
 npt_renderer_destroy_resource(uint32_t ctx_id, uint32_t res_id);

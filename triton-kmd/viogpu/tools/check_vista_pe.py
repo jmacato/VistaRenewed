@@ -35,6 +35,8 @@ DEFAULT_IMPORTS = {
     "exe": {"kernel32.dll", "user32.dll", "advapi32.dll", "setupapi.dll", "msvcrt.dll"},
 }
 
+DEFAULT_IMPORTS["umd10"] = DEFAULT_IMPORTS["umd"].copy()
+
 FORBIDDEN_UMD_IMPORTS = {
     "d3d10.dll",
     "d3d10_1.dll",
@@ -157,6 +159,61 @@ class PeImage:
         return exports
 
 
+    def fixed_versions(self) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
+        """Read actual RT_VERSION fixed file/product versions, not string matches."""
+        base, directory_size = self.directories[2]
+        if not base or not directory_size:
+            return []
+
+        def entries(relative: int):
+            if relative < 0 or relative + 16 > directory_size:
+                raise PeError("invalid resource directory")
+            offset = self.rva_to_offset(base + relative)
+            named, numbered = unpack_from("<HH", self.data, offset + 12)
+            count = named + numbered
+            if count > 4096 or relative + 16 + count * 8 > directory_size:
+                raise PeError("invalid resource entry count")
+            return [unpack_from("<II", self.data, offset + 16 + i * 8) for i in range(count)]
+
+        blobs = []
+        def descend(reference: int, depth: int):
+            if depth > 4:
+                raise PeError("resource directory recursion")
+            relative = reference & 0x7fffffff
+            if reference & 0x80000000:
+                for _, child in entries(relative):
+                    descend(child, depth + 1)
+            else:
+                if relative + 16 > directory_size:
+                    raise PeError("invalid resource data entry")
+                offset = self.rva_to_offset(base + relative)
+                rva, size = unpack_from("<II", self.data, offset)
+                start = self.rva_to_offset(rva)
+                if start + size > len(self.data):
+                    raise PeError("truncated version resource")
+                blobs.append(self.data[start:start + size])
+
+        for identifier, reference in entries(0):
+            if identifier == 16:  # RT_VERSION
+                descend(reference, 0)
+        result = []
+        for blob in blobs:
+            length, value_length, value_type = unpack_from("<HHH", blob, 0)
+            key = "VS_VERSION_INFO\0".encode("utf-16le")
+            if length > len(blob) or blob[6:6 + len(key)] != key or value_type != 0:
+                raise PeError("invalid VS_VERSION_INFO")
+            offset = (6 + len(key) + 3) & ~3
+            if value_length != 52 or offset + value_length > length:
+                raise PeError("invalid VS_FIXEDFILEINFO size")
+            signature, structure, file_ms, file_ls, product_ms, product_ls = unpack_from("<6I", blob, offset)
+            if signature != 0xfeef04bd or structure != 0x10000:
+                raise PeError("invalid VS_FIXEDFILEINFO signature")
+            def version(ms, ls):
+                return (ms >> 16, ms & 0xffff, ls >> 16, ls & 0xffff)
+            result.append((version(file_ms, file_ls), version(product_ms, product_ls)))
+        return result
+
+
 def validate(image: PeImage, kind: str, arch: str, extra_imports: set[str], extra_exports: set[str]) -> list[str]:
     errors = []
     if image.machine != MACHINES[arch]:
@@ -170,13 +227,21 @@ def validate(image: PeImage, kind: str, arch: str, extra_imports: set[str], extr
     if kind == "kmd" and image.subsystem != 1:
         errors.append(f"subsystem is {image.subsystem}, expected NATIVE (1) for a KMD")
     if kind == "kmd":
+        try:
+            versions = image.fixed_versions()
+            expected_version = (7, 15, 1, 0)
+            if not versions or any(file != expected_version or product != expected_version
+                                   for file, product in versions):
+                errors.append(f"Vista KMD file/product version is {versions!r}, expected 7.15.1.0")
+        except PeError as exc:
+            errors.append(f"invalid Vista KMD version resource: {exc}")
         unsupported_hardening = image.dll_characteristics & 0x4000
         if unsupported_hardening:
             errors.append(
                 "uses post-Vista DLL characteristics: "
                 f"0x{unsupported_hardening:04x}"
             )
-    if kind in {"umd", "exe"} and image.subsystem not in {2, 3}:
+    if kind in {"umd", "umd10", "exe"} and image.subsystem not in {2, 3}:
         errors.append(f"subsystem is {image.subsystem}, expected WINDOWS_GUI (2) or WINDOWS_CUI (3) for user mode")
 
     imports = image.imports()
@@ -184,7 +249,7 @@ def validate(image: PeImage, kind: str, arch: str, extra_imports: set[str], extr
     unknown_imports = imports - allowed_imports
     if unknown_imports:
         errors.append("imports outside the Vista allow-list: " + ", ".join(sorted(unknown_imports)))
-    if kind in {"umd", "exe"}:
+    if kind in {"umd", "umd10", "exe"}:
         forbidden = {
             name
             for name in imports
@@ -198,6 +263,8 @@ def validate(image: PeImage, kind: str, arch: str, extra_imports: set[str], extr
     required_exports = set(extra_exports)
     if kind == "umd":
         required_exports.add("OpenAdapter")
+    if kind == "umd10":
+        required_exports.add("OpenAdapter10")
     missing_exports = required_exports - image.exports()
     if missing_exports:
         errors.append("missing exports: " + ", ".join(sorted(missing_exports)))

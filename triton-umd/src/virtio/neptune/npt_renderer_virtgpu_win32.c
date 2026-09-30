@@ -31,7 +31,7 @@
 #include "neptune-protocol/npt_protocol_defs.h"
 #include "npt_renderer.h"
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
 /* The generated Neptune protocol header has already supplied the public
  * D3DCOLORVALUE layout.  Keep MinGW's d3d9types.h from declaring its private
  * _D3DCOLORVALUE version before d3dumddi.h consumes the D3D9 API types. */
@@ -40,6 +40,7 @@
 #endif
 #include <d3d9types.h>
 #include <d3dumddi.h>
+#include "npt_runtime_binding.h"
 #endif
 
 // Do not use INFINITE here.  Vista has no D3DKMT CPU-event enqueue API, so
@@ -94,7 +95,7 @@ struct npt_virtgpu {
    D3DKMT_HANDLE context;
    LUID luid;
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    /* A D3D UMD already owns a runtime/KMD device.  Reopening the adapter and
     * calling D3DKMTCreateDevice from inside its CreateDevice callback
     * deadlocks Vista's graphics runtime.  Use the callbacks that belong to
@@ -117,7 +118,7 @@ struct npt_virtgpu {
    UINT patch_size;
 };
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
 struct npt_d3d9_runtime_binding {
    bool valid;
    HANDLE h_rt_adapter;
@@ -189,7 +190,7 @@ npt_d3d9_runtime_callback_mask(
 }
 
 void
-npt_renderer_bind_d3d9_runtime(HANDLE h_rt_adapter, HANDLE h_rt_device,
+npt_renderer_bind_runtime(HANDLE h_rt_adapter, HANDLE h_rt_device,
                                UINT interface_version, UINT runtime_version,
                                const D3DDDI_ADAPTERCALLBACKS *adapter_callbacks,
                                const D3DDDI_DEVICECALLBACKS *device_callbacks)
@@ -212,6 +213,17 @@ npt_renderer_bind_d3d9_runtime(HANDLE h_rt_adapter, HANDLE h_rt_device,
            npt_d3d9_runtime_callback_mask(adapter_callbacks, device_callbacks));
 }
 
+/* Preserve the existing D3D9 entry point and callback ABI. */
+void
+npt_renderer_bind_d3d9_runtime(HANDLE adapter, HANDLE device,
+    UINT interface_version, UINT runtime_version,
+    const D3DDDI_ADAPTERCALLBACKS *adapter_callbacks,
+    const D3DDDI_DEVICECALLBACKS *device_callbacks)
+{
+   npt_renderer_bind_runtime(adapter, device, interface_version, runtime_version,
+                            adapter_callbacks, device_callbacks);
+}
+
 static NTSTATUS
 virtgpu_status_from_hresult(HRESULT hr)
 {
@@ -227,7 +239,7 @@ virtgpu_has_context(const struct npt_virtgpu *gpu)
 {
    if (!gpu)
       return false;
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi)
       return gpu->h_ddi_context != NULL;
 #endif
@@ -270,7 +282,7 @@ virtgpu_render(struct npt_virtgpu *gpu, UINT cmd_offset, UINT cmd_length,
    D3DDDI_PATCHLOCATIONLIST *new_patch_list;
    UINT new_patch_size;
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi) {
       if (!gpu->device_callbacks.pfnRenderCb)
          return STATUS_INVALID_PARAMETER;
@@ -339,7 +351,8 @@ virtgpu_render(struct npt_virtgpu *gpu, UINT cmd_offset, UINT cmd_length,
 
 /* Submits a terminal private event packet on the current D3DKMT render
  * stream.  viogpu3d references the handle in DxgkDdiRender, then signals its
- * referenced PKEVENT only after all preceding host work retires. */
+ * referenced PKEVENT after preceding renderer commands retire. This does not
+ * replace a GPU fence for work enqueued asynchronously by host APIs. */
 static NTSTATUS
 virtgpu_submit_render_event_locked(struct npt_virtgpu *gpu, HANDLE event)
 {
@@ -382,7 +395,7 @@ virtgpu_drain(struct npt_virtgpu *gpu)
     * retirement. D3DKMTGetDeviceState is present on Vista and distinguishes a
     * normal completion from RESET/HUNG/STOPPED without changing the private
     * event packet ABI. */
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    /* Vista has no device-state query in D3DDDI_DEVICECALLBACKS.  Reset and
     * removal wake the private event, then the outer D3D9 runtime propagates
     * the device-lost result on the next callback. */
@@ -409,7 +422,7 @@ virtgpu_escape(struct npt_virtgpu *gpu, VIOGPU_ESCAPE *priv)
    if (!gpu || !priv)
       return STATUS_INVALID_PARAMETER;
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi) {
       if (!gpu->device_callbacks.pfnEscapeCb || !gpu->h_rt_adapter ||
           !gpu->h_rt_device)
@@ -460,7 +473,7 @@ virtgpu_query_adapter_info(struct npt_virtgpu *gpu, void *priv,
    if (!gpu || !priv || !priv_size)
       return STATUS_INVALID_PARAMETER;
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi) {
       if (!gpu->adapter_callbacks.pfnQueryAdapterInfoCb || !gpu->h_rt_adapter)
          return STATUS_INVALID_PARAMETER;
@@ -558,7 +571,7 @@ virtgpu_lock(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc, void **out_ptr)
       return STATUS_INVALID_PARAMETER;
    *out_ptr = NULL;
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi) {
       if (!gpu->device_callbacks.pfnLockCb || !gpu->h_rt_device)
          return STATUS_INVALID_PARAMETER;
@@ -603,7 +616,7 @@ virtgpu_unlock(struct npt_virtgpu *gpu, D3DKMT_HANDLE alloc)
    if (!gpu || !alloc)
       return STATUS_INVALID_PARAMETER;
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi) {
       if (!gpu->device_callbacks.pfnUnlockCb || !gpu->h_rt_device)
          return STATUS_INVALID_PARAMETER;
@@ -642,7 +655,7 @@ virtgpu_create_allocation(struct npt_virtgpu *gpu,
    if (!gpu || !res_priv || !alloc_info || !out_res_kmt)
       return STATUS_INVALID_PARAMETER;
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi) {
       if (!gpu->device_callbacks.pfnAllocateCb || !gpu->h_rt_device)
          return STATUS_INVALID_PARAMETER;
@@ -794,7 +807,7 @@ virtgpu_resource_destroy_blob(struct npt_virtgpu *gpu,
       return STATUS_UNSUCCESSFUL;
    }
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    NTSTATUS status;
    if (gpu->use_runtime_ddi) {
       if (!gpu->device_callbacks.pfnDeallocateCb || !gpu->h_rt_device)
@@ -1096,7 +1109,7 @@ npt_vgw32_destroy(struct npt_renderer *r)
    if (virtgpu_has_context(gpu) && !virtgpu_drain(gpu))
       npt_log("virtgpu: final drain failed during renderer teardown");
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi && gpu->h_ddi_context &&
        gpu->device_callbacks.pfnDestroyContextCb) {
       D3DDDICB_DESTROYCONTEXT destroy = { .hContext = gpu->h_ddi_context };
@@ -1248,7 +1261,7 @@ virtgpu_create_device(struct npt_virtgpu *gpu)
 static bool
 virtgpu_create_context(struct npt_virtgpu *gpu)
 {
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (gpu->use_runtime_ddi) {
       if (!gpu->device_callbacks.pfnCreateContextCb || !gpu->h_rt_device)
          return false;
@@ -1325,7 +1338,7 @@ npt_renderer_create_virtgpu(void)
       return NULL;
    InitializeCriticalSection(&gpu->cs);
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (g_d3d9_runtime_binding.valid) {
       gpu->use_runtime_ddi = true;
       gpu->h_rt_adapter = g_d3d9_runtime_binding.h_rt_adapter;

@@ -125,13 +125,34 @@ tritonBuildInitData(const D3D11DDIARG_CREATERESOURCE *a)
  * to an opening process, and whose KMD-side blob create binds a
  * VM-global res_id to the dmabuf.  primary marks a flippable scanout
  * primary (segment-1 residency + scanout promotion in the KMD). */
-static BOOL
+static HRESULT
 tritonRegisterSharedBlob(PTRITON_DEVICE pD, PTRITON_RESOURCE r,
                          UINT d3d11Usage, UINT d3d11Bind, UINT d3d11Cpu,
                          UINT d3d11Misc, DXGI_FORMAT hostFmt, BOOL primary)
 {
-    if (!pD->KTCallbacks.pfnAllocateCb)
-        return FALSE;
+    if (!pD->KTCallbacks.pfnAllocateCb || !pD->KTCallbacks.pfnDeallocateCb)
+        return E_FAIL;
+
+    const UINT physicalSamples = r->pPresentResource ? 1 : r->SampleDesc.Count;
+    const UINT physicalMisc = d3d11Misc &
+        ~(TRITON_D3D11_MISC_LINEAR_EXPORT | TRITON_D3D11_MISC_SINGLE_PLANE_EXPORT);
+    const UINT sharedFormat = npt_shared_texture_virgl_format(hostFmt);
+    const UINT bytesPerPixel = hostFmt == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
+    if (!r->Width || !r->Height || !sharedFormat)
+        return E_INVALIDARG;
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    if (!r->Width || !r->Height || r->Width > (primary ? 4096u : 8192u) ||
+        r->Height > (primary ? 4096u : 8192u) || !sharedFormat ||
+        r->MipLevels != 1 || r->ArraySize != 1 || physicalSamples != 1 ||
+        d3d11Usage != D3D11_USAGE_DEFAULT || d3d11Cpu ||
+        d3d11Bind != (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET) ||
+        physicalMisc != D3D11_RESOURCE_MISC_SHARED ||
+        (primary && hostFmt != DXGI_FORMAT_R8G8B8A8_UNORM &&
+         hostFmt != DXGI_FORMAT_B8G8R8A8_UNORM && hostFmt != DXGI_FORMAT_B8G8R8X8_UNORM))
+        return E_INVALIDARG;
+#else
+    (void)physicalSamples;
+#endif
 
     /* The KMD's deferred blob create / ctx attach need this device's
      * virtio context. */
@@ -144,10 +165,26 @@ tritonRegisterSharedBlob(PTRITON_DEVICE pD, PTRITON_RESOURCE r,
 
     struct triton_shared_texture_desc exp;
     memset(&exp, 0, sizeof(exp));
-    if (!tritonSharedBridgeExportBlob(r->pResource, &exp)) {
+    ID3D11Resource *exportResource = r->pPresentResource ? r->pPresentResource : r->pResource;
+    if (!tritonSharedBridgeExportBlob(exportResource, &exp)) {
         TR_LOG("shared: export failed %ux%u fmt=%d", r->Width, r->Height,
                hostFmt);
-        return FALSE;
+        return E_FAIL;
+    }
+    const ULONGLONG rowBytes = (ULONGLONG)r->Width * bytesPerPixel;
+    if (!exp.blob_id || exp.plane_count != 1 || exp.texture_layout > 2 ||
+        !exp.allocation_size || exp.allocation_size > (ULONGLONG)(SIZE_T)-1 - 4095ull ||
+        !exp.planes[0].pitch || exp.planes[0].pitch > UINT32_MAX ||
+        exp.planes[0].pitch < rowBytes ||
+        exp.planes[0].offset > UINT32_MAX || exp.planes[0].offset >= exp.allocation_size ||
+        rowBytes > exp.allocation_size - exp.planes[0].offset ||
+        (ULONGLONG)(r->Height - 1) >
+            (exp.allocation_size - exp.planes[0].offset - rowBytes) / exp.planes[0].pitch ||
+        exp.planes[1].offset || exp.planes[1].pitch ||
+        exp.planes[2].offset || exp.planes[2].pitch ||
+        exp.planes[3].offset || exp.planes[3].pitch) {
+        return tritonSharedBridgeCancelExportBlob(exportResource, exp.blob_id)
+            ? E_INVALIDARG : DXGI_ERROR_DEVICE_REMOVED;
     }
     o->blob_id         = exp.blob_id;
     o->create_ctx_id   = exp.create_ctx_id;
@@ -166,11 +203,14 @@ tritonRegisterSharedBlob(PTRITON_DEVICE pD, PTRITON_RESOURCE r,
     o->mip_levels       = r->MipLevels ? r->MipLevels : 1;
     o->array_size       = r->ArraySize ? r->ArraySize : 1;
     o->format           = (ULONG)hostFmt;
-    o->sample_count     = r->SampleDesc.Count ? r->SampleDesc.Count : 1;
+    o->sample_count     = r->pPresentResource ? 1 : (r->SampleDesc.Count ? r->SampleDesc.Count : 1);
     o->usage            = d3d11Usage;
     o->bind_flags       = d3d11Bind;
     o->cpu_access_flags = d3d11Cpu;
-    o->misc_flags       = d3d11Misc;
+    /* Export layout flags are consumed by host texture creation, not D3D
+     * resource property and must not survive in the allocation description
+     * that the kernel validates and another process imports. */
+    o->misc_flags       = physicalMisc;
 
     /* Publish the texture description for EVERY shared blob, not just scanout
      * primaries: the KMD keys its blob-info-valid flag off ScanoutInfo.width,
@@ -182,15 +222,17 @@ tritonRegisterSharedBlob(PTRITON_DEVICE pD, PTRITON_RESOURCE r,
      * o->primary and ai.Flags.Primary below. */
     o->ScanoutInfo.width      = r->Width;
     o->ScanoutInfo.height     = r->Height;
-    o->ScanoutInfo.format     = npt_shared_texture_virgl_format(hostFmt);
+    o->ScanoutInfo.format     = sharedFormat;
     o->ScanoutInfo.strides[0] = (ULONG)o->planes[0].pitch;
     o->ScanoutInfo.offsets[0] = (ULONG)o->planes[0].offset;
 
     ax.Size = (o->allocation_size + 4095ull) & ~4095ull;
-    if (!ax.Size)
-        ax.Size = (((ULONGLONG)r->Width * r->Height * 4) + 4095) & ~4095ull;
 
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    D3DDDI_ALLOCATIONINFO ai;
+#else
     D3DDDI_ALLOCATIONINFO2 ai;
+#endif
     memset(&ai, 0, sizeof(ai));
     ai.pPrivateDriverData    = &ax;
     ai.PrivateDriverDataSize = sizeof(ax);
@@ -203,19 +245,37 @@ tritonRegisterSharedBlob(PTRITON_DEVICE pD, PTRITON_RESOURCE r,
     memset(&cb, 0, sizeof(cb));
     cb.hResource        = r->hRTResource.handle;
     cb.NumAllocations   = 1;
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    cb.pAllocationInfo = &ai;
+#else
     cb.pAllocationInfo2 = &ai;
+#endif
 
     HRESULT hr = pD->KTCallbacks.pfnAllocateCb(pD->hRTDevice.handle, &cb);
     if (FAILED(hr) || !ai.hAllocation) {
         TR_LOG("shared: pfnAllocateCb failed hr=0x%08lx", hr);
-        return FALSE;
+        /* A callback may return an allocation alongside a failing status.
+         * Do not strand that allocation on a failed void CreateResource. */
+        HRESULT cleanup = S_OK;
+        if (ai.hAllocation) {
+            D3DDDICB_DEALLOCATE da = {0};
+            da.NumAllocations = 1;
+            da.HandleList = &ai.hAllocation;
+            cleanup = pD->KTCallbacks.pfnDeallocateCb(pD->hRTDevice.handle, &da);
+        }
+        /* Export owns a separate pending host fd. Releasing the texture
+         * alone cannot roll it back. Cancellation is idempotent when the
+         * KMD already consumed the pending blob before failing allocation. */
+        if (!tritonSharedBridgeCancelExportBlob(exportResource, exp.blob_id) || FAILED(cleanup))
+            return DXGI_ERROR_DEVICE_REMOVED;
+        return FAILED(hr) ? hr : E_FAIL;
     }
     r->hKMAllocation = ai.hAllocation;
     r->IsShared      = TRUE;
     TR_LOG("shared: exporter blob_id=0x%llx alloc=0x%x %ux%u primary=%d "
            "pitch=%llu", o->blob_id, ai.hAllocation, r->Width, r->Height,
            primary, o->planes[0].pitch);
-    return TRUE;
+    return S_OK;
 }
 
 void APIENTRY
@@ -242,6 +302,8 @@ tritonCreateResource(D3D10DDI_HDEVICE hDevice,
     r->SampleDesc  = pArgs->SampleDesc;
     r->ByteStride  = pArgs->ByteStride;
     r->pResource        = NULL;
+    r->pPresentResource = NULL;
+    r->PresentFormat    = DXGI_FORMAT_UNKNOWN;
     r->pViewList        = NULL;
     /* A resource is a display primary only when the runtime supplies
      * pPrimaryDesc (d3d10umddi.h: "If pPrimaryDesc absent, blt/copy style
@@ -251,6 +313,8 @@ tritonCreateResource(D3D10DDI_HDEVICE hDevice,
     r->IsPresentable    = !!(pArgs->BindFlags & D3D10_DDI_BIND_PRESENT) &&
                           pArgs->pPrimaryDesc != NULL;
     r->hKMAllocation    = 0;
+    r->BorrowedKMAllocation = FALSE;
+    r->HostFormat       = DXGI_FORMAT_UNKNOWN;
     r->IsShared         = FALSE;
     r->hImportAlloc     = 0;
     r->hImportResKmt    = 0;
@@ -281,53 +345,54 @@ tritonCreateResource(D3D10DDI_HDEVICE hDevice,
         r->Width = r->Height = r->Depth = 0;
     }
 
-    /* Display primaries are ordinary host textures with a linear dmabuf
-     * export, bound to a virtio-gpu blob the KMD scans out directly. */
-    if (r->IsPresentable && pArgs->ResourceDimension == D3D10DDIRESOURCE_TEXTURE2D) {
-        if (r->Width == 0 || r->Height == 0) {
+    /* Presentation storage must be exportable and single-sampled. Keep a
+     * genuine multisampled render resource for application views and resolve
+     * it to a separate shared texture at the presentation boundary. */
+    if ((pArgs->BindFlags & D3D10_DDI_BIND_PRESENT) &&
+        pArgs->ResourceDimension == D3D10DDIRESOURCE_TEXTURE2D) {
+        if (!r->Width || !r->Height || r->MipLevels != 1 ||
+            r->ArraySize != 1 || !r->SampleDesc.Count ||
+            pArgs->pInitialDataUP || pArgs->Usage != D3D10_DDI_USAGE_DEFAULT) {
             tritonSetError(pD, E_INVALIDARG);
             return;
         }
-        tritonPresentEnsureKernelContext(pD);
-
-        /* Shared textures reject *_SRGB and TYPELESS formats; primaries
-         * for SRGB backbuffers must be created with the UNORM base
-         * (gamma is applied through SRGB views, which dxvk permits on
-         * UNORM textures via its mutable view-format list). */
-        DXGI_FORMAT scFmt = (DXGI_FORMAT)npt_shared_texture_host_format(r->Format);
-
-        /* MISC_SHARED gives the texture exportable dedicated storage;
-         * the vendor LINEAR_EXPORT bit forces DRM_FORMAT_MOD_LINEAR so
-         * the scanout consumer (QEMU, no modifier plumbing) can import
-         * it.  SHADER_RESOURCE lets copy/composite paths sample it. */
-        D3D11_TEXTURE2D_DESC d = {};
-        d.Width            = r->Width;
-        d.Height           = r->Height;
-        d.MipLevels        = 1;
-        d.ArraySize        = 1;
-        d.Format           = scFmt;
-        d.SampleDesc.Count = 1;
-        d.Usage            = D3D11_USAGE_DEFAULT;
-        d.BindFlags        = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        d.MiscFlags        = D3D11_RESOURCE_MISC_SHARED |
-                             TRITON_D3D11_MISC_LINEAR_EXPORT;
+        if (r->IsPresentable) tritonPresentEnsureKernelContext(pD);
+        r->PresentFormat = (DXGI_FORMAT)npt_shared_texture_host_format(r->Format);
+        if (r->PresentFormat != r->Format)
+            r->HostFormat = r->PresentFormat;
+        D3D11_TEXTURE2D_DESC d = {0};
+        d.Width = r->Width;
+        d.Height = r->Height;
+        d.MipLevels = d.ArraySize = 1;
+        d.Format = r->PresentFormat;
+        d.SampleDesc = r->SampleDesc;
+        d.Usage = D3D11_USAGE_DEFAULT;
+        d.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        const UINT sharedMisc = D3D11_RESOURCE_MISC_SHARED |
+            TRITON_D3D11_MISC_SINGLE_PLANE_EXPORT;
+        if (d.SampleDesc.Count == 1) d.MiscFlags = sharedMisc;
         ID3D11Texture2D *tex = NULL;
-        HRESULT phr = ID3D11Device1_CreateTexture2D(pD->pDev1, &d, NULL, &tex);
-        if (FAILED(phr) || !tex) {
-            TR_LOG("present: primary CreateTexture2D failed hr=0x%08lx", phr);
-            tritonSetError(pD, FAILED(phr) ? phr : E_FAIL);
-            return;
-        }
-        r->pResource = (ID3D11Resource *)tex;
-
-        if (!tritonRegisterSharedBlob(pD, r, D3D11_USAGE_DEFAULT,
-                                      D3D11_BIND_RENDER_TARGET |
-                                      D3D11_BIND_SHADER_RESOURCE,
-                                      0, D3D11_RESOURCE_MISC_SHARED,
-                                      scFmt, TRUE)) {
-            ID3D11Resource_Release(r->pResource);
-            r->pResource = NULL;
-            tritonSetError(pD, E_FAIL);
+        HRESULT hr = ID3D11Device1_CreateTexture2D(pD->pDev1, &d, NULL, &tex);
+        if (SUCCEEDED(hr) && tex) {
+            r->pResource = (ID3D11Resource *)tex;
+            if (d.SampleDesc.Count > 1) {
+                d.SampleDesc.Count = 1;
+                d.SampleDesc.Quality = 0;
+                d.MiscFlags = sharedMisc;
+                tex = NULL;
+                hr = ID3D11Device1_CreateTexture2D(pD->pDev1, &d, NULL, &tex);
+                if (SUCCEEDED(hr) && tex) r->pPresentResource = (ID3D11Resource *)tex;
+                else if (SUCCEEDED(hr)) hr = E_FAIL;
+            }
+            if (SUCCEEDED(hr))
+                hr = tritonRegisterSharedBlob(pD, r, d.Usage, d.BindFlags, 0,
+                                               sharedMisc, d.Format, r->IsPresentable);
+        } else if (SUCCEEDED(hr)) hr = E_FAIL;
+        if (FAILED(hr)) {
+            if (r->pPresentResource) ID3D11Resource_Release(r->pPresentResource);
+            if (r->pResource) ID3D11Resource_Release(r->pResource);
+            r->pPresentResource = r->pResource = NULL;
+            tritonSetError(pD, hr);
         }
         return;
     }
@@ -341,16 +406,29 @@ tritonCreateResource(D3D10DDI_HDEVICE hDevice,
      * backs the texture with exportable memory, and guarantee consumers (DWM
      * samples every composited surface) can create SRVs against it. */
     if (isShared) {
-        if (usage != D3D11_USAGE_STAGING)
-            bind |= D3D11_BIND_SHADER_RESOURCE;
+#if defined(NPT_D3D10_RUNTIME_DDI)
+        if (usage != D3D11_USAGE_DEFAULT || cpuAccess || r->MipLevels != 1 ||
+            r->ArraySize != 1 || r->SampleDesc.Count != 1 || r->SampleDesc.Quality ||
+            misc != D3D11_RESOURCE_MISC_SHARED ||
+            (bind & ~(D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)) ||
+            !npt_shared_texture_virgl_format(r->Format)) {
+            tritonSetError(pD, E_INVALIDARG);
+            return;
+        }
+#endif
+        bind |= D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         /* A back buffer that reaches here only for BIND_PRESENT never asked
          * for MISC_SHARED, so its host storage would not be exportable and
          * the export below would fail; force it on as the primary path
          * above does. */
-        misc |= D3D11_RESOURCE_MISC_SHARED;
+        misc |= D3D11_RESOURCE_MISC_SHARED | TRITON_D3D11_MISC_SINGLE_PLANE_EXPORT;
     }
 
     D3D11_SUBRESOURCE_DATA *initData = tritonBuildInitData(pArgs);
+    if (pArgs->pInitialDataUP && !initData) {
+        tritonSetError(pD, E_OUTOFMEMORY);
+        return;
+    }
     HRESULT hr = E_NOTIMPL;
 
     switch (pArgs->ResourceDimension) {
@@ -452,9 +530,13 @@ tritonCreateResource(D3D10DDI_HDEVICE hDevice,
     }
 
     if (isShared) {
-        if (!tritonRegisterSharedBlob(pD, r, (UINT)usage, bind, cpuAccess,
-                                      misc, r->Format, FALSE))
-            TR_LOG("shared: registration failed; texture stays process-local");
+        hr = tritonRegisterSharedBlob(pD, r, (UINT)usage, bind, cpuAccess,
+                                       misc, r->Format, FALSE);
+        if (FAILED(hr)) {
+            ID3D11Resource_Release(r->pResource);
+            r->pResource = NULL;
+            tritonSetError(pD, hr);
+        }
     }
 }
 
@@ -479,6 +561,10 @@ tritonDestroyResource(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hResource)
         }
     }
 
+    if (r->pPresentResource) {
+        ID3D11Resource_Release(r->pPresentResource);
+        r->pPresentResource = NULL;
+    }
     if (r->pResource) {
         ID3D11Resource_Release(r->pResource);
         r->pResource = NULL;
@@ -486,13 +572,135 @@ tritonDestroyResource(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hResource)
 
     /* Exporter: the KM allocation owns the virtio blob; deallocating it
      * unrefs the host resource once every opener has closed. */
-    if (r->hKMAllocation && pD && pD->KTCallbacks.pfnDeallocateCb) {
+    if (r->hKMAllocation && !r->BorrowedKMAllocation && pD &&
+        pD->KTCallbacks.pfnDeallocateCb) {
         D3DDDICB_DEALLOCATE da;
         memset(&da, 0, sizeof(da));
         da.NumAllocations = 1;
         da.HandleList     = &r->hKMAllocation;
         pD->KTCallbacks.pfnDeallocateCb(pD->hRTDevice.handle, &da);
         r->hKMAllocation = 0;
+    }
+    if (r->BorrowedKMAllocation)
+        r->hKMAllocation = 0;
+}
+
+#if defined(NPT_D3D10_RUNTIME_DDI)
+/* Validate the private allocation description again at the importing UMD.
+ * Opening must not turn a corrupt pitch or a scanout-only interpretation into
+ * a host resource merely because a kernel handle was supplied. */
+static BOOL
+tritonValidateSharedOpen(const VIOGPU_RESOURCE_SHARED_TEXTURE_OPTIONS *so,
+                         ULONGLONG allocationSize)
+{
+    if (!so || !so->blob_id || so->primary > 1 || !so->width || !so->height ||
+        so->width > (so->primary ? 4096u : 8192u) ||
+        so->height > (so->primary ? 4096u : 8192u) ||
+        so->mip_levels != 1 || so->array_size != 1 || so->sample_count != 1 ||
+        so->usage != D3D11_USAGE_DEFAULT || so->cpu_access_flags ||
+        so->bind_flags != (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET) ||
+        so->misc_flags != D3D11_RESOURCE_MISC_SHARED ||
+        so->plane_count != 1 || so->texture_layout > 2 || !so->allocation_size ||
+        so->allocation_size > (ULONGLONG)(SIZE_T)-1 - 4095ull ||
+        ((so->allocation_size + 4095ull) & ~4095ull) != allocationSize)
+        return FALSE;
+    const UINT format = npt_shared_texture_virgl_format(so->format);
+    const UINT bytesPerPixel = so->format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
+    if (!format || (so->primary && so->format != DXGI_FORMAT_R8G8B8A8_UNORM &&
+        so->format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        so->format != DXGI_FORMAT_B8G8R8X8_UNORM))
+        return FALSE;
+    const ULONGLONG rowBytes = (ULONGLONG)so->width * bytesPerPixel;
+    const ULONGLONG pitch = so->planes[0].pitch, offset = so->planes[0].offset;
+    if (pitch < rowBytes || pitch > UINT32_MAX || offset > UINT32_MAX ||
+        offset >= so->allocation_size || rowBytes > so->allocation_size - offset ||
+        (ULONGLONG)(so->height - 1) > (so->allocation_size - offset - rowBytes) / pitch ||
+        so->ScanoutInfo.width != so->width || so->ScanoutInfo.height != so->height ||
+        so->ScanoutInfo.format != format || so->ScanoutInfo.strides[0] != pitch ||
+        so->ScanoutInfo.offsets[0] != offset)
+        return FALSE;
+    for (UINT i = 1; i < 4; ++i) {
+        if (so->planes[i].offset || so->planes[i].pitch ||
+            so->ScanoutInfo.strides[i] || so->ScanoutInfo.offsets[i])
+            return FALSE;
+    }
+    return TRUE;
+}
+#endif
+
+/* Standard Vista shadow/staging allocations are linear WDDM surfaces. They
+ * are distinct from standard primaries, whose queried host storage and borrowed
+ * allocation ownership require a separate import path. */
+static BOOL
+tritonSynthesizeStandardTexture(const VIOGPU_RESOURCE_3D_OPTIONS *options,
+                                ULONGLONG allocationSize,
+                                VIOGPU_RESOURCE_SHARED_TEXTURE_OPTIONS *out)
+{
+    if (!options || !out)
+        return FALSE;
+    memset(out, 0, sizeof(*out));
+    ULONG format;
+    switch (options->format) {
+    case 1: format = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+    case 2: format = DXGI_FORMAT_B8G8R8X8_UNORM; break;
+    case 67: case 134: format = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+    default: return FALSE;
+    }
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    if (!options->width || !options->height || options->width > 4096 ||
+        options->height > 4096 || options->target != 2 || options->depth != 1 ||
+        options->array_size != 1 || options->last_level || options->nr_samples ||
+        options->bind != ((1u << 1) | (1u << 3) | (1u << 7) | (1u << 18)) ||
+        (options->flags != (1u << 2) &&
+         options->flags != VIOGPU_RESOURCE_FLAG_STANDARD_PRIMARY))
+        return FALSE;
+    if (options->flags == VIOGPU_RESOURCE_FLAG_STANDARD_PRIMARY &&
+        options->format != 1 && options->format != 2)
+        return FALSE;
+    const ULONGLONG stride = (ULONGLONG)options->width * 4ull;
+    if (allocationSize != stride * options->height || allocationSize > (SIZE_T)-1)
+        return FALSE;
+#else
+    /* Modern metal-backed standard resources retain their established layout. */
+    const ULONGLONG stride = ((ULONGLONG)options->width * 4ull + 255ull) & ~255ull;
+    (void)allocationSize;
+#endif
+    out->width = options->width;
+    out->height = options->height;
+    out->mip_levels = out->array_size = out->sample_count = 1;
+    out->format = format;
+    out->usage = D3D11_USAGE_DEFAULT;
+    out->bind_flags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    out->plane_count = 1;
+    out->allocation_size = stride * options->height;
+    out->planes[0].pitch = stride;
+    return TRUE;
+}
+
+/* A standard primary is a KMD-created non-blob resource. Its actual export
+ * layout is supplied by the host after attachment, rather than synthesized
+ * from the guest's linear CPU shadow. */
+static BOOL
+tritonQueryStandardPrimary(PTRITON_DEVICE pD, PTRITON_RESOURCE r,
+                           UINT res_id, struct triton_shared_texture_desc *desc)
+{
+    memset(desc, 0, sizeof(*desc));
+    if (!tritonSharedBridgeQueryRes(pD->pDev1, res_id, desc) ||
+        desc->width != r->Width || desc->height != r->Height ||
+        desc->mip_levels != 1 || desc->array_size != 1 ||
+        desc->sample_count != 1 || desc->usage != D3D11_USAGE_DEFAULT ||
+        desc->cpu_access_flags || desc->plane_count != 1 ||
+        !desc->allocation_size ||
+        (desc->bind_flags & (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)) !=
+            (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET))
+        return FALSE;
+    switch (desc->format) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+        return TRUE;
+    default:
+        return FALSE;
     }
 }
 
@@ -517,7 +725,8 @@ tritonOpenResource(D3D10DDI_HDEVICE hDevice, const D3D10DDIARG_OPENRESOURCE *pAr
         return;
     }
 
-    if (pArgs->NumAllocations < 1 || !pArgs->pOpenAllocationInfo) {
+    if (!pArgs || pArgs->NumAllocations != 1 || !pArgs->pOpenAllocationInfo ||
+        !pArgs->pOpenAllocationInfo[0].hAllocation) {
         TR_STUB("OpenResource: no allocation info");
         tritonSetError(pD, E_NOTIMPL);
         return;
@@ -535,47 +744,25 @@ tritonOpenResource(D3D10DDI_HDEVICE hDevice, const D3D10DDIARG_OPENRESOURCE *pAr
         return;
     }
 
-    /* A KMD standard allocation (GDI redirection / shadow / staging
-     * surface) is a classic TYPE_3D resource; the host backs its vrend
-     * metal texture with shared memory laid out with row stride
-     * align(width*4, 256).  Synthesize the shared-texture description
-     * with the same constants so DWM can sample window content.  Keep
-     * the stride rule in lockstep with virglrenderer's
-     * VIRGL_METAL_SHM_ROW_ALIGN. */
     VIOGPU_RESOURCE_SHARED_TEXTURE_OPTIONS synth3d;
     const VIOGPU_RESOURCE_SHARED_TEXTURE_OPTIONS *so;
     if (ax->Type == VIOGPU_RESOURCE_TYPE_3D) {
-        ULONG dxgi3d;
-        switch (ax->Options3D.format) {
-        case 1:   dxgi3d = DXGI_FORMAT_B8G8R8A8_UNORM; break; /* VIRGL B8G8R8A8 */
-        case 2:   dxgi3d = DXGI_FORMAT_B8G8R8X8_UNORM; break; /* VIRGL B8G8R8X8 */
-        case 67:  dxgi3d = DXGI_FORMAT_R8G8B8A8_UNORM; break; /* VIRGL R8G8B8A8 */
-        case 134: dxgi3d = DXGI_FORMAT_R8G8B8A8_UNORM; break; /* VIRGL R8G8B8X8 */
-        default:
-            TR_LOG("OpenResource: 3D allocation with unmapped virgl format %u",
-                   (unsigned)ax->Options3D.format);
-            tritonSetError(pD, E_NOTIMPL);
+        if (!tritonSynthesizeStandardTexture(&ax->Options3D, ax->Size, &synth3d)) {
+            tritonSetError(pD, E_INVALIDARG);
             return;
         }
-        const ULONGLONG stride3d =
-            (((ULONGLONG)ax->Options3D.width * 4ull) + 255ull) & ~255ull;
-        memset(&synth3d, 0, sizeof(synth3d));
-        synth3d.width            = ax->Options3D.width;
-        synth3d.height           = ax->Options3D.height;
-        synth3d.mip_levels       = 1;
-        synth3d.array_size       = 1;
-        synth3d.format           = dxgi3d;
-        synth3d.sample_count     = 1;
-        synth3d.usage            = 0; /* D3D11_USAGE_DEFAULT */
-        synth3d.bind_flags       = 0x28; /* SHADER_RESOURCE | RENDER_TARGET */
-        synth3d.plane_count      = 1;
-        synth3d.allocation_size  = stride3d * ax->Options3D.height;
-        synth3d.planes[0].offset = 0;
-        synth3d.planes[0].pitch  = stride3d;
         so = &synth3d;
     } else {
         so = &ax->OptionsShared;
     }
+
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    if (ax->Type == VIOGPU_RESOURCE_TYPE_SHARED &&
+        !tritonValidateSharedOpen(so, ax->Size)) {
+        tritonSetError(pD, E_INVALIDARG);
+        return;
+    }
+#endif
 
     memset(r, 0, sizeof(*r));
     r->hRTResource        = hRTResource;
@@ -590,8 +777,16 @@ tritonOpenResource(D3D10DDI_HDEVICE hDevice, const D3D10DDIARG_OPENRESOURCE *pAr
     r->SampleDesc.Count   = so->sample_count ? so->sample_count : 1;
     r->SampleDesc.Quality = 0;
     r->IsShared           = TRUE;
-    /* Consumer: the runtime owns the opened KM allocation, so leave
-     * hKMAllocation 0 and DestroyResource won't try to free it. */
+    /* Ordinary shared consumers keep only their import attachment. Standard
+     * primary consumers also need the runtime allocation as a Present target,
+     * but must never deallocate that borrowed handle. */
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    if (ax->Type == VIOGPU_RESOURCE_TYPE_3D &&
+        ax->Options3D.flags == VIOGPU_RESOURCE_FLAG_STANDARD_PRIMARY) {
+        r->BorrowedKMAllocation = TRUE;
+        r->hKMAllocation = pArgs->pOpenAllocationInfo[0].hAllocation;
+    }
+#endif
 
     /* The KMD attaches opened allocations to this device's virtio
      * context; make sure it exists first. */
@@ -644,7 +839,10 @@ tritonOpenResource(D3D10DDI_HDEVICE hDevice, const D3D10DDIARG_OPENRESOURCE *pAr
     desc.cpu_access_flags = so->cpu_access_flags;
     desc.misc_flags       = so->misc_flags;
 
-    void *imported = tritonSharedBridgeOpenRes(pD->pDev1, res_id, &desc);
+    void *imported = NULL;
+    if (!r->BorrowedKMAllocation ||
+        tritonQueryStandardPrimary(pD, r, res_id, &desc))
+        imported = tritonSharedBridgeOpenRes(pD->pDev1, res_id, &desc);
     if (!imported) {
         TR_LOG("shared: open res_id=%u failed", res_id);
         if (r->hImportAlloc || r->hImportResKmt) {
@@ -662,6 +860,10 @@ tritonOpenResource(D3D10DDI_HDEVICE hDevice, const D3D10DDIARG_OPENRESOURCE *pAr
         return;
     }
     r->pResource = (ID3D11Resource *)imported;
+    if (r->BorrowedKMAllocation) {
+        r->HostFormat = (DXGI_FORMAT)desc.format;
+        r->BindFlags = desc.bind_flags;
+    }
     TR_LOG("shared: consumer opened res_id=%u %ux%u", res_id,
            r->Width, r->Height);
 }
@@ -749,6 +951,99 @@ tritonResourceIsStagingBusy(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hResour
     return TRUE;
 }
 
+/* Byte order only: SRGB uploads retain their encoded values. */
+static int
+tritonUploadColorOrder(DXGI_FORMAT format)
+{
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+        return 0;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+    case DXGI_FORMAT_B8G8R8X8_TYPELESS:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+        return 1;
+    default:
+        return -1;
+    }
+}
+
+/* Standard-primary imports can expose RGBA storage for logical BGRA. Preserve
+ * the caller's pitches and destination box, without reading row padding or
+ * applying the destination offset to the source. UpdateSubresource snapshots
+ * the transformed memory before it returns, so the caller can free it then. */
+static HRESULT
+tritonPrepareUpload(PTRITON_RESOURCE r, UINT subresource,
+                     const D3D10_DDI_BOX *box, const VOID *source,
+                     UINT rowPitch, const VOID **upload, VOID **allocation)
+{
+    *upload = source;
+    *allocation = NULL;
+    if (box && (box->left >= box->right || box->top >= box->bottom ||
+                box->front >= box->back))
+        return S_FALSE;
+    const int logicalOrder = tritonUploadColorOrder(r->Format);
+    const int hostOrder = tritonUploadColorOrder(r->HostFormat);
+    if (!r->HostFormat || r->Format == r->HostFormat)
+        return S_OK;
+    if (logicalOrder < 0 || hostOrder < 0)
+        return E_INVALIDARG;
+    if (logicalOrder == hostOrder)
+        return S_OK;
+
+    D3D11_RESOURCE_DIMENSION dimension;
+    ID3D11Resource_GetType(r->pResource, &dimension);
+    if (dimension != D3D11_RESOURCE_DIMENSION_TEXTURE2D)
+        return E_INVALIDARG;
+    D3D11_TEXTURE2D_DESC desc;
+    ID3D11Texture2D_GetDesc((ID3D11Texture2D *)r->pResource, &desc);
+    if (!desc.Width || !desc.Height || !desc.MipLevels || desc.MipLevels > 32 ||
+        !desc.ArraySize ||
+        (UINT64)subresource >= (UINT64)desc.MipLevels * desc.ArraySize ||
+        desc.SampleDesc.Count != 1 ||
+        desc.Usage == D3D11_USAGE_IMMUTABLE || desc.Usage == D3D11_USAGE_DYNAMIC ||
+        tritonUploadColorOrder(desc.Format) != hostOrder)
+        return E_INVALIDARG;
+    const UINT mip = subresource % desc.MipLevels;
+    UINT width = desc.Width >> mip, height = desc.Height >> mip;
+    if (!width) width = 1;
+    if (!height) height = 1;
+    if (box) {
+        if (box->front || box->back != 1 || box->right > width || box->bottom > height)
+            return E_INVALIDARG;
+        width = box->right - box->left;
+        height = box->bottom - box->top;
+    }
+    if (!source || width > UINT32_MAX / 4u || rowPitch < width * 4u)
+        return E_INVALIDARG;
+    const UINT rowBytes = width * 4u;
+    const UINT64 extent = (UINT64)(height - 1u) * rowPitch + rowBytes;
+    if (extent > (SIZE_T)-1)
+        return E_OUTOFMEMORY;
+    if ((uintptr_t)source > UINTPTR_MAX - (extent - 1u))
+        return E_INVALIDARG;
+    unsigned char *copy = (unsigned char *)HeapAlloc(
+        GetProcessHeap(), HEAP_ZERO_MEMORY, (SIZE_T)extent);
+    if (!copy)
+        return E_OUTOFMEMORY;
+    for (UINT row = 0; row < height; ++row) {
+        const unsigned char *in = (const unsigned char *)source + (SIZE_T)row * rowPitch;
+        unsigned char *out = copy + (SIZE_T)row * rowPitch;
+        for (UINT col = 0; col < width; ++col) {
+            out[0] = in[2]; out[1] = in[1];
+            out[2] = in[0]; out[3] = in[3];
+            in += 4; out += 4;
+        }
+    }
+    *upload = copy;
+    *allocation = copy;
+    return S_OK;
+}
+
 void APIENTRY
 tritonResourceUpdateSubresourceUP(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hResource,
                                   UINT DstSubresource, const D3D10_DDI_BOX *pDstBox,
@@ -757,9 +1052,16 @@ tritonResourceUpdateSubresourceUP(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE h
     PTRITON_DEVICE   pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
     PTRITON_RESOURCE r  = (PTRITON_RESOURCE)(hResource.pDrvPrivate);
     if (!pD || !r || !r->pResource) return;
+    const VOID *upload;
+    VOID *allocation;
+    HRESULT hr = tritonPrepareUpload(r, DstSubresource, pDstBox, pSrc,
+                                      SrcRowPitch, &upload, &allocation);
+    if (hr == S_FALSE) return;
+    if (FAILED(hr)) { tritonSetError(pD, hr); return; }
     ID3D11DeviceContext1_UpdateSubresource(
         pD->pCtx1, r->pResource, DstSubresource,
-        (const D3D11_BOX *)(pDstBox), pSrc, SrcRowPitch, SrcDepthPitch);
+        (const D3D11_BOX *)(pDstBox), upload, SrcRowPitch, SrcDepthPitch);
+    if (allocation) HeapFree(GetProcessHeap(), 0, allocation);
 }
 
 void APIENTRY
@@ -771,9 +1073,24 @@ tritonResourceUpdateSubresourceUP_11_1(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOU
     PTRITON_DEVICE   pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
     PTRITON_RESOURCE r  = (PTRITON_RESOURCE)(hResource.pDrvPrivate);
     if (!pD || !r || !r->pResource) return;
+    const VOID *upload;
+    VOID *allocation;
+    HRESULT hr = tritonPrepareUpload(r, DstSubresource, pDstBox, pSrc,
+                                      SrcRowPitch, &upload, &allocation);
+    if (hr == S_FALSE) return;
+    if (FAILED(hr)) { tritonSetError(pD, hr); return; }
     ID3D11DeviceContext1_UpdateSubresource1(
         pD->pCtx1, r->pResource, DstSubresource,
-        (const D3D11_BOX *)(pDstBox), pSrc, SrcRowPitch, SrcDepthPitch, CopyFlags);
+        (const D3D11_BOX *)(pDstBox), upload, SrcRowPitch, SrcDepthPitch, CopyFlags);
+    if (allocation) HeapFree(GetProcessHeap(), 0, allocation);
+}
+
+static BOOL
+tritonResourceNeedsColorConversion(PTRITON_RESOURCE dst, PTRITON_RESOURCE src)
+{
+    return (dst->HostFormat || src->HostFormat) &&
+        tritonResourceHostViewFormat(dst, dst->Format) !=
+            tritonResourceHostViewFormat(src, src->Format);
 }
 
 void APIENTRY
@@ -784,6 +1101,12 @@ tritonResourceCopy(D3D10DDI_HDEVICE hDevice,
     PTRITON_RESOURCE d  = (PTRITON_RESOURCE)(hDst.pDrvPrivate);
     PTRITON_RESOURCE s  = (PTRITON_RESOURCE)(hSrc.pDrvPrivate);
     if (!pD || !d || !s || !d->pResource || !s->pResource) return;
+    if (tritonResourceNeedsColorConversion(d, s)) {
+        HRESULT hr = tritonResourceCopyConverted(pD, d, 0, 0, 0, 0, s, 0,
+                                                  NULL, DXGI_FORMAT_UNKNOWN);
+        if (FAILED(hr)) tritonSetError(pD, hr);
+        return;
+    }
     ID3D11DeviceContext1_CopyResource(pD->pCtx1, d->pResource, s->pResource);
 }
 
@@ -798,6 +1121,13 @@ tritonResourceCopyRegion(D3D10DDI_HDEVICE hDevice,
     PTRITON_RESOURCE d  = (PTRITON_RESOURCE)(hDst.pDrvPrivate);
     PTRITON_RESOURCE s  = (PTRITON_RESOURCE)(hSrc.pDrvPrivate);
     if (!pD || !d || !s || !d->pResource || !s->pResource) return;
+    if (tritonResourceNeedsColorConversion(d, s)) {
+        HRESULT hr = tritonResourceCopyConverted(pD, d, DstSubresource,
+            DstX, DstY, DstZ, s, SrcSubresource,
+            (const D3D11_BOX *)pSrcBox, DXGI_FORMAT_UNKNOWN);
+        if (FAILED(hr)) tritonSetError(pD, hr);
+        return;
+    }
     ID3D11DeviceContext1_CopySubresourceRegion(
         pD->pCtx1, d->pResource, DstSubresource, DstX, DstY, DstZ,
         s->pResource, SrcSubresource, (const D3D11_BOX *)(pSrcBox));
@@ -814,6 +1144,13 @@ tritonResourceCopyRegion_11_1(D3D10DDI_HDEVICE hDevice,
     PTRITON_RESOURCE d  = (PTRITON_RESOURCE)(hDst.pDrvPrivate);
     PTRITON_RESOURCE s  = (PTRITON_RESOURCE)(hSrc.pDrvPrivate);
     if (!pD || !d || !s || !d->pResource || !s->pResource) return;
+    if (tritonResourceNeedsColorConversion(d, s)) {
+        HRESULT hr = tritonResourceCopyConverted(pD, d, DstSubresource,
+            DstX, DstY, DstZ, s, SrcSubresource,
+            (const D3D11_BOX *)pSrcBox, DXGI_FORMAT_UNKNOWN);
+        if (FAILED(hr)) tritonSetError(pD, hr);
+        return;
+    }
     ID3D11DeviceContext1_CopySubresourceRegion1(
         pD->pCtx1, d->pResource, DstSubresource, DstX, DstY, DstZ,
         s->pResource, SrcSubresource, (const D3D11_BOX *)(pSrcBox), CopyFlags);
@@ -829,6 +1166,13 @@ tritonResourceResolveSubresource(D3D10DDI_HDEVICE hDevice,
     PTRITON_RESOURCE d  = (PTRITON_RESOURCE)(hDst.pDrvPrivate);
     PTRITON_RESOURCE s  = (PTRITON_RESOURCE)(hSrc.pDrvPrivate);
     if (!pD || !d || !s || !d->pResource || !s->pResource) return;
+    if (tritonResourceNeedsColorConversion(d, s)) {
+        HRESULT hr = tritonResourceCopyConverted(pD, d, DstSubresource,
+            0, 0, 0, s, SrcSubresource, NULL, Format);
+        if (FAILED(hr)) tritonSetError(pD, hr);
+        return;
+    }
+    Format = tritonResourceHostViewFormat(s, Format);
     ID3D11DeviceContext1_ResolveSubresource(
         pD->pCtx1, d->pResource, DstSubresource, s->pResource, SrcSubresource, Format);
 }

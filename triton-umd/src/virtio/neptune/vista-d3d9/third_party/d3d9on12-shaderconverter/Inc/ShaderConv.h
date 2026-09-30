@@ -67,6 +67,7 @@ enum eConstants
 
     //--
     MAX_VS_CONSTANTSF    = 256,
+    MAX_FIXED_CONSTANTSF = 1920,
     MAX_VS_CONSTANTSI    = 16,
     MAX_VS_CONSTANTSB    = 16,
 
@@ -254,6 +255,9 @@ enum SAMPLER_SWIZZLE
     SAMPLER_SWIZZLE_RRRA = 1,   // For luminance texture formats.
     SAMPLER_SWIZZLE_RAAA = 2,   // For single channel texture formats.
     SAMPLER_SWIZZLE_RGAA = 3,   // For two channel texture formats.
+    SAMPLER_SWIZZLE_RRRG = 4,   // A8L8 stored as R8G8.
+    SAMPLER_SWIZZLE_BGRA = 5,   // A2R10G10B10 stored as R10G10B10A2.
+    SAMPLER_SWIZZLE_RGB1 = 6,   // X8B8G8R8: the unused alpha byte is ignored.
     
     // Two bits of state per sampler.
     SAMPLER_SWIZZLE_BITS = 2,
@@ -299,10 +303,26 @@ struct RasterStates
             UINT HardwareShadowMappingRequiredPS : MAX_PS_SAMPLER_REGS;
             UINT HardwareShadowMappingRequiredVS : MAX_VS_SAMPLER_REGS;
             UINT SwapRBOnOutputMask : MAX_PS_COLOROUT_REGS;
+            UINT FixedFunctionPixel : 1;
         };
     };
 
-    UINT SamplerSwizzleMask;
+    UINT SamplerSwizzleMask; // Legacy two-bit PS encodings retained for callers.
+    BYTE PSSamplerSwizzles[MAX_PS_SAMPLER_REGS] = {};
+    BYTE VSSamplerSwizzles[MAX_VS_SAMPLER_REGS] = {};
+
+    UINT GetSamplerSwizzle(UINT version, UINT stage) const
+    {
+        if ((version >> 16) == 0xfffe) {
+            return stage < MAX_VS_SAMPLER_REGS ? VSSamplerSwizzles[stage] : 0;
+        }
+        if (stage >= MAX_PS_SAMPLER_REGS) {
+            return 0;
+        }
+        return PSSamplerSwizzles[stage] ? PSSamplerSwizzles[stage] :
+            (SamplerSwizzleMask >> (stage * SAMPLER_SWIZZLE_BITS)) &
+                SAMPLER_SWIZZLE_MASK;
+    }
 
     RasterStates() :
         TCIMapping( 0 ),
@@ -316,7 +336,9 @@ struct RasterStates
                                                  sizeof( Flags1 ) +
                                                  sizeof( Flags2 ) +
                                                  sizeof( Flags3 ) +
-                                                 sizeof( SamplerSwizzleMask ), "Struct packing broke." );
+                                                 sizeof( SamplerSwizzleMask ) +
+                                                 sizeof( PSSamplerSwizzles ) +
+                                                 sizeof( VSSamplerSwizzles ), "Struct packing broke." );
     }
 };
 
@@ -862,7 +884,10 @@ typedef std::vector<ShaderConst> ShaderConsts;
 
 enum ShaderSettings
 {
-    AnythingTimes0Equals0 = 0x1
+    AnythingTimes0Equals0 = 0x1,
+    // Private generated FFP programs use a 256-entry matrix palette. Public
+    // SM1-3 constants remain limited to MAX_VS_CONSTANTSF.
+    InternalFixedFunction = 0x2
 };
 
 struct ConvertShaderArgs

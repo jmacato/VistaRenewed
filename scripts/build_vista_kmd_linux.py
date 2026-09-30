@@ -83,7 +83,7 @@ resource = out/'viogpu3d.res'
 llvm_rc = os.environ.get('LLVM_RC') or shutil.which('llvm-rc-18') or shutil.which('llvm-rc') or 'llvm-rc-18'
 rc_flags = [f'/I{wdk}/inc/api', f'/I{wdk}/inc/ddk', f'/I{wdk}/inc/crt',
             f'/I{kmd}/viogpu/viogpu3d', f'/I{kmd}/build',
-            '/DRC_INVOKED', '/DVER_OS=Vista', f'/DVER_ARCH={args.arch}',
+            '/DRC_INVOKED', '/DVIOGPU_TARGET_VISTA=1', '/DVER_OS=Vista', f'/DVER_ARCH={args.arch}',
             '/DRHEL_COPYRIGHT_YEARS=2026', '/DWINVER=0x0600', '/D_WIN32_WINNT=0x0600']
 with (out/'resource.log').open('w') as log:
     subprocess.run(['clang', '--driver-mode=cl', '/nologo', '/P', f'/Fi{rc_preprocessed}',

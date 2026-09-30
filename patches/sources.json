@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "url": "https://github.com/osy/dxvk.git",
+  "base": "404240fdacf47470b02c76d6e684639a95dc7387",
+  "bundle": "patches/dxvk-neptune.bundle",
+  "bundle_sha256": "cbe369c877971b9742c26ef0aadc14260cd8f049c1916b01c8b5c8ec2e2148bb",
+  "repositories": [
+    {
+      "path": "triton-dxvk",
+      "commit": "c6bb6d57fac2b6cae7f6adbbc521eb949849815e",
+      "patch": "patches/dxvk-vista.patch",
+      "sha256": "d23bd592ad55ef74086ae44fd5b28ca7ff17d40e3519a847beb003cab300c75e"
+    },
+    {
+      "path": "triton-dxvk/subprojects/dxbc-spirv",
+      "commit": "0e79a703db8b23004c77dbabacf25ed2d41f0bd9",
+      "patch": "patches/dxbc-spirv-vista.patch",
+      "sha256": "c4f0c5528ff055be9abc03f70349661ae21c68613991e4c326e0dd07a393cfef"
+    }
+  ]
+}

@@ -9,6 +9,7 @@
 ****************************************************************************/
 
 #include "pch.h"
+#include "ShaderValidation.h"
 #include "shaderconv.hpp"
 
 namespace ShaderConv
@@ -94,10 +95,15 @@ HRESULT ShaderConverterAPI::ConvertShader(ConvertShaderArgs& args)
 {
     HRESULT hr = S_OK;
 
-    if (args.legacyByteCode.m_pByteCode == nullptr)
-    {
-        hr = E_INVALIDARG;
-    }
+    if (!ValidateLegacyShader(static_cast<const unsigned *>(args.legacyByteCode.m_pByteCode),
+            args.legacyByteCode.m_byteCodeSize,
+            args.type == ConvertShaderArgs::SHADER_TYPE::SHADER_TYPE_VERTEX,
+            (args.shaderSettings & InternalFixedFunction) != 0))
+        return E_INVALIDARG;
+
+    if (args.type == ConvertShaderArgs::SHADER_TYPE::SHADER_TYPE_VERTEX
+            ? !args.pVsInputDecl || !args.pVsOutputDecl : !args.pPsInputDecl)
+        return E_INVALIDARG;
 
     VSOutputDecls* pPSin = args.pPsInputDecl;
     VSInputDecls* pVSin = args.pVsInputDecl;
@@ -120,7 +126,8 @@ HRESULT ShaderConverterAPI::ConvertShader(ConvertShaderArgs& args)
                 // If the shader uses dynamic indexing, we have no way of knowing how large the CB is
                 if (pDesc->HasRelAddrConsts(ShaderConv::CB_FLOAT))
                 {
-                    args.maxFloatConstsUsed = MAX_VS_CONSTANTSF * 4;
+                    args.maxFloatConstsUsed = (args.shaderSettings & InternalFixedFunction
+                        ? MAX_FIXED_CONSTANTSF : MAX_VS_CONSTANTSF) * 4;
                 }
                 else
                 {
@@ -223,6 +230,13 @@ HRESULT ShaderConverterAPI::ConvertShader(ConvertShaderArgs& args)
 HRESULT ShaderConverterAPI::CreateGeometryShader(CreateGeometryShaderArgs& args)
 {
     HRESULT hr = S_OK;
+    if (!args.m_pGsOutputDecls)
+        return E_INVALIDARG;
+    if (!m_pTranslator) {
+        hr = ShaderConv::CreateTranslator(args.m_ApiVersion, &m_pTranslator);
+        if (FAILED(hr))
+            return hr;
+    }
 
     CGeometryShaderDesc geoDesc = CGeometryShaderDesc(args.m_ApiVersion, args.m_ShaderSettings, args.m_VsOutputDecls, args.m_RasterStates);
 

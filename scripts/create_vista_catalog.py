@@ -14,19 +14,36 @@ import pefile
 from asn1crypto import cms, core
 from signify.asn1 import ctl, spc
 
+class CatalogIndirectData(core.SetOf):
+    # Keep the PE's signed SPC representation opaque to signify's schema.
+    # Canonicalizing its DEFAULT image flags drops bytes that Authenticode's
+    # page-hash reader expects to find explicitly in the PE image data.
+    _child_spec = core.Sequence
+
+
+ctl.SubjectAttribute._oid_specs = {
+    **ctl.SubjectAttribute._oid_specs,
+    'microsoft_spc_indirect_data_content': CatalogIndirectData,
+}
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--arch', choices=('x64', 'x86'), default='x64')
 parser.add_argument('package', type=Path)
 args = parser.parse_args()
 files_by_arch = {
-    'x64': ['viogpu3d-diagnostic.inf', 'viogpu3d.sys', 'neptune_d3d9.dll',
-            'neptune_d3d9_wow.dll', 'triton-vista-deploy.exe',
+    'x64': ['viogpu3d-diagnostic.inf', 'viogpu3d.sys', 'neptune_d3d9.dll', 'neptune_d3d10.dll',
+            'neptune_d3d9_wow.dll', 'neptune_d3d10_wow.dll', 'triton-vista-deploy.exe',
             'triton9_runtime_probe_x64.exe'],
-    'x86': ['viogpu3d-diagnostic.inf', 'viogpu3d.sys', 'neptune_d3d9.dll',
+    'x86': ['viogpu3d-diagnostic.inf', 'viogpu3d.sys', 'neptune_d3d9.dll', 'neptune_d3d10.dll',
             'triton-vista-deploy.exe', 'triton9_runtime_probe_x86.exe'],
 }
+for package_arch in ('x64', 'x86'):
+    for probe_arch in (('x64', 'x86') if package_arch == 'x64' else ('x86',)):
+        files_by_arch[package_arch] += [f'triton10_{probe}_probe_{probe_arch}.exe'
+                                        for probe in ('runtime', 'present')]
 files = files_by_arch[args.arch]
 subjects = []
+expected_indirect = {}
 for name in files:
     path = args.package/name
     data = path.read_bytes()
@@ -36,7 +53,7 @@ for name in files:
         if not security.VirtualAddress or security.Size < 8:
             raise SystemExit(f'Embedded signature required: {name}')
         signed = cms.ContentInfo.load(data[security.VirtualAddress+8:security.VirtualAddress+security.Size])
-        indirect = signed['content']['encap_content_info']['content'].copy()
+        indirect = signed['content']['encap_content_info']['content'].untag()
         if indirect['message_digest']['digest_algorithm']['algorithm'].native != 'sha1':
             raise SystemExit(f'SHA-1 indirect data required: {name}')
         guid = '{C689AAB8-8E78-11D0-8C47-00C04FC295EE}'
@@ -46,11 +63,13 @@ for name in files:
             'message_digest': {'digest_algorithm': {'algorithm': 'sha1'}, 'digest': hashlib.sha1(data).digest()}})
         guid = '{DE351A42-8E59-11D0-8C47-00C04FC295EE}'
     digest = indirect['message_digest']['digest'].native
+    indirect_bytes = indirect.untag().dump()
+    expected_indirect[name] = indirect_bytes
     subjects.append({'subject_identifier': (digest.hex().upper()+'\0').encode('utf-16le'),
                      'subject_attributes': [
                          {'type': 'microsoft_cat_memberinfo', 'values': [{'subguid': guid, 'certversion': 512}]},
                          {'type': 'microsoft_cat_namevalue', 'values': [{'refname': 'File', 'typeaction': 65537, 'value': name+'\0'}]},
-                         {'type': 'microsoft_spc_indirect_data_content', 'values': [indirect]}]})
+                         {'type': 'microsoft_spc_indirect_data_content', 'values': [core.Sequence.load(indirect_bytes, strict=True)]}]})
 # Match the ordered member list emitted by Microsoft catalog tools.
 subjects.sort(key=lambda subject: subject['subject_identifier'])
 cat = ctl.CertificateTrustList({
@@ -66,5 +85,21 @@ envelope = cms.ContentInfo({'content_type': 'signed_data', 'content': {
     'encap_content_info': {'content_type': 'microsoft_ctl', 'content': cat},
     'signer_infos': []}})
 output = args.package/f'viogpu3d-vista-{args.arch}.cat'
-output.write_bytes(envelope.dump())
+# Rebuild CTL/container lengths without reinterpreting signed PE image fields.
+encoded = envelope.dump(force=True)
+# Validate the serialized structure, including every nested member, before
+# replacing a catalog. Preserve signed SPC bytes exactly, not just its digest.
+decoded = cms.ContentInfo.load(encoded, strict=True)
+decoded_members = decoded['content']['encap_content_info']['content']['trusted_subjects']
+actual_indirect = {}
+for member in decoded_members:
+    attributes = {attribute['type'].native: attribute['values']
+                  for attribute in member['subject_attributes']}
+    name = attributes['microsoft_cat_namevalue'][0]['value'].native.rstrip('\0')
+    if name in actual_indirect:
+        raise SystemExit(f'Duplicate catalog member: {name}')
+    actual_indirect[name] = attributes['microsoft_spc_indirect_data_content'][0].dump()
+if actual_indirect != expected_indirect:
+    raise SystemExit('Catalog serialization changed signed indirect data or members')
+output.write_bytes(encoded)
 print(f'{output}: wrote {len(subjects)} catalog members; catalog must now be signed and verified')

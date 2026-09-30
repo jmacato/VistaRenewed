@@ -24,6 +24,7 @@
 
 #include "qemu/osdep.h"
 #include "ui/console.h"
+#include "ui/triton-trace.h"
 #include "hw/qdev-core.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-ui.h"
@@ -394,6 +395,7 @@ qemu_console_finalize(Object *obj)
 {
     QemuConsole *c = QEMU_CONSOLE(obj);
 
+    triton_trace_invalidate(c);
     /* TODO: check this code path, and unregister from consoles */
     g_clear_pointer(&c->surface, qemu_free_displaysurface);
     g_clear_pointer(&c->gl_unblock_timer, timer_free);
@@ -855,6 +857,7 @@ void dpy_gfx_replace_surface(QemuConsole *con,
     int height;
     ScanoutChange change = SCANOUT_CHANGE_NONE;
 
+    triton_trace_invalidate(con);
     if (!surface) {
         if (old_surface) {
             width = surface_width(old_surface);
@@ -1041,6 +1044,7 @@ void dpy_gl_scanout_disable(QemuConsole *con)
     DisplayChangeListener *dcl;
     ScanoutChange change = SCANOUT_CHANGE_NONE;
 
+    triton_trace_invalidate(con);
     if (con->scanout.kind != SCANOUT_SURFACE) {
         change = dpy_change_scanout_kind(&con->scanout, SCANOUT_NONE);
     }
@@ -1527,6 +1531,36 @@ void qemu_console_resize(QemuConsole *s, int width, int height)
 
     surface = qemu_create_displaysurface(width, height);
     dpy_gfx_replace_surface(s, surface);
+}
+
+bool console_gl_texture_read_sync(QemuConsole *con)
+{
+    DisplayChangeListener *dcl;
+    bool found = false;
+
+    QLIST_FOREACH(dcl, &con->ds->listeners, next) {
+        if (dcl->con != con) {
+            continue;
+        }
+        if (!dcl->ops->dpy_gl_scanout_texture ||
+            !dcl->ops->dpy_gl_texture_read_sync) {
+            return false;
+        }
+        found = true;
+    }
+    return found;
+}
+
+bool console_gl_scanout_texture_is(QemuConsole *con, uint32_t texture)
+{
+    return con->scanout.kind == SCANOUT_TEXTURE &&
+           con->scanout.texture.backing_id == texture;
+}
+
+bool graphic_hw_readback(QemuConsole *con, Error **errp)
+{
+    return !con->hw_ops->gfx_readback ||
+           con->hw_ops->gfx_readback(con->hw, con, errp);
 }
 
 DisplaySurface *qemu_console_surface(QemuConsole *console)

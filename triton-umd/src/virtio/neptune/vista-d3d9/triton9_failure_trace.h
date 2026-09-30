@@ -74,10 +74,32 @@ triton9TraceUnlock(HANDLE hDevice, const D3DDDIARG_UNLOCK *args)
 static HRESULT APIENTRY
 triton9TraceLockAsync(HANDLE hDevice, D3DDDIARG_LOCKASYNC *args)
 {
+    static LONG failures;
     HRESULT hr = triton9LockAsync(hDevice, args);
     if (FAILED(hr)) {
         triton9DiagU32("TRITON9-DDI-FAIL-PID", GetCurrentProcessId());
         triton9DiagU32("TRITON9-DDI-FAIL-LockAsync", (DWORD)hr);
+        if (args && InterlockedIncrement(&failures) <= 32) {
+            TRITON9_RESOURCE *resource = (TRITON9_RESOURCE *)args->hResource;
+            triton9DiagU32("TRITON9-ASYNC-FAIL-FLAGS", args->Flags.Value);
+            triton9DiagU32("TRITON9-ASYNC-FAIL-INDEX", args->SubResourceIndex);
+            if (triton9ResourceBelongsToDevice((TRITON9_DEVICE *)hDevice, resource)) {
+                resource = triton9ResourceSurface(resource, args->SubResourceIndex);
+                if (resource) {
+                    DWORD state = (resource->locked ? 1u : 0u) |
+                        (resource->pendingRename ? 2u : 0u) |
+                        (resource->shadow ? 4u : 0u) |
+                        (resource->notLockable ? 8u : 0u) |
+                        (resource->writeOnly ? 16u : 0u) |
+                        (resource->canDrawWhileLocked ? 32u : 0u) |
+                        (resource->isBuffer ? 64u : 0u);
+                    triton9DiagU32("TRITON9-ASYNC-FAIL-STATE", state);
+                    triton9DiagU32("TRITON9-ASYNC-FAIL-POOL", resource->pool);
+                    triton9DiagU32("TRITON9-ASYNC-FAIL-FORMAT", resource->format);
+                    triton9DiagU32("TRITON9-ASYNC-FAIL-WIDTH", resource->width);
+                }
+            }
+        }
     }
     return hr;
 }

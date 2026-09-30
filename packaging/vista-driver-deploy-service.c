@@ -27,6 +27,7 @@
 
 #include <windows.h>
 #include <winsvc.h>
+#include <setupapi.h>
 #include <wincrypt.h>
 #include <wintrust.h>
 #include <softpub.h>
@@ -778,9 +779,9 @@ static BOOL verify_package_manifest(const DeployMedia *media)
     DWORD bytes_read = 0;
     CHAR *cursor;
     BOOL have_inf = FALSE, have_cat = FALSE, have_sys = FALSE;
-    BOOL have_native = FALSE, have_service = FALSE;
+    BOOL have_native = FALSE, have_native10 = FALSE, have_service = FALSE;
 #if TRITON_DEPLOY_HAS_WOW64
-    BOOL have_wow = FALSE;
+    BOOL have_wow = FALSE, have_wow10 = FALSE;
 #endif
     BOOL have_probe = FALSE;
     BOOL ok = FALSE;
@@ -853,8 +854,10 @@ static BOOL verify_package_manifest(const DeployMedia *media)
         if (_wcsicmp(filename, CATALOG_NAME) == 0) have_cat = TRUE;
         if (_wcsicmp(filename, L"viogpu3d.sys") == 0) have_sys = TRUE;
         if (_wcsicmp(filename, L"neptune_d3d9.dll") == 0) have_native = TRUE;
+        if (_wcsicmp(filename, L"neptune_d3d10.dll") == 0) have_native10 = TRUE;
 #if TRITON_DEPLOY_HAS_WOW64
         if (_wcsicmp(filename, L"neptune_d3d9_wow.dll") == 0) have_wow = TRUE;
+        if (_wcsicmp(filename, L"neptune_d3d10_wow.dll") == 0) have_wow10 = TRUE;
 #endif
         if (_wcsicmp(filename, SERVICE_EXE_NAME) == 0) have_service = TRUE;
         if (_wcsicmp(filename, PROBE_EXE_NAME) == 0)
@@ -862,9 +865,9 @@ static BOOL verify_package_manifest(const DeployMedia *media)
         cursor = line_end;
         while (*cursor == '\r' || *cursor == '\n') ++cursor;
     }
-    ok = have_inf && have_cat && have_sys && have_native &&
+    ok = have_inf && have_cat && have_sys && have_native && have_native10 &&
 #if TRITON_DEPLOY_HAS_WOW64
-         have_wow &&
+         have_wow && have_wow10 &&
 #endif
          have_service && have_probe;
     if (!ok) {
@@ -910,16 +913,20 @@ static BOOL verify_package_signatures(const DeployMedia *media)
     static const WCHAR *const catalog_members[] = {
         L"viogpu3d.sys",
         L"neptune_d3d9.dll",
+        L"neptune_d3d10.dll",
 #if TRITON_DEPLOY_HAS_WOW64
         L"neptune_d3d9_wow.dll",
+        L"neptune_d3d10_wow.dll",
 #endif
         SERVICE_EXE_NAME
     };
     static const WCHAR *const embedded_files[] = {
         L"viogpu3d.sys",
         L"neptune_d3d9.dll",
+        L"neptune_d3d10.dll",
 #if TRITON_DEPLOY_HAS_WOW64
         L"neptune_d3d9_wow.dll",
+        L"neptune_d3d10_wow.dll",
 #endif
         SERVICE_EXE_NAME,
         PROBE_EXE_NAME
@@ -1376,13 +1383,144 @@ static BOOL schedule_staged_payload(const WCHAR *pending,
                                L"service-reboot", error_out);
 }
 
+static BOOL device_id_list_contains(const WCHAR *ids, DWORD bytes,
+                                    const WCHAR *expected)
+{
+    size_t count = bytes / sizeof(*ids), offset = 0;
+    BOOL match = FALSE;
+
+    if (bytes % sizeof(*ids) || count < 2 ||
+        ids[count - 1] || ids[count - 2])
+        return FALSE;
+    while (offset < count - 1 && ids[offset]) {
+        size_t end = offset;
+        while (end < count && ids[end]) ++end;
+        if (end == count) return FALSE;
+        if (!_wcsicmp(ids + offset, expected)) match = TRUE;
+        offset = end + 1;
+    }
+    /* Do not accept an ID hidden after the list terminator. */
+    while (offset < count)
+        if (ids[offset++]) return FALSE;
+    return match;
+}
+
+/* The safe-byte update path does not run INF installation for an existing
+ * device. Update its API slots only after every DLL has been verified. The
+ * durable SafeBoot transaction is retained on any failure and retries this
+ * idempotently before normal graphics can load a mixed generation. */
+static BOOL d3d_runtime_registration(const DeployMedia *media, BOOL update, DWORD *error_out)
+{
+    static const WCHAR native[] = L"neptune_d3d9.dll\0neptune_d3d10.dll\0";
+    static const WCHAR installed[] = L"neptune_d3d9\0neptune_d3d10\0";
+#if TRITON_DEPLOY_HAS_WOW64
+    static const WCHAR wow[] = L"neptune_d3d9_wow.dll\0neptune_d3d10_wow.dll\0";
+#endif
+    const WCHAR *names[] = { L"UserModeDriverName", L"InstalledDisplayDrivers",
+#if TRITON_DEPLOY_HAS_WOW64
+                            L"UserModeDriverNameWow",
+#endif
+    };
+    const WCHAR *values[] = { native, installed,
+#if TRITON_DEPLOY_HAS_WOW64
+                              wow,
+#endif
+    };
+    const DWORD sizes[] = { sizeof(native), sizeof(installed),
+#if TRITON_DEPLOY_HAS_WOW64
+                            sizeof(wow),
+#endif
+    };
+    HMODULE api = LoadLibraryW(L"setupapi.dll");
+    HDEVINFO devices = INVALID_HANDLE_VALUE;
+    BOOL ok = FALSE, found = FALSE;
+    DWORD index;
+    HDEVINFO (WINAPI *get)(const GUID *, PCWSTR, HWND, DWORD);
+    BOOL (WINAPI *enumerate)(HDEVINFO, DWORD, PSP_DEVINFO_DATA);
+    BOOL (WINAPI *property)(HDEVINFO, PSP_DEVINFO_DATA, DWORD, PDWORD, PBYTE, DWORD, PDWORD);
+    HKEY (WINAPI *open_key)(HDEVINFO, PSP_DEVINFO_DATA, DWORD, DWORD, DWORD, REGSAM);
+    BOOL (WINAPI *destroy)(HDEVINFO);
+    *error_out = ERROR_PROC_NOT_FOUND;
+    if (!api) { *error_out = GetLastError(); return FALSE; }
+    get = (void *)GetProcAddress(api, "SetupDiGetClassDevsW");
+    enumerate = (void *)GetProcAddress(api, "SetupDiEnumDeviceInfo");
+    property = (void *)GetProcAddress(api, "SetupDiGetDeviceRegistryPropertyW");
+    open_key = (void *)GetProcAddress(api, "SetupDiOpenDevRegKey");
+    destroy = (void *)GetProcAddress(api, "SetupDiDestroyDeviceInfoList");
+    if (!get || !enumerate || !property || !open_key || !destroy) goto done;
+    devices = get(NULL, L"PCI", NULL, DIGCF_ALLCLASSES | DIGCF_PRESENT);
+    if (devices == INVALID_HANDLE_VALUE) { *error_out = GetLastError(); goto done; }
+    for (index = 0;; ++index) {
+        SP_DEVINFO_DATA device;
+        WCHAR ids[2048] = {0}, service[128] = {0};
+        static const DWORD id_properties[] = {
+            SPDRP_HARDWAREID, SPDRP_COMPATIBLEIDS
+        };
+        DWORD type = 0, bytes = 0, v, p;
+        HKEY key;
+        BOOL match = FALSE;
+        ZeroMemory(&device, sizeof(device)); device.cbSize = sizeof(device);
+        if (!enumerate(devices, index, &device)) {
+            *error_out = GetLastError();
+            if (*error_out == ERROR_NO_MORE_ITEMS) break;
+            goto done;
+        }
+        for (p = 0; p < sizeof(id_properties)/sizeof(id_properties[0]); ++p) {
+            if (property(devices, &device, id_properties[p], &type, (PBYTE)ids,
+                         sizeof(ids), &bytes) && type == REG_MULTI_SZ &&
+                bytes <= sizeof(ids) &&
+                device_id_list_contains(ids, bytes, media->hardware_id))
+                match = TRUE;
+        }
+        if (!match) continue;
+        if (!property(devices, &device, SPDRP_SERVICE, &type, (PBYTE)service,
+                      sizeof(service) - sizeof(WCHAR), &bytes) ||
+            type != REG_SZ || _wcsicmp(service, L"viogpu3d")) {
+            *error_out = ERROR_INVALID_DATA; goto done;
+        }
+        key = open_key(devices, &device, DICS_FLAG_GLOBAL, 0, DIREG_DRV,
+                       KEY_QUERY_VALUE | (update ? KEY_SET_VALUE : 0));
+        if (key == INVALID_HANDLE_VALUE) { *error_out = GetLastError(); goto done; }
+        for (v = 0; v < sizeof(names)/sizeof(names[0]); ++v) {
+            WCHAR actual[256];
+            LONG result;
+            if (update) {
+                result = RegSetValueExW(key, names[v], 0, REG_MULTI_SZ,
+                                       (const BYTE *)values[v], sizes[v]);
+                if (result != ERROR_SUCCESS) {
+                    RegCloseKey(key); *error_out = result; goto done;
+                }
+            }
+            bytes = sizeof(actual);
+            result = RegQueryValueExW(key, names[v], NULL, &type, (BYTE *)actual, &bytes);
+            if (result != ERROR_SUCCESS || type != REG_MULTI_SZ || bytes != sizes[v] ||
+                memcmp(actual, values[v], sizes[v])) {
+                RegCloseKey(key); *error_out = ERROR_INVALID_DATA; goto done;
+            }
+        }
+        if (update && RegFlushKey(key) != ERROR_SUCCESS) {
+            RegCloseKey(key); *error_out = ERROR_WRITE_FAULT; goto done;
+        }
+        RegCloseKey(key);
+        found = TRUE;
+    }
+    ok = found;
+    *error_out = found ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+done:
+    if (devices != INVALID_HANDLE_VALUE) destroy(devices);
+    FreeLibrary(api);
+    emit_status(L"D3D_RUNTIME_REGISTRATION mode=%ls ok=%u error=%lu",
+                update ? L"update" : L"verify", ok, (unsigned long)*error_out);
+    return ok;
+}
+
 static BOOL install_driver(const DeployMedia *media, DWORD *error_out)
 {
-    WCHAR sources[4][MAX_DEPLOY_PATH], destinations[4][MAX_DEPLOY_PATH];
-    WCHAR pending[4][MAX_DEPLOY_PATH];
+    WCHAR sources[6][MAX_DEPLOY_PATH], destinations[6][MAX_DEPLOY_PATH];
+    WCHAR pending[6][MAX_DEPLOY_PATH];
     WCHAR windows[MAX_PATH], system[MAX_PATH];
-    BOOL needs_replacement[4];
-    DWORD index, graphics_payloads = TRITON_DEPLOY_HAS_WOW64 ? 3 : 2;
+    BOOL needs_replacement[6];
+    DWORD index, graphics_payloads = TRITON_DEPLOY_HAS_WOW64 ? 5 : 3;
     DWORD service_payload = graphics_payloads;
     BOOL ok = FALSE;
 
@@ -1402,15 +1540,23 @@ static BOOL install_driver(const DeployMedia *media, DWORD *error_out)
                      L"%ls\\neptune_d3d9.dll", media->package_dir) ||
         !format_wstr(destinations[1], MAX_DEPLOY_PATH,
                      L"%ls\\neptune_d3d9.dll", system) ||
-#if TRITON_DEPLOY_HAS_WOW64
         !format_wstr(sources[2], MAX_DEPLOY_PATH,
-                     L"%ls\\neptune_d3d9_wow.dll", media->package_dir) ||
+                     L"%ls\\neptune_d3d10.dll", media->package_dir) ||
         !format_wstr(destinations[2], MAX_DEPLOY_PATH,
+                     L"%ls\\neptune_d3d10.dll", system) ||
+#if TRITON_DEPLOY_HAS_WOW64
+        !format_wstr(sources[4], MAX_DEPLOY_PATH,
+                     L"%ls\\neptune_d3d10_wow.dll", media->package_dir) ||
+        !format_wstr(destinations[4], MAX_DEPLOY_PATH,
+                     L"%ls\\SysWOW64\\neptune_d3d10_wow.dll", windows) ||
+        !format_wstr(sources[3], MAX_DEPLOY_PATH,
+                     L"%ls\\neptune_d3d9_wow.dll", media->package_dir) ||
+        !format_wstr(destinations[3], MAX_DEPLOY_PATH,
                      L"%ls\\SysWOW64\\neptune_d3d9_wow.dll", windows) ||
 #endif
-        !format_wstr(sources[TRITON_DEPLOY_HAS_WOW64 ? 3 : 2], MAX_DEPLOY_PATH,
+        !format_wstr(sources[TRITON_DEPLOY_HAS_WOW64 ? 5 : 3], MAX_DEPLOY_PATH,
                      L"%ls\\%ls", media->package_dir, SERVICE_EXE_NAME) ||
-        !GetModuleFileNameW(NULL, destinations[TRITON_DEPLOY_HAS_WOW64 ? 3 : 2], MAX_DEPLOY_PATH)) {
+        !GetModuleFileNameW(NULL, destinations[TRITON_DEPLOY_HAS_WOW64 ? 5 : 3], MAX_DEPLOY_PATH)) {
         *error_out = GetLastError();
         goto done;
     }
@@ -1445,6 +1591,7 @@ static BOOL install_driver(const DeployMedia *media, DWORD *error_out)
             goto done;
         }
     }
+    if (!d3d_runtime_registration(media, TRUE, error_out)) goto done;
     ok = TRUE;
 
 done:
@@ -1493,15 +1640,25 @@ static BOOL verify_installed_payloads(const DeployMedia *media)
                      L"%ls\\neptune_d3d9.dll", system) ||
         !verify_installed_payload_pair(media, L"neptune_d3d9.dll", installed))
         return FALSE;
+    if (!format_wstr(installed, MAX_DEPLOY_PATH,
+                     L"%ls\\neptune_d3d10.dll", system) ||
+        !verify_installed_payload_pair(media, L"neptune_d3d10.dll", installed))
+        return FALSE;
 #if TRITON_DEPLOY_HAS_WOW64
     if (!format_wstr(installed, MAX_DEPLOY_PATH,
                      L"%ls\\SysWOW64\\neptune_d3d9_wow.dll", windows) ||
         !verify_installed_payload_pair(media, L"neptune_d3d9_wow.dll", installed))
         return FALSE;
+    if (!format_wstr(installed, MAX_DEPLOY_PATH,
+                     L"%ls\\SysWOW64\\neptune_d3d10_wow.dll", windows) ||
+        !verify_installed_payload_pair(media, L"neptune_d3d10_wow.dll", installed))
+        return FALSE;
 #endif
     if (!GetModuleFileNameW(NULL, installed, MAX_DEPLOY_PATH) ||
         !verify_installed_payload_pair(media, SERVICE_EXE_NAME, installed))
         return FALSE;
+    DWORD registration_error;
+    if (!d3d_runtime_registration(media, FALSE, &registration_error)) return FALSE;
     emit_status(L"POST_REBOOT_PAYLOAD_OK id=%ls", media->id);
     return TRUE;
 }
@@ -2074,9 +2231,10 @@ static BOOL bind_initial_gpu(const DeployMedia *media)
         emit_status(L"INF_CATALOG_VERIFY ok=%lu error=%lu", (unsigned long)verified,
                     (unsigned long)GetLastError());
         {
-            const WCHAR *members[] = {L"viogpu3d.sys", L"neptune_d3d9.dll",
+            const WCHAR *members[] = {L"viogpu3d.sys", L"neptune_d3d9.dll", L"neptune_d3d10.dll",
 #if TRITON_DEPLOY_HAS_WOW64
                 L"neptune_d3d9_wow.dll",
+        L"neptune_d3d10_wow.dll",
 #endif
                 SERVICE_EXE_NAME, PROBE_EXE_NAME};
             WCHAR member[MAX_DEPLOY_PATH];
@@ -2513,6 +2671,27 @@ static void WINAPI service_main(DWORD argc, LPWSTR *argv)
     CloseHandle(g_stop_event);
 }
 
+static BOOL service_destination_writable(const WCHAR *destination, BOOL allow_missing)
+{
+    DWORD attributes = GetFileAttributesW(destination);
+
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+        DWORD error = GetLastError();
+        return allow_missing && (error == ERROR_FILE_NOT_FOUND ||
+                                 error == ERROR_PATH_NOT_FOUND);
+    }
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
+        SetLastError(ERROR_ACCESS_DENIED);
+        return FALSE;
+    }
+    if (attributes & FILE_ATTRIBUTE_READONLY) {
+        attributes &= ~FILE_ATTRIBUTE_READONLY;
+        if (!SetFileAttributesW(destination, attributes ? attributes : FILE_ATTRIBUTE_NORMAL))
+            return FALSE;
+    }
+    return TRUE;
+}
+
 static BOOL install_self(void)
 {
     WCHAR current[MAX_DEPLOY_PATH], destination[MAX_DEPLOY_PATH];
@@ -2530,11 +2709,13 @@ static BOOL install_self(void)
         !format_wstr(destination, MAX_DEPLOY_PATH, L"%ls\\%ls", directory,
                      SERVICE_EXE_NAME)) return FALSE;
     CreateDirectoryW(directory, NULL);
-    if (_wcsicmp(current, destination) != 0 &&
-        !files_equal(current, destination) &&
-        !CopyFileW(current, destination, FALSE)) {
-        return FALSE;
+    if (_wcsicmp(current, destination) != 0 && !files_equal(current, destination)) {
+        /* Only the fixed service path constructed above is made writable.
+         * CopyFile also carries the optical source's read-only attribute. */
+        if (!service_destination_writable(destination, TRUE) ||
+            !CopyFileW(current, destination, FALSE)) return FALSE;
     }
+    if (!service_destination_writable(destination, FALSE)) return FALSE;
     if (!format_wstr(service_command, MAX_DEPLOY_PATH + 32, L"\"%ls\" --service",
                      destination)) return FALSE;
     manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT | SC_MANAGER_CREATE_SERVICE);

@@ -76,12 +76,6 @@ struct npt_ring {
 
    mtx_t mutex;
 
-   /* Rate-limit idle notifications: only notify if
-    * NPT_RING_IDLE_TIMEOUT_NS elapsed since the last one, to avoid
-    * EXECBUFFER round-trips when the host is briefly idle. */
-   int64_t last_notify;
-   int64_t next_notify;
-
    /* Bump allocator for per-call reply windows.  Each sync submission
     * carves a region and SET_REPLY_STREAMs it just before the command,
     * so concurrent sync calls don't fight over a fixed slot. */

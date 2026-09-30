@@ -3,18 +3,18 @@
  * SPDX-License-Identifier: MIT
  *
  * ID3D11DeviceContext{,1..4}: Map/Unmap shadow staging,
- * UpdateSubresource (registry-skipped because pSrcData is unsized),
- * and Begin/End/GetData with shared-memory query feedback.
+ * UpdateSubresource (registry-skipped because pSrcData is unsized).
  */
 
 #include "npt_com.h"
-#include "npt_overrides_d3d11_feedback.h"
 #include "npt_device.h"
 #include "npt_dispatch.h"
 #include "npt_env.h"
 #include "npt_overrides.h"
 #include "npt_resource.h"
 #include "npt_ring.h"
+
+#include <stdlib.h>
 
 #include "neptune-protocol/npt_protocol_client_id3d11devicecontext.h"
 
@@ -127,23 +127,32 @@ ctx_Map_texture(void *self, struct npt_d3d11_texture *t, UINT Subresource,
                 D3D11_MAP MapType, UINT MapFlags,
                 D3D11_MAPPED_SUBRESOURCE *pMappedResource)
 {
+   memset(pMappedResource, 0, sizeof(*pMappedResource));
+   if (npt_d3d11_texture_get_is_mapped(t))
+      return NPT_E_FAIL;
+   if (!npt_d3d11_texture_ensure_desc(t, D3D11_RESOURCE_DIMENSION_UNKNOWN, false))
+      return NPT_E_FAIL;
    if (!npt_d3d11_texture_is_mappable(t))
       return NPT_E_NOTIMPL;
    if (!npt_d3d11_texture_ensure_map_shmem(t))
       return NPT_E_OUTOFMEMORY;
 
+   uint32_t mip_h = 0, mip_d = 0;
+   npt_d3d11_texture_get_mip_dimensions(t, Subresource, &mip_h, &mip_d);
    const uint32_t per_slot    = npt_d3d11_texture_get_slot_size(t);
-   const uint32_t shmem_total = npt_d3d11_texture_get_shmem_size(t);
    const uint32_t cached_rp   = npt_d3d11_texture_get_cached_row_pitch(t);
    const uint32_t cached_dp   = npt_d3d11_texture_get_cached_depth_pitch(t);
-   const bool can_async = (cached_rp != 0) &&
+   /* A volume map must obtain the current backend slice pitch. */
+   const bool can_async = (mip_d == 1) && (cached_rp != 0) &&
+      npt_d3d11_texture_get_last_map_subresource(t) == Subresource &&
       !NPT_PERF(NO_DYNAMIC_MAP_FAST_PATH) &&
       (MapType == D3D11_MAP_WRITE_DISCARD ||
        MapType == D3D11_MAP_WRITE_NO_OVERWRITE);
 
    if (can_async) {
       const uint32_t byte_size =
-         npt_d3d11_texture_get_subresource_byte_size(t, Subresource, cached_rp);
+         npt_d3d11_texture_get_subresource_map_byte_size(t, Subresource,
+                                                        cached_rp, cached_dp);
       if (byte_size && byte_size <= per_slot) {
          if (MapType == D3D11_MAP_WRITE_DISCARD)
             npt_d3d11_texture_rotate_slot(t);
@@ -166,46 +175,47 @@ ctx_Map_texture(void *self, struct npt_d3d11_texture *t, UINT Subresource,
    uint64_t resource_id = ((struct npt_com_base *)t)->base.id;
    npt_d3d11_texture_set_current_slot(t, 0);
 
-   uint32_t mip_h = 0, mip_d = 0;
-   npt_d3d11_texture_get_mip_dimensions(t, Subresource, &mip_h, &mip_d);
+   /* MAP_RESOURCE copies rows of storage, not rows of texels. */
+   mip_h = npt_dxgi_format_subresource_rows(
+      npt_d3d11_texture_get_format(t), mip_h);
 
-   uint32_t row_pitch = 0, depth_pitch = 0;
-   HRESULT hr = npt_dispatch_resource_map(
-      npt_com_self_ring(self), context_id, resource_id, Subresource,
-      npt_d3d11_map_to_access_flags(MapType), MapFlags,
-      npt_d3d11_texture_get_map_shmem_res_id(t),
-      /*byte_size=*/per_slot,
-      mip_h, mip_d,
-      /*shmem_offset=*/npt_d3d11_texture_slot_offset(t, 0),
-      &row_pitch, &depth_pitch);
-   if (NPT_FAILED(hr))
-      return hr;
+   /* One retry accommodates backend row/slice alignment absent from the
+    * descriptor. An abandoned successful Map must never upload stale SHM. */
+   for (unsigned attempt = 0; attempt < 2; attempt++) {
+      const uint32_t slot_size = npt_d3d11_texture_get_slot_size(t);
+      uint32_t row_pitch = 0, depth_pitch = 0;
+      HRESULT hr = npt_dispatch_resource_map(
+         npt_com_self_ring(self), context_id, resource_id, Subresource,
+         npt_d3d11_map_to_access_flags(MapType), MapFlags,
+         npt_d3d11_texture_get_map_shmem_res_id(t), slot_size,
+         mip_h, mip_d, npt_d3d11_texture_slot_offset(t, 0),
+         &row_pitch, &depth_pitch);
+      if (NPT_FAILED(hr))
+         return hr;
 
-   /* Bound Unmap memcpy at host_row_pitch * h * d.  Refuse if the
-    * host's RowPitch implies a region larger than per_slot, or one
-    * that cannot be sized at all -- silent overrun is worse than a
-    * clean failure. */
-   const uint32_t byte_size =
-      npt_d3d11_texture_get_subresource_byte_size(t, Subresource, row_pitch);
-   if (!byte_size || byte_size > per_slot) {
-      npt_log("ctx_Map_texture: row_pitch=%u implies %u-byte mapped "
-              "region, exceeds per-slot %u (shmem %u) -- refusing",
-              row_pitch, byte_size, per_slot, shmem_total);
-      memset(pMappedResource, 0, sizeof(*pMappedResource));
-      return NPT_E_FAIL;
+      const uint32_t byte_size =
+         npt_d3d11_texture_get_subresource_map_byte_size(t, Subresource,
+                                                         row_pitch, depth_pitch);
+      if (!byte_size || byte_size > slot_size) {
+         const HRESULT aborted = npt_dispatch_resource_abort(
+            npt_com_self_ring(self), context_id, resource_id, Subresource);
+         if (NPT_FAILED(aborted) || !byte_size || attempt != 0)
+            return NPT_E_FAIL;
+         if (!npt_d3d11_texture_grow_map_shmem(t, byte_size))
+            return NPT_E_OUTOFMEMORY;
+         continue;
+      }
+
+      npt_d3d11_texture_set_cached_pitches(t, row_pitch, depth_pitch);
+      pMappedResource->pData = npt_d3d11_texture_shmem_ptr(t);
+      pMappedResource->RowPitch = row_pitch;
+      pMappedResource->DepthPitch = depth_pitch;
+      /* access_flags=0 => Unmap reuses sync-MAP map_state. */
+      npt_d3d11_texture_set_mapped_state(t, Subresource, row_pitch,
+                                         byte_size, /*access_flags=*/0);
+      return NPT_S_OK;
    }
-
-   /* RowPitch is stable per (resource, subresource); pitch drift
-    * would trip the byte_size > per_slot guard above. */
-   npt_d3d11_texture_set_cached_pitches(t, row_pitch, depth_pitch);
-
-   pMappedResource->pData = npt_d3d11_texture_shmem_ptr(t);
-   pMappedResource->RowPitch = row_pitch;
-   pMappedResource->DepthPitch = depth_pitch;
-   /* access_flags=0 => Unmap reuses sync-MAP map_state. */
-   npt_d3d11_texture_set_mapped_state(t, Subresource, row_pitch,
-                                      byte_size, /*access_flags=*/0);
-   return NPT_S_OK;
+   return NPT_E_FAIL;
 }
 
 static void
@@ -307,14 +317,151 @@ ctx_Unmap_override(void *self, ID3D11Resource *pResource, UINT Subresource)
       ctx_Unmap_texture(self, t);
 }
 
-/*
- * The generator skips UpdateSubresource (pSrcData is unsized);
- * route through RESOURCE_UPDATE.  Box sizing per resource:
- *   buffer:    pDstBox ? (right-left) : ByteWidth
- *   tex1d:     pDstBox ? (right-left)*bpp : width*bpp
- *   tex2d:     SrcRowPitch * rows_of_memory(height_box)
- *   tex3d:     SrcDepthPitch * depth_box
- */
+/* Keep every command below the host's 64 MiB update cap. Full resources
+ * may exceed it: split at complete memory rows (BC block rows) and slices.
+ * Unlike caller pitches, packed payload sizes never include source padding. */
+#define NPT_RESOURCE_UPDATE_CHUNK_BYTES (4u << 20)
+
+static uint32_t
+ctx_update_min(uint32_t a, uint32_t b)
+{
+   return a < b ? a : b;
+}
+
+static void
+ctx_update_failed(struct npt_device *dev, struct npt_ring *ring)
+{
+   npt_log("UpdateSubresource: upload failed; marking device transport failed");
+   if (ring)
+      atomic_store_explicit(&ring->failed, true, memory_order_release);
+   if (dev->ring)
+      atomic_store_explicit(&dev->ring->failed, true, memory_order_release);
+}
+
+static bool
+ctx_update_buffer(struct npt_ring *ring, uint64_t resource_id,
+                   struct npt_d3d11_buffer *buffer, UINT subresource,
+                   const D3D11_BOX *box, const void *source)
+{
+   const uint32_t width = npt_d3d11_buffer_get_byte_width(buffer);
+   D3D11_BOX region = {0, 0, 0, width, 1, 1};
+   if (subresource || !width)
+      return false;
+   if (box) {
+      if (box->left >= box->right || box->right > width || box->top ||
+          box->front || box->bottom != 1 || box->back != 1)
+         return false;
+      region = *box;
+   }
+   const uint32_t bytes = region.right - region.left;
+   if ((uintptr_t)source > UINTPTR_MAX - (bytes - 1u))
+      return false;
+   /* Base UpdateSubresource requires a NULL box for constant buffers,
+    * including large D3D11.1 CBs. Preserve whole-buffer uploads within the
+    * host command cap, and never convert a larger CB into invalid boxes. */
+   const bool constant_buffer =
+      npt_d3d11_buffer_get_bind_flags(buffer) & D3D11_BIND_CONSTANT_BUFFER;
+   if (!box && bytes <= (64u << 20))
+      return npt_dispatch_resource_update(ring, resource_id, 0, 0, 0,
+                                          NULL, source, bytes, bytes);
+   if (constant_buffer)
+      return false;
+   for (uint32_t offset = 0; offset < bytes;) {
+      const uint32_t count = ctx_update_min(bytes - offset, NPT_RESOURCE_UPDATE_CHUNK_BYTES);
+      D3D11_BOX chunk = region;
+      chunk.left += offset;
+      chunk.right = chunk.left + count;
+      if (!npt_dispatch_resource_update(ring, resource_id, 0, 0, 0,
+             !box && count == bytes ? NULL : &chunk,
+             (const uint8_t *)source + offset, count, count))
+         return false;
+      offset += count;
+   }
+   return true;
+}
+
+static bool
+ctx_update_texture(struct npt_ring *ring, uint64_t resource_id,
+                    struct npt_d3d11_texture *texture, UINT subresource,
+                    const D3D11_BOX *box, const void *source,
+                    UINT source_row_pitch, UINT source_depth_pitch)
+{
+   D3D11_BOX region;
+   uint32_t row_bytes, rows, block_height;
+   bool planar;
+   if (!npt_d3d11_texture_ensure_desc(texture,
+                                     D3D11_RESOURCE_DIMENSION_UNKNOWN, false))
+      return false;
+   if (!npt_d3d11_texture_get_update_layout(texture, subresource, box,
+          &region, &row_bytes, &rows, &block_height, &planar))
+      return false;
+   const uint32_t depth = region.back - region.front;
+   /* A single row/slice has no following stride. In particular UINT_MAX
+    * RowPitch is legal for a one-row upload whose source has just one texel. */
+   const uint64_t row_pitch = rows > 1 ? source_row_pitch : row_bytes;
+   if (row_pitch < row_bytes)
+      return false;
+   const uint64_t slice_extent = (uint64_t)(rows - 1u) * row_pitch + row_bytes;
+   const uint64_t depth_pitch = depth > 1 ? source_depth_pitch : slice_extent;
+   if (depth_pitch < slice_extent ||
+       (uint64_t)(depth - 1u) > (UINT64_MAX - slice_extent) / depth_pitch)
+      return false;
+   const uint64_t extent = (uint64_t)(depth - 1u) * depth_pitch + slice_extent;
+   if (extent > SIZE_MAX || (uintptr_t)source > UINTPTR_MAX - (extent - 1u))
+      return false;
+
+   if (planar) {
+      /* Preserve the existing full-plane modern layout. Plane-aware splitting
+       * needs a different wire operation; it is not advertised by D3D9/10. */
+      const uint64_t bytes = row_pitch * rows;
+      if (bytes > (64u << 20) || bytes > SIZE_MAX ||
+          (uintptr_t)source > UINTPTR_MAX - (bytes - 1u))
+         return false;
+      return npt_dispatch_resource_update(ring, resource_id, subresource,
+               source_row_pitch, source_depth_pitch, box, source,
+               (uint32_t)bytes, (uint32_t)bytes);
+   }
+   if (row_bytes > NPT_RESOURCE_UPDATE_CHUNK_BYTES)
+      return false; /* exceeds every legal D3D9/10/11 texture row */
+   const uint32_t max_rows = ctx_update_min(rows, NPT_RESOURCE_UPDATE_CHUNK_BYTES / row_bytes);
+   const uint32_t capacity = max_rows * row_bytes;
+   uint8_t *packed = NULL;
+   if (row_pitch != row_bytes && rows > 1) {
+      packed = malloc(capacity);
+      if (!packed)
+         return false;
+   }
+   bool ok = true;
+   for (uint32_t z = 0; ok && z < depth; ++z) {
+      for (uint32_t y = 0; y < rows;) {
+         const uint32_t count = ctx_update_min(rows - y, max_rows);
+         const uint32_t bytes = count * row_bytes;
+         const uint8_t *data = (const uint8_t *)source +
+            (size_t)z * depth_pitch + (size_t)y * row_pitch;
+         if (packed) {
+            for (uint32_t row = 0; row < count; ++row)
+               memcpy(packed + (size_t)row * row_bytes,
+                      data + (size_t)row * row_pitch, row_bytes);
+            data = packed;
+         }
+         D3D11_BOX chunk = region;
+         chunk.top += y * block_height;
+         chunk.bottom = ctx_update_min(region.bottom, chunk.top + count * block_height);
+         chunk.front += z;
+         chunk.back = chunk.front + 1u;
+         const bool whole = !box && depth == 1 && count == rows;
+         if (!npt_dispatch_resource_update(ring, resource_id, subresource,
+                row_bytes, bytes, whole ? NULL : &chunk, data, bytes, bytes)) {
+            ok = false;
+            break;
+         }
+         y += count;
+      }
+   }
+   free(packed);
+   return ok;
+}
+
 static void NPT_STDMETHODCALLTYPE
 ctx_UpdateSubresource_override(void *self, ID3D11Resource *pDstResource,
                                UINT DstSubresource, const D3D11_BOX *pDstBox,
@@ -323,176 +470,24 @@ ctx_UpdateSubresource_override(void *self, ID3D11Resource *pDstResource,
 {
    if (!pDstResource || !pSrcData)
       return;
-
-   /* MSDN: an empty box -- top >= bottom, left >= right, or
-    * front >= back -- is a no-op.  Return before the unsigned box
-    * extents below wrap. */
    if (pDstBox && (pDstBox->left >= pDstBox->right ||
                    pDstBox->top >= pDstBox->bottom ||
                    pDstBox->front >= pDstBox->back))
       return;
-
    struct npt_device *dev = npt_com_self_device(self);
    if (!dev)
       return;
-
-   uint64_t resource_id = ((struct npt_com_base *)pDstResource)->base.id;
-   uint64_t byte_size = 0;   /* ring reservation; what the host may consume */
-   uint64_t copy_size = 0;   /* what D3D guarantees readable at pSrcData */
-
-   struct npt_d3d11_buffer *b = npt_d3d11_buffer_cast(pDstResource);
-   if (b) {
-      byte_size = pDstBox ? (pDstBox->right - pDstBox->left)
-                          : npt_d3d11_buffer_get_byte_width(b);
-      copy_size = byte_size;
-   } else {
-      struct npt_d3d11_texture *t = npt_d3d11_texture_cast(pDstResource);
-      if (t) {
-         if (pDstBox) {
-            /* Dimension from aux: depth>1 => 3D, height>1 => 2D, else 1D. */
-            uint32_t tex_h = 0, tex_d = 0;
-            npt_d3d11_texture_get_mip_dimensions(t, DstSubresource,
-                                                 &tex_h, &tex_d);
-            const uint32_t box_w = pDstBox->right  - pDstBox->left;
-            const uint32_t box_h = pDstBox->bottom - pDstBox->top;
-            const uint32_t box_d = pDstBox->back   - pDstBox->front;
-            /* Box bounds are texels; SrcRowPitch spans a row of memory,
-             * which under block compression is four texel rows.  The
-             * reservation charges the full pitch for every row, but the
-             * copy stops at the D3D-guaranteed source extent,
-             *   (rows-1)*RowPitch + RowSizeInBytes
-             * per slice (dwm's section bitmaps end exactly at a page
-             * edge -> AV in the ring copy past that extent). */
-            const DXGI_FORMAT fmt = npt_d3d11_texture_get_format(t);
-            uint32_t rows = npt_dxgi_format_block_rows(fmt, box_h);
-            bool planar = false;
-            if (pDstBox->top == 0 && box_h == tex_h) {
-               /* A full-height box covers the chroma plane(s) that the
-                * planar formats store after the luma rows; a partial
-                * box has no documented planar footprint and stays
-                * luma-only. */
-               const uint32_t sub_rows =
-                  npt_dxgi_format_subresource_rows(fmt, box_h);
-               planar = sub_rows != rows;
-               rows = sub_rows;
-            }
-            const uint32_t last_row = npt_dxgi_format_row_bytes(fmt, box_w);
-            /* MSDN sizes planar transfers by the full pitch of every
-             * row, chroma included; no final-row discount there. */
-            const bool tight = last_row && !planar;
-            if (tex_d > 1) {
-               const uint64_t strides =
-                  (uint64_t)SrcDepthPitch * (box_d - 1u);
-               byte_size = strides + (uint64_t)SrcRowPitch * rows;
-               copy_size = tight
-                  ? strides + (uint64_t)SrcRowPitch * (rows - 1u) + last_row
-                  : byte_size;
-            } else if (tex_h > 1) {
-               byte_size = (uint64_t)SrcRowPitch * rows;
-               copy_size = tight
-                  ? (uint64_t)SrcRowPitch * (rows - 1u) + last_row
-                  : byte_size;
-            } else {
-               /* 1D: SrcRowPitch is meaningless; one tight row. */
-               byte_size = last_row;
-               copy_size = last_row;
-            }
-            if (copy_size > byte_size)
-               copy_size = byte_size;
-         } else {
-            uint32_t copy32 = 0;
-            byte_size = npt_d3d11_texture_get_subresource_update_sizes(
-               t, DstSubresource, SrcRowPitch, SrcDepthPitch, &copy32);
-            copy_size = copy32;
-         }
-      }
-   }
-
-   if (!byte_size || !copy_size || byte_size > 0xffffffffu) {
-      npt_log("ctx_UpdateSubresource: unsupported resource type "
-              "(resource=%p sub=%u row=%u depth=%u) -- dropping update",
-              pDstResource, DstSubresource, SrcRowPitch, SrcDepthPitch);
-      return;
-   }
-
-   (void)npt_dispatch_resource_update(npt_device_method_ring(dev), resource_id,
-                                      DstSubresource, SrcRowPitch,
-                                      SrcDepthPitch, pDstBox,
-                                      pSrcData, (uint32_t)byte_size,
-                                      (uint32_t)copy_size);
-}
-
-/*
- * Query feedback: each query has a 128-B shmem slot.  Begin clears
- * the flag and bumps a version; the host's poll writes [result,
- * version, flag=1] when GetData is ready; guest GetData reads
- * locally.
- */
-
-static struct npt_query_feedback_slot *
-ctx_query_slot(struct npt_d3d11_query_aux *aux)
-{
-   if (!aux || !aux->base.fb_shmem)
-      return NULL;
-   return (struct npt_query_feedback_slot *)
-      ((uint8_t *)aux->base.fb_shmem->mmap_ptr + aux->base.fb_offset);
-}
-
-static void NPT_STDMETHODCALLTYPE
-ctx_Begin_override(void *self, ID3D11Asynchronous *pAsync)
-{
-   struct npt_d3d11_query_aux *aux = npt_d3d11_query_aux_cast(pAsync);
-   if (aux && aux->base.registered) {
-      /* Bump version + clear flag BEFORE the wire Begin so a racing
-       * guest GetData sees flag=0 or a version mismatch (S_FALSE).
-       * "New version + old result" is impossible: host writes flag=1
-       * only after the result with release ordering. */
-      uint32_t v = atomic_fetch_add_explicit(&aux->local_version, 1,
-                                             memory_order_relaxed) + 1;
-      struct npt_query_feedback_slot *slot = ctx_query_slot(aux);
-      if (slot) {
-         atomic_store_explicit(&slot->state, ((uint64_t)v) << 32,
-                               memory_order_release);
-      }
-   }
-   npt_id3d11devicecontext_default_Begin(self, pAsync);
-}
-
-static HRESULT NPT_STDMETHODCALLTYPE
-ctx_GetData_override(void *self, ID3D11Asynchronous *pAsync, void *pData,
-                     UINT DataSize, UINT GetDataFlags)
-{
-   struct npt_d3d11_query_aux *aux = npt_d3d11_query_aux_cast(pAsync);
-   struct npt_query_feedback_slot *slot = ctx_query_slot(aux);
-   if (!slot || !aux->base.registered) {
-      /* Counter, OOM at Create, or QI-routed wrapper. */
-      return npt_id3d11devicecontext_default_GetData(self, pAsync, pData,
-                                                     DataSize, GetDataFlags);
-   }
-
-   const uint64_t s = atomic_load_explicit(&slot->state,
-                                           memory_order_acquire);
-   const uint32_t flag = (uint32_t)(s & 0xFFFFFFFFu);
-   const uint32_t version = (uint32_t)(s >> 32);
-   const uint32_t expected =
-      atomic_load_explicit(&aux->local_version, memory_order_relaxed);
-
-   if (flag == NPT_QUERY_FEEDBACK_FLAG_READY && version == expected) {
-      if (pData && DataSize) {
-         const UINT copy = DataSize <= aux->query_data_size ?
-                           DataSize : aux->query_data_size;
-         memcpy(pData, slot->result, copy);
-      }
-      return NPT_S_OK;
-   }
-
-   /* DONOTFLUSH: caller polls; return S_FALSE locally.  Otherwise
-    * the spec allows GetData to flush the immediate context, so go
-    * sync to drive result availability. */
-   if (GetDataFlags & 0x1u /* D3D11_ASYNC_GETDATA_DONOTFLUSH */)
-      return NPT_S_FALSE;
-   return npt_id3d11devicecontext_default_GetData(self, pAsync, pData,
-                                                  DataSize, GetDataFlags);
+   struct npt_ring *ring = npt_device_method_ring(dev);
+   const uint64_t resource_id = ((struct npt_com_base *)pDstResource)->base.id;
+   struct npt_d3d11_buffer *buffer = npt_d3d11_buffer_cast(pDstResource);
+   struct npt_d3d11_texture *texture = npt_d3d11_texture_cast(pDstResource);
+   const bool ok = buffer
+      ? ctx_update_buffer(ring, resource_id, buffer, DstSubresource,
+                           pDstBox, pSrcData)
+      : texture && ctx_update_texture(ring, resource_id, texture, DstSubresource,
+                                       pDstBox, pSrcData, SrcRowPitch, SrcDepthPitch);
+   if (!ok)
+      ctx_update_failed(dev, ring);
 }
 
 /* CopyFlags hints (DISCARD, NO_OVERWRITE) are advisory in the host
@@ -518,8 +513,6 @@ npt_overrides_d3d11_context_init(void)
                                                ctx_UpdateSubresource_override);
    NPT_REGISTER_OVERRIDE_D3D11_DEVICE_CONTEXT1(UpdateSubresource1,
                                                ctx_UpdateSubresource1_override);
-   NPT_REGISTER_OVERRIDE_D3D11_DEVICE_CONTEXT(Begin,   ctx_Begin_override);
-   NPT_REGISTER_OVERRIDE_D3D11_DEVICE_CONTEXT(GetData, ctx_GetData_override);
 
    npt_com_register_family(context_tiers, 0, NULL);
 }

@@ -179,6 +179,30 @@ struct npt_cmd_com_query_interface_reply {
 #define NPT_TRANSPORT_RESOURCE_MAP                1u
 #define NPT_TRANSPORT_RESOURCE_UNMAP              2u
 #define NPT_TRANSPORT_RESOURCE_EXECUTE_CMD_STREAM 3u
+#define NPT_TRANSPORT_RESOURCE_COPY_COLOR         4u
+
+/* Synchronous dispatch acknowledgement only; pixel work stays on the GPU.
+ * All objects belong to this ring's immediate-context device. The two views
+ * address equal-sized, single-sample, raw UNORM scratch textures. */
+struct npt_cmd_resource_copy_color {
+   struct npt_command_header header;
+   uint64_t context_id;
+   uint64_t dst_rtv_id;
+   uint64_t src_srv_id;
+};
+
+struct npt_cmd_resource_copy_color_reply {
+   struct npt_reply_header header; /* header.cmd_return = HRESULT */
+};
+
+#ifdef __cplusplus
+static_assert(sizeof(struct npt_cmd_resource_copy_color) == 48,
+              "color copy command wire size changed");
+#else
+_Static_assert(sizeof(struct npt_cmd_resource_copy_color) == 48,
+               "color copy command wire size changed");
+#endif
+
 
 /* UpdateSubresource(1) wire path; also serves D3D11_SUBRESOURCE_DATA
  * pSysMem.  D3D12 WriteToSubresource has identical shape (same box
@@ -218,6 +242,8 @@ struct npt_cmd_resource_update {
 #define NPT_MAP_ACCESS_NO_OVERWRITE  0x8u
 #define NPT_MAP_ACCESS_PERSISTENT    0x10u /* D3D12: persistent map */
 #define NPT_MAP_ACCESS_NO_GPU_SYNC   0x20u /* D3D12 */
+/* UNMAP only: abandon a prior Map without copying guest bytes back. */
+#define NPT_MAP_ACCESS_ABORT         0x40u
 
 /* Synchronous: the host Map can block on GPU sync; the guest
  * spin-waits on the ring head for the reply.
@@ -238,8 +264,8 @@ struct npt_cmd_map_resource {
     * shmem size) to bound over-reads.  0 = use shmem size. */
    uint64_t byte_size;
    /* Texture-only mip-aware dims.  When both nonzero the host
-    * computes READ memcpy size as RowPitch * mip_height * mip_depth
-    * (clamped to shmem).  Required for non-mip-0 subresources where
+    * computes the storage extent from RowPitch * mip_height and the
+    * returned DepthPitch between slices (clamped to the slot and shmem).  Required for non-mip-0 subresources where
     * the backend row_pitch can differ from the guest's
     * pre-allocation estimate.  Buffer callers leave both 0. */
    uint32_t mip_height;
@@ -275,7 +301,8 @@ struct npt_cmd_unmap_resource {
    uint64_t byte_size;
    /* Nonzero = rename-ring path: host runs a fresh Map + memcpy +
     * Unmap here with no prior MAP_RESOURCE.  Zero = paired with a
-    * prior MAP_RESOURCE. */
+    * prior MAP_RESOURCE.  NPT_MAP_ACCESS_ABORT alone ends a prior Map
+    * without accessing shmem or copying any abandoned writes. */
    uint32_t access_flags;
    /* Byte offset within shmem_res_id; single-region callers leave 0. */
    uint32_t shmem_offset;
@@ -359,6 +386,8 @@ struct npt_cmd_execute_command_stream {
 
 #define NPT_TRANSPORT_SHARED_EXPORT_BLOB 0u
 #define NPT_TRANSPORT_SHARED_OPEN_RES    1u
+#define NPT_TRANSPORT_SHARED_QUERY_LAYOUT 2u
+#define NPT_TRANSPORT_SHARED_CANCEL_EXPORT 3u
 
 #define NPT_BLOB_EXPORT_MAX_PLANES 4
 
@@ -394,6 +423,16 @@ struct npt_cmd_shared_export_blob_reply {
    struct npt_reply_header header; /* header.cmd_return = HRESULT */
 };
 
+/* Roll back an export that its KMD allocation could not claim. Idempotent:
+ * a consumed or already cancelled blob needs no pending-table cleanup. */
+struct npt_cmd_shared_cancel_export {
+   struct npt_command_header header;
+   uint64_t blob_id;
+};
+struct npt_cmd_shared_cancel_export_reply {
+   struct npt_reply_header header;
+};
+
 /* Synchronous.  Import the shared texture backed by virtio resource
  * res_id on the consumer device in header.object_id and register the
  * imported texture under mint_object_id.  The D3D11 description and
@@ -425,6 +464,23 @@ struct npt_cmd_shared_open_res {
 
 struct npt_cmd_shared_open_res_reply {
    struct npt_reply_header header; /* header.cmd_return = HRESULT */
+};
+
+/* Query layout supplied by the host that owns an attached image.  This
+ * describes the actual DMA buffer, not the guest's logical primary pitch. */
+struct npt_cmd_shared_query_layout {
+   struct npt_command_header header;
+   uint32_t res_id;
+   uint32_t pad;
+};
+
+struct npt_cmd_shared_query_layout_reply {
+   struct npt_reply_header header;
+   uint32_t width;
+   uint32_t height;
+   uint32_t format; /* DXGI_FORMAT of the actual backing image */
+   uint32_t pad;
+   struct npt_blob_export_info export_info;
 };
 
 /* ====================================================================== */

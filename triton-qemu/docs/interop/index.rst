@@ -23,6 +23,7 @@ are useful for making QEMU interoperate with other software.
    qemu-ga-ref
    qemu-qmp-ref
    qemu-storage-daemon-qmp-ref
+   triton-trace
    vhost-user
    vhost-user-gpu
    vhost-vdpa

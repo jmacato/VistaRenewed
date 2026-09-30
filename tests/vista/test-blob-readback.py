@@ -9,7 +9,7 @@ source = root / "triton-qemu/hw/display/virtio-gpu-virgl.c"
 harness = Path(__file__).with_suffix(".c")
 text = source.read_text()
 start = text.index("static int virtio_gpu_neptune_readback_blob(")
-end = text.index("static int virtio_gpu_neptune_readback_surface(", start)
+end = text.index("static int virtio_gpu_neptune_copy_resource(", start)
 helper = text[start:end].rstrip()
 
 test = harness.read_text()

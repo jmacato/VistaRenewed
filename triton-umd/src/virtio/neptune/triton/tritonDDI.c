@@ -5,8 +5,8 @@
  * DDI thunk declarations + per-tier _DEVICEFUNCS tables, plus the
  * OpenAdapter10_2 export and adapter-level callbacks.
  *
- * OpenAdapter10_2 is the single entry point the WDDM runtime calls to
- * discover our adapter. It returns a D3D10_2DDI_ADAPTERFUNCS table whose
+ * Vista uses OpenAdapter10; newer runtimes use OpenAdapter10_2 to
+ * discover our adapter. The latter returns a D3D10_2DDI_ADAPTERFUNCS table whose
  * pfnCreateDevice fills in the device function table for the requested
  * DDI interface version.
  */
@@ -18,6 +18,10 @@
 #include "npt_common.h"
 #include "tritonDxgi.h"
 #include "tritonPresent.h"
+#include "tritonD3D10.h"
+#if defined(NPT_D3D10_RUNTIME_DDI)
+#include "npt_runtime_binding.h"
+#endif
 
 /* Statically linked from src/virtio/neptune/npt_entry_d3d11.c.  The
  * function pulls in the protocol-generated COM machinery internally;
@@ -125,7 +129,7 @@ void   APIENTRY tritonCreateGeometryShader(D3D10DDI_HDEVICE, const UINT *, D3D10
 void   APIENTRY tritonCreateHullShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const VOID *);
 void   APIENTRY tritonCreateDomainShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const VOID *);
 void   APIENTRY tritonCreateComputeShader(D3D10DDI_HDEVICE, const UINT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER);
-SIZE_T APIENTRY tritonCalcPrivateGSWithSOSize(D3D10DDI_HDEVICE, const VOID *);
+SIZE_T APIENTRY tritonCalcPrivateGSWithSOSize(D3D10DDI_HDEVICE, const VOID *, const VOID *);
 void   APIENTRY tritonCreateGSWithSO_11(D3D10DDI_HDEVICE,
                                         const D3D11DDIARG_CREATEGEOMETRYSHADERWITHSTREAMOUTPUT *, D3D10DDI_HSHADER, D3D10DDI_HRTSHADER, const VOID *);
 
@@ -297,28 +301,34 @@ HRESULT APIENTRY tritonRetrieveShaderComment(D3D10DDI_HDEVICE, D3D10DDI_HSHADER,
                                              WCHAR *, SIZE_T *);
 
 
-/* ---------- Per-return-type stub helpers ----------
- *
- * x64 Windows uses a single calling convention and unused parameters
- * cost nothing, so a single stub per return type is installed via cast
- * into every PFND3D... slot of the device function table. TR_STUB logs
- * the slot once per process. */
-
-static void APIENTRY tritonStubVoid(D3D10DDI_HDEVICE hDevice)
+/* Callback signatures must remain exact on x86 stdcall as well as x64. */
+static void APIENTRY tritonSetTextFilterSize(D3D10DDI_HDEVICE device, UINT width, UINT height)
 {
-    (void)hDevice;
-    TR_STUB("Triton<void> stub");
+    PTRITON_DEVICE d = device.pDrvPrivate;
+    if (!d) return;
+    d->textFilterWidth = width;
+    d->textFilterHeight = height;
 }
-
-/* GCC's -Wcast-function-type is unhelpful for stub-table population. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-function-type"
-
-#define TR_STUB_V    ((void *)tritonStubVoid)
+static void APIENTRY tritonRelocate11(D3D10DDI_HDEVICE d, D3D11DDI_DEVICEFUNCS *f)
+{ (void)d; (void)f; }
+static void APIENTRY tritonRelocate13(D3D10DDI_HDEVICE d, D3DWDDM1_3DDI_DEVICEFUNCS *f)
+{ (void)d; (void)f; }
+static void APIENTRY tritonRelocate20(D3D10DDI_HDEVICE d, D3DWDDM2_0DDI_DEVICEFUNCS *f)
+{ (void)d; (void)f; }
+static void APIENTRY tritonRelocate21(D3D10DDI_HDEVICE d, D3DWDDM2_1DDI_DEVICEFUNCS *f)
+{ (void)d; (void)f; }
+static void APIENTRY tritonUnsupportedShaderIfaces(D3D10DDI_HDEVICE d,
+    D3D10DDI_HSHADER shader, UINT count, const UINT *ids,
+    const D3D11DDIARG_POINTERDATA *data)
+{
+    (void)shader; (void)count; (void)ids; (void)data;
+    tritonSetError(d.pDrvPrivate, E_NOTIMPL);
+}
+static void APIENTRY tritonDestroyDevice(D3D10DDI_HDEVICE hDevice);
 
 /* ---------- D3D11_0 device-funcs table ---------- */
 
-static void tritonFillD3D11DeviceFuncs(D3D11DDI_DEVICEFUNCS *p)
+void tritonFillD3D11DeviceFuncs(D3D11DDI_DEVICEFUNCS *p)
 {
     /* High-frequency */
     p->pfnDefaultConstantBufferUpdateSubresourceUP  = tritonDefaultCbUpdateSubresourceUP;
@@ -380,7 +390,7 @@ static void tritonFillD3D11DeviceFuncs(D3D11DDI_DEVICEFUNCS *p)
     p->pfnResourceMap                               = tritonResourceMap;
     p->pfnResourceUnmap                             = tritonResourceUnmap;
     p->pfnResourceIsStagingBusy                     = tritonResourceIsStagingBusy;
-    p->pfnRelocateDeviceFuncs                       = (PFND3D11DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs                       = tritonRelocate11;
     p->pfnCalcPrivateResourceSize                   = tritonCalcPrivateResourceSize;
     p->pfnCalcPrivateOpenedResourceSize             = tritonCalcPrivateOpenedResourceSize;
     p->pfnCreateResource                            = tritonCreateResource;
@@ -430,12 +440,12 @@ static void tritonFillD3D11DeviceFuncs(D3D11DDI_DEVICEFUNCS *p)
     p->pfnCheckCounterInfo                          = tritonCheckCounterInfo;
     p->pfnCheckCounter                              = tritonCheckCounter;
 
-    p->pfnDestroyDevice                             = (PFND3D10DDI_DESTROYDEVICE)TR_STUB_V;
-    p->pfnSetTextFilterSize                         = (PFND3D10DDI_SETTEXTFILTERSIZE)TR_STUB_V;
+    p->pfnDestroyDevice                             = tritonDestroyDevice;
+    p->pfnSetTextFilterSize                         = tritonSetTextFilterSize;
 
     /* 10.1 entries */
-    p->pfnResourceConvert                           = (PFND3D10DDI_RESOURCECOPY)TR_STUB_V;
-    p->pfnResourceConvertRegion                     = (PFND3D10DDI_RESOURCECOPYREGION)TR_STUB_V;
+    p->pfnResourceConvert                           = tritonResourceCopy;
+    p->pfnResourceConvertRegion                     = tritonResourceCopyRegion;
 
     /* 11.0 entries */
     p->pfnDrawIndexedInstancedIndirect              = tritonDrawIndexedInstancedIndirect;
@@ -460,12 +470,12 @@ static void tritonFillD3D11DeviceFuncs(D3D11DDI_DEVICEFUNCS *p)
     p->pfnCreateCommandList                         = (PFND3D11DDI_CREATECOMMANDLIST)0;
     p->pfnDestroyCommandList                        = (PFND3D11DDI_DESTROYCOMMANDLIST)0;
     p->pfnCalcPrivateTessellationShaderSize         = (PFND3D11DDI_CALCPRIVATETESSELLATIONSHADERSIZE)tritonCalcPrivateTessellationShaderSize;
-    p->pfnPsSetShaderWithIfaces                     = (PFND3D11DDI_SETSHADER_WITH_IFACES)TR_STUB_V;
-    p->pfnVsSetShaderWithIfaces                     = (PFND3D11DDI_SETSHADER_WITH_IFACES)TR_STUB_V;
-    p->pfnGsSetShaderWithIfaces                     = (PFND3D11DDI_SETSHADER_WITH_IFACES)TR_STUB_V;
-    p->pfnHsSetShaderWithIfaces                     = (PFND3D11DDI_SETSHADER_WITH_IFACES)TR_STUB_V;
-    p->pfnDsSetShaderWithIfaces                     = (PFND3D11DDI_SETSHADER_WITH_IFACES)TR_STUB_V;
-    p->pfnCsSetShaderWithIfaces                     = (PFND3D11DDI_SETSHADER_WITH_IFACES)TR_STUB_V;
+    p->pfnPsSetShaderWithIfaces                     = tritonUnsupportedShaderIfaces;
+    p->pfnVsSetShaderWithIfaces                     = tritonUnsupportedShaderIfaces;
+    p->pfnGsSetShaderWithIfaces                     = tritonUnsupportedShaderIfaces;
+    p->pfnHsSetShaderWithIfaces                     = tritonUnsupportedShaderIfaces;
+    p->pfnDsSetShaderWithIfaces                     = tritonUnsupportedShaderIfaces;
+    p->pfnCsSetShaderWithIfaces                     = tritonUnsupportedShaderIfaces;
     p->pfnCreateComputeShader                       = tritonCreateComputeShader;
     p->pfnCsSetShader                               = tritonCsSetShader;
     p->pfnCsSetShaderResources                      = tritonCsSetShaderResources;
@@ -504,6 +514,7 @@ static void tritonFillD3D11_1DeviceFuncs(D3D11_1DDI_DEVICEFUNCS *p)
     p->pfnDsSetConstantBuffers                      = tritonCs_DS_Set11_1;
     p->pfnCsSetConstantBuffers                      = tritonCs_CS_Set11_1;
     p->pfnResourceCopyRegion                        = tritonResourceCopyRegion_11_1;
+    p->pfnResourceConvertRegion                     = tritonResourceCopyRegion_11_1;
     p->pfnResourceUpdateSubresourceUP               = tritonResourceUpdateSubresourceUP_11_1;
     p->pfnFlush                                     = tritonFlush11_1;
     p->pfnCalcPrivateBlendStateSize                 = tritonCalcPrivateBlendStateSize;
@@ -539,7 +550,7 @@ static void tritonFillWDDM1_3DeviceFuncs(D3DWDDM1_3DDI_DEVICEFUNCS *p)
 {
     tritonFillD3D11_1DeviceFuncs((D3D11_1DDI_DEVICEFUNCS *)(p));
 
-    p->pfnRelocateDeviceFuncs           = (PFND3DWDDM1_3DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs           = tritonRelocate13;
     p->pfnCheckMultisampleQualityLevels = tritonCheckMultisampleQualityLevels_1_3;
 
     p->pfnUpdateTileMappings   = tritonUpdateTileMappings;
@@ -564,7 +575,7 @@ static void tritonFillWDDM2_0DeviceFuncs(D3DWDDM2_0DDI_DEVICEFUNCS *p)
 {
     tritonFillWDDM1_3DeviceFuncs((D3DWDDM1_3DDI_DEVICEFUNCS *)(p));
 
-    p->pfnRelocateDeviceFuncs                   = (PFND3DWDDM2_0DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs                   = tritonRelocate20;
 
     p->pfnCalcPrivateShaderResourceViewSize     = tritonCalcPrivateSRVSize_WDDM2_0;
     p->pfnCreateShaderResourceView              = tritonCreateSRV_WDDM2_0;
@@ -594,7 +605,7 @@ static void tritonFillWDDM2_1DeviceFuncs(D3DWDDM2_1DDI_DEVICEFUNCS *p)
 {
     tritonFillWDDM2_0DeviceFuncs((D3DWDDM2_0DDI_DEVICEFUNCS *)(p));
 
-    p->pfnRelocateDeviceFuncs = (PFND3DWDDM2_1DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs = tritonRelocate21;
     p->pfnAcquireResource     = (PFND3DWDDM2_1DDI_SYNC_TOKEN)tritonAcquireResource;
     p->pfnReleaseResource     = (PFND3DWDDM2_1DDI_SYNC_TOKEN)tritonReleaseResource;
 }
@@ -701,35 +712,50 @@ static void APIENTRY tritonDestroyDevice(D3D10DDI_HDEVICE hDevice)
     TR_LOG("DestroyDevice");
 }
 
+#if defined(NPT_D3D10_RUNTIME_DDI)
+static INIT_ONCE tritonBootstrapOnce = INIT_ONCE_STATIC_INIT;
+static CRITICAL_SECTION tritonBootstrapLock;
+static BOOL CALLBACK tritonInitBootstrap(PINIT_ONCE once, PVOID argument, PVOID *context)
+{
+    (void)once; (void)argument; (void)context;
+    InitializeCriticalSection(&tritonBootstrapLock);
+    return TRUE;
+}
+#endif
+
 /* ---------- pfnCreateDevice ---------- */
 
-static HRESULT APIENTRY tritonCreateDevice(D3D10DDI_HADAPTER hAdapter,
-                                           D3D10DDIARG_CREATEDEVICE *pArgs)
+/* The Vista Interop Pack extends the format contract without changing the
+ * corresponding 10.0/10.1 device table or adopting Windows 7 scheduling. */
+static D3D_FEATURE_LEVEL tritonD3D10FeatureLevel(UINT interfaceVersion)
 {
-    PTRITON_ADAPTER pAdapter = (PTRITON_ADAPTER)(hAdapter.pDrvPrivate);
-    PTRITON_DEVICE  p        = (PTRITON_DEVICE)(pArgs->hDrvDevice.pDrvPrivate);
-    if (!pAdapter || !p) {
-        TR_LOG("CreateDevice: missing pDrvPrivate (adapter=%p, device=%p)",
-               (void *)pAdapter, (void *)p);
-        return E_INVALIDARG;
+    switch (interfaceVersion) {
+    case D3D10_0_DDI_INTERFACE_VERSION:
+    case D3D10_0_x_vista_DDI_INTERFACE_VERSION:
+        return D3D_FEATURE_LEVEL_10_0;
+    case D3D10_1_DDI_INTERFACE_VERSION:
+    case D3D10_1_x_vista_DDI_INTERFACE_VERSION:
+        return D3D_FEATURE_LEVEL_10_1;
+    default:
+        return (D3D_FEATURE_LEVEL)0;
     }
+}
 
-    /* Zero the private block before touching anything.  The runtime allocates
-     * it from the size returned by pfnCalcPrivateDeviceSize, guarantees
-     * nothing about its contents, and recycles it across Create/Destroy within
-     * a process, so any field the assignments below miss would arrive holding
-     * the previous device's value.  Zeroing makes "every field is initialised"
-     * true by construction instead of by keeping that list in sync with the
-     * struct, and is safe because this is opaque driver-owned storage that
-     * nothing reads a pre-existing value out of. */
-    memset(p, 0, sizeof(*p));
-
-    TR_LOG("CreateDevice: Interface=0x%08x Version=0x%08x Flags=0x%08x",
-           pArgs->Interface, pArgs->Version, pArgs->Flags);
-
+static HRESULT tritonInstallDeviceFuncs(D3D10DDIARG_CREATEDEVICE *pArgs)
+{
     /* Install the device-funcs table for the requested interface.
      * Higher-tier fillers chain-call the lower-tier ones. */
     switch (pArgs->Interface) {
+    case D3D10_0_DDI_INTERFACE_VERSION:
+    case D3D10_0_x_vista_DDI_INTERFACE_VERSION:
+        tritonFillD3D10DeviceFuncs(pArgs->pDeviceFuncs);
+        pArgs->pDeviceFuncs->pfnDestroyDevice = tritonDestroyDevice;
+        break;
+    case D3D10_1_DDI_INTERFACE_VERSION:
+    case D3D10_1_x_vista_DDI_INTERFACE_VERSION:
+        tritonFillD3D10_1DeviceFuncs(pArgs->p10_1DeviceFuncs);
+        pArgs->p10_1DeviceFuncs->pfnDestroyDevice = tritonDestroyDevice;
+        break;
     case D3D11_0_DDI_INTERFACE_VERSION:
         tritonFillD3D11DeviceFuncs(pArgs->p11DeviceFuncs);
         pArgs->p11DeviceFuncs->pfnDestroyDevice = tritonDestroyDevice;
@@ -755,6 +781,44 @@ static HRESULT APIENTRY tritonCreateDevice(D3D10DDI_HADAPTER hAdapter,
         return E_FAIL;
     }
 
+    return S_OK;
+}
+
+static HRESULT APIENTRY tritonCreateDevice(D3D10DDI_HADAPTER hAdapter,
+                                           D3D10DDIARG_CREATEDEVICE *pArgs)
+{
+    if (!pArgs || !pArgs->pKTCallbacks || !pArgs->pDeviceFuncs || !pArgs->pUMCallbacks)
+        return E_INVALIDARG;
+    const D3D_FEATURE_LEVEL legacyLevel = tritonD3D10FeatureLevel(pArgs->Interface);
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    if (!legacyLevel)
+        return E_NOINTERFACE;
+#endif
+    PTRITON_ADAPTER pAdapter = (PTRITON_ADAPTER)(hAdapter.pDrvPrivate);
+    PTRITON_DEVICE  p        = (PTRITON_DEVICE)(pArgs->hDrvDevice.pDrvPrivate);
+    if (!pAdapter || !p) {
+        TR_LOG("CreateDevice: missing pDrvPrivate (adapter=%p, device=%p)",
+               (void *)pAdapter, (void *)p);
+        return E_INVALIDARG;
+    }
+
+    /* Zero the private block before touching anything.  The runtime allocates
+     * it from the size returned by pfnCalcPrivateDeviceSize, guarantees
+     * nothing about its contents, and recycles it across Create/Destroy within
+     * a process, so any field the assignments below miss would arrive holding
+     * the previous device's value.  Zeroing makes "every field is initialised"
+     * true by construction instead of by keeping that list in sync with the
+     * struct, and is safe because this is opaque driver-owned storage that
+     * nothing reads a pre-existing value out of. */
+    memset(p, 0, sizeof(*p));
+
+    TR_LOG("CreateDevice: Interface=0x%08x Version=0x%08x Flags=0x%08x",
+           pArgs->Interface, pArgs->Version, pArgs->Flags);
+
+    HRESULT tableHr = tritonInstallDeviceFuncs(pArgs);
+    if (FAILED(tableHr)) return tableHr;
+
+    p->textFilterWidth = p->textFilterHeight = 1;
     p->hRTDevice    = pArgs->hRTDevice;
     p->uIfVersion   = pArgs->Interface;
     p->pAdapter     = pAdapter;
@@ -797,7 +861,9 @@ static HRESULT APIENTRY tritonCreateDevice(D3D10DDI_HADAPTER hAdapter,
     const D3D11DDI_3DPIPELINELEVEL level =
         D3D11DDI_EXTRACT_3DPIPELINELEVEL_FROM_FLAGS(pArgs->Flags);
     D3D_FEATURE_LEVEL requested;
-    switch (level) {
+    if (legacyLevel)
+        requested = legacyLevel;
+    else switch (level) {
     case D3D11DDI_3DPIPELINELEVEL_10_0:    requested = D3D_FEATURE_LEVEL_10_0; break;
     case D3D11DDI_3DPIPELINELEVEL_10_1:    requested = D3D_FEATURE_LEVEL_10_1; break;
     case D3D11DDI_3DPIPELINELEVEL_11_0:    requested = D3D_FEATURE_LEVEL_11_0; break;
@@ -813,10 +879,20 @@ static HRESULT APIENTRY tritonCreateDevice(D3D10DDI_HADAPTER hAdapter,
      * Triton works with. */
     ID3D11Device        *raw_dev = NULL;
     ID3D11DeviceContext *raw_ctx = NULL;
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    InitOnceExecuteOnce(&tritonBootstrapOnce, tritonInitBootstrap, NULL, NULL);
+    EnterCriticalSection(&tritonBootstrapLock);
+    npt_renderer_bind_runtime(pAdapter->hRTAdapter.handle, pArgs->hRTDevice.handle,
+        pArgs->Interface, pArgs->Version, &pAdapter->callbacks, pArgs->pKTCallbacks);
+#endif
     HRESULT hr = npt_d3d11_create_device_internal(
         NULL /* pAdapter */, D3D_DRIVER_TYPE_HARDWARE, NULL,
         0 /* Flags */, &requested, 1, D3D11_SDK_VERSION,
         &raw_dev, &p->FeatureLevel, &raw_ctx);
+#if defined(NPT_D3D10_RUNTIME_DDI)
+    npt_renderer_bind_runtime(NULL, NULL, 0, 0, NULL, NULL);
+    LeaveCriticalSection(&tritonBootstrapLock);
+#endif
     if (FAILED(hr) || !raw_dev || !raw_ctx) {
         TR_LOG("CreateDevice: npt_d3d11_create_device_internal failed 0x%08lx", hr);
         if (raw_dev) ID3D11Device_Release(raw_dev);
@@ -901,8 +977,15 @@ static HRESULT APIENTRY tritonGetSupportedVersions(D3D10DDI_HADAPTER hAdapter,
 {
     (void)hAdapter;
     static const UINT64 kSupportedVersions[] = {
+        D3D10_0_DDI_SUPPORTED,
+        D3D10_1_DDI_SUPPORTED,
+#if defined(NPT_D3D10_RUNTIME_DDI)
+        D3D10_0_x_vista_DDI_SUPPORTED,
+        D3D10_1_x_vista_DDI_SUPPORTED,
+#else
         D3D11_0_DDI_SUPPORTED,
         D3D11_1_DDI_SUPPORTED,
+#endif
         /* Top out at the D3D11.1 device DDI.  At the WDDM2.x device interface
          * the D3D11 runtime enforces, during device finalization, a depth-
          * stencil-family MSAA consistency rule that this COM-forwarding driver
@@ -939,8 +1022,19 @@ static HRESULT APIENTRY tritonGetCaps(D3D10DDI_HADAPTER hAdapter,
                                       const D3D10_2DDIARG_GETCAPS *pArgs)
 {
     (void)hAdapter;
+    if (!pArgs || !pArgs->pData) return E_INVALIDARG;
+    UINT required = 0;
+    switch (pArgs->Type) {
+    case D3D11DDICAPS_THREADING: required = sizeof(D3D11DDI_THREADING_CAPS); break;
+    case D3D11DDICAPS_SHADER: required = sizeof(D3D11DDI_SHADER_CAPS); break;
+    case D3D11DDICAPS_3DPIPELINESUPPORT: required = sizeof(D3D11DDI_3DPIPELINESUPPORT_CAPS); break;
+    case D3D11_1DDICAPS_D3D11_OPTIONS: required = sizeof(D3D11_1DDI_D3D11_OPTIONS_DATA); break;
+    case D3D11_1DDICAPS_ARCHITECTURE_INFO: required = sizeof(D3D11_1DDI_ARCHITECTURE_INFO_DATA); break;
+    case D3D11_1DDICAPS_SHADER_MIN_PRECISION_SUPPORT: required = sizeof(D3D11_DDI_SHADER_MIN_PRECISION_SUPPORT_DATA); break;
+    default: break;
+    }
+    if (pArgs->DataSize < required) return E_INVALIDARG;
     TR_LOG("GetCaps: Type=%d", pArgs->Type);
-    if (!pArgs->pData || !pArgs->DataSize) return S_OK;
     ZeroMemory(pArgs->pData, pArgs->DataSize);
 
     switch (pArgs->Type) {
@@ -951,12 +1045,18 @@ static HRESULT APIENTRY tritonGetCaps(D3D10DDI_HADAPTER hAdapter,
     }
     case D3D11DDICAPS_SHADER: {
         D3D11DDI_SHADER_CAPS *pCaps = (D3D11DDI_SHADER_CAPS *)pArgs->pData;
+#if !defined(NPT_D3D10_RUNTIME_DDI)
         pCaps->Caps = D3D11DDICAPS_SHADER_COMPUTE_PLUS_RAW_AND_STRUCTURED_BUFFERS_IN_SHADER_4_X;
+#else
+        pCaps->Caps = 0;
+#endif
         break;
     }
     case D3D11_1DDICAPS_D3D11_OPTIONS: {
         D3D11_1DDI_D3D11_OPTIONS_DATA *pCaps = (D3D11_1DDI_D3D11_OPTIONS_DATA *)pArgs->pData;
+#if !defined(NPT_D3D10_RUNTIME_DDI)
         pCaps->OutputMergerLogicOp      = TRUE;   /* required for 11.1 */
+#endif
         pCaps->AssignDebugBinarySupport = FALSE;
         break;
     }
@@ -988,9 +1088,12 @@ static HRESULT APIENTRY tritonGetCaps(D3D10DDI_HADAPTER hAdapter,
          * so report the contiguous range. */
         pCaps->Caps =
             D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_0) |
-            D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_1) |
-            D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_11_0) |
-            D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11_1DDI_3DPIPELINELEVEL_11_1);
+            D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_1)
+#if !defined(NPT_D3D10_RUNTIME_DDI)
+            | D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_11_0)
+            | D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11_1DDI_3DPIPELINELEVEL_11_1)
+#endif
+            ;
         break;
     }
     default:
@@ -1012,6 +1115,8 @@ static HRESULT APIENTRY tritonGetCaps(D3D10DDI_HADAPTER hAdapter,
 __declspec(dllexport)
 HRESULT APIENTRY OpenAdapter10_2(D3D10DDIARG_OPENADAPTER *pOpenData)
 {
+    if (!pOpenData || !pOpenData->pAdapterFuncs_2 || !pOpenData->pAdapterCallbacks)
+        return E_INVALIDARG;
     TR_LOG("OpenAdapter10_2: Interface=0x%08x Version=0x%08x",
            pOpenData->Interface, pOpenData->Version);
 
@@ -1020,6 +1125,7 @@ HRESULT APIENTRY OpenAdapter10_2(D3D10DDIARG_OPENADAPTER *pOpenData)
     if (!pAdapter) return E_OUTOFMEMORY;
 
     pAdapter->hRTAdapter  = pOpenData->hRTAdapter;
+    pAdapter->callbacks   = *pOpenData->pAdapterCallbacks;
 
     pOpenData->hAdapter.pDrvPrivate = pAdapter;
 
@@ -1032,4 +1138,21 @@ HRESULT APIENTRY OpenAdapter10_2(D3D10DDIARG_OPENADAPTER *pOpenData)
     return S_OK;
 }
 
-#pragma GCC diagnostic pop
+/* Vista discovers D3D10 and D3D10.1 through the original three-slot
+ * adapter table. Never write an ADAPTERFUNCS_2 into that allocation. */
+HRESULT APIENTRY OpenAdapter10(D3D10DDIARG_OPENADAPTER *args)
+{
+    if (!args || !args->pAdapterFuncs || !args->pAdapterCallbacks)
+        return E_INVALIDARG;
+    if (!tritonD3D10FeatureLevel(args->Interface))
+        return E_NOINTERFACE;
+    PTRITON_ADAPTER adapter = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*adapter));
+    if (!adapter) return E_OUTOFMEMORY;
+    adapter->hRTAdapter = args->hRTAdapter;
+    adapter->callbacks = *args->pAdapterCallbacks;
+    args->hAdapter.pDrvPrivate = adapter;
+    args->pAdapterFuncs->pfnCalcPrivateDeviceSize = tritonCalcPrivateDeviceSize;
+    args->pAdapterFuncs->pfnCreateDevice = tritonCreateDevice;
+    args->pAdapterFuncs->pfnCloseAdapter = tritonCloseAdapter;
+    return S_OK;
+}

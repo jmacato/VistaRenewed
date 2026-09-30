@@ -42,14 +42,16 @@ render_state_create_resource(uint32_t ctx_id,
                              int *out_res_fd,
                              uint32_t *out_map_info,
                              struct virgl_resource_vulkan_info *out_vulkan_info,
-                             uint32_t *out_export_format);
+                             uint32_t *out_export_format,
+                             struct virgl_attachment_layout *out_layout);
 
 bool
 render_state_import_resource(uint32_t ctx_id,
                              uint32_t res_id,
                              enum virgl_resource_fd_type fd_type,
                              int fd,
-                             uint64_t size);
+                             uint64_t size,
+                             const struct virgl_attachment_layout *layout);
 
 void
 render_state_destroy_resource(uint32_t ctx_id, uint32_t res_id);

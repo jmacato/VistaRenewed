@@ -62,7 +62,7 @@ static HRESULT signal(UINT64 v){targets[signal_count++]=v;return signalhr;}
 #define ID3D11Fence_GetCompletedValue(f) values[reads++]
 static DWORD GetTickCount(void){DWORD v=tick;tick+=step;return v;}
 #define Sleep(ms) (++sleeps)
-#define triton9CheckHostDevice(d) S_OK
+#define triton9PollHostDevice(d) S_OK
 #define triton9MapDeviceFailure(d,h) (h)
 #define triton9Diag(s) (++logs)
 static void reset(void){qihr=createhr=signalhr=release_count=create_count=signal_count=sleeps=reads=logs=0;tick=step=0;memset(values,0,sizeof(values));}

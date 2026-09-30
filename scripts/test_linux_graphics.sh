@@ -26,3 +26,12 @@ done
     tests/linux-d3d11-test.cpp -L"$prefix/lib/x86_64-linux-gnu" \
     -ldxvk_d3d11 -ldxvk_dxgi -o "$out/d3d11-test"
 "$out/d3d11-test" "$out/d3d11-$label-results.txt"
+python3 tests/run-native-blit.py
+if [[ -n "${TRITON_TEST_SHARED:-}" ]]; then
+    "${CXX:-g++}" -std=c++17 -O2 -I"$prefix/include/dxvk" \
+        -I"$prefix/include/virgl" -I"$root/triton-virglrenderer/src" \
+        tests/linux-primary-interop.cpp -L"$prefix/lib/x86_64-linux-gnu" \
+        -ldxvk_d3d11 -ldxvk_dxgi -lvirglrenderer -lepoxy \
+        -o "$out/primary-interop-test"
+    "$out/primary-interop-test"
+fi

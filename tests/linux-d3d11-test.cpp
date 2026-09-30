@@ -15,6 +15,9 @@
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <dxvk_shared_resource.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/dma-buf.h>
 
 extern "C" void *triton_test_event_create(int manual_reset, int initial_state) {
   if (manual_reset)
@@ -177,17 +180,119 @@ static void test_linear_shared_texture(Ctx &c) {
   CHECK(T, px_eq(image, 8, 4, 4, 0, 255, 0, 255, 0));
 }
 
+// Match QEMU's CPU scanout path, rather than importing the texture into a GPU.
+// Export before rendering so this also detects detached or stale backing data.
+static void test_export_cpu_visibility(Ctx &c) {
+  const char *T = "export_cpu_visibility";
+  struct Target {
+    Com<ID3D11Texture2D> tex;
+    Com<ID3D11RenderTargetView> rtv;
+    Com<IDXGIResource> resource;
+    DxvkSharedTextureDescriptor *desc = nullptr;
+    void *map = MAP_FAILED;
+    uint64_t offset = 0;
+    uint32_t cpuPixel = 0;
+    ~Target() {
+      if (map != MAP_FAILED) munmap(map, desc->allocationSize);
+    }
+  } targets[3];
+  constexpr unsigned width = 1280, height = 720;
+  // Interleave a private image between two shared images to exercise selective
+  // clear batching and retain the private clear for subsequent GPU use.
+  const DXGI_FORMAT formats[] = {DXGI_FORMAT_B8G8R8A8_UNORM,
+      DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8X8_UNORM};
+  for (unsigned i = 0; i < 3; ++i) {
+    auto &t = targets[i];
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = width; td.Height = height;
+    td.MipLevels = td.ArraySize = td.SampleDesc.Count = 1;
+    td.Format = formats[i];
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (i != 1)
+      td.MiscFlags = D3D11_RESOURCE_MISC_SHARED | DXVK_D3D11_RESOURCE_MISC_LINEAR_EXPORT;
+    CHECK_HR(T, c.device->CreateTexture2D(&td, nullptr, &t.tex));
+    CHECK(T, bool(t.tex), return);
+    CHECK_HR(T, c.device->CreateRenderTargetView(t.tex, nullptr, &t.rtv));
+    CHECK(T, bool(t.rtv), return);
+    if (i == 1) continue;
+    CHECK_HR(T, t.tex->QueryInterface(__uuidof(IDXGIResource), (void **)&t.resource));
+    CHECK(T, bool(t.resource), return);
+    HANDLE handle = nullptr;
+    CHECK_HR(T, t.resource->GetSharedHandle(&handle));
+    CHECK(T, handle != nullptr, return);
+    t.desc = static_cast<DxvkSharedTextureDescriptor *>(handle);
+    CHECK(T, t.desc->fd >= 0 && t.desc->planeCount == 1 && t.desc->drmFormatModifier == 0, return);
+    t.offset = t.desc->planes[0].offset + (height/2) * t.desc->planes[0].pitch + (width/2) * 4;
+    CHECK(T, t.offset + 4 <= t.desc->allocationSize, return);
+    t.map = mmap(nullptr, t.desc->allocationSize, PROT_READ, MAP_SHARED, t.desc->fd, 0);
+    CHECK(T, t.map != MAP_FAILED, return);
+  }
+  const FLOAT colours[][4] = {{1,0,0,1}, {0,1,0,1}, {0,0,1,1}};
+  const uint32_t expected[] = {0x00ff0000, 0x0000ff00, 0x000000ff};
+  for (unsigned phase = 0; phase < 3; ++phase) {
+    for (unsigned i = 0; i < 3; ++i)
+      c.ctx->ClearRenderTargetView(targets[i].rtv, colours[(phase+i)%3]);
+    // Completion alone must publish the shared pixels. A staging copy before
+    // CPU access would incidentally materialize the clear and hide the defect.
+    Com<ID3D11Query> completion;
+    D3D11_QUERY_DESC qd = {D3D11_QUERY_EVENT, 0};
+    CHECK_HR(T, c.device->CreateQuery(&qd, &completion));
+    CHECK(T, bool(completion), return);
+    c.ctx->End(completion);
+    c.ctx->Flush();
+    BOOL done = FALSE;
+    HRESULT ready = S_FALSE;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (ready == S_FALSE && std::chrono::steady_clock::now() < deadline) {
+      ready = c.ctx->GetData(completion, &done, sizeof(done), 0);
+      if (ready == S_FALSE) usleep(1000);
+    }
+    CHECK(T, ready == S_OK && done, return);
+    for (unsigned i = 0; i < 3; ++i) {
+      auto &t = targets[i];
+      if (!t.desc) continue;
+      dma_buf_sync sync = {};
+      sync.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ;
+      int rc;
+      do { rc = ioctl(t.desc->fd, DMA_BUF_IOCTL_SYNC, &sync); }
+      while (rc < 0 && (errno == EINTR || errno == EAGAIN));
+      CHECK(T, rc == 0, return);
+      memcpy(&t.cpuPixel, static_cast<const char *>(t.map) + t.offset, 4);
+      sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+      do { rc = ioctl(t.desc->fd, DMA_BUF_IOCTL_SYNC, &sync); }
+      while (rc < 0 && (errno == EINTR || errno == EAGAIN));
+      CHECK(T, rc == 0, return);
+      emit("[EXPORT] format=%u phase=%u CPU=%08x expected=%08x",
+           unsigned(formats[i]), phase, t.cpuPixel, expected[(phase+i)%3]);
+      CHECK(T, (t.cpuPixel & 0xffffff) == expected[(phase+i)%3]);
+    }
+    // Only after sampling every external buffer, validate GPU contents,
+    // including the private clear that must survive the selective flush.
+    for (unsigned i = 0; i < 3; ++i) {
+      auto gpu = readback_tex2d(c, targets[i].tex, 0, 4);
+      CHECK(T, gpu.size() == width * height * 4, return);
+      uint32_t pixel;
+      memcpy(&pixel, gpu.data() + ((height/2)*width + width/2)*4, 4);
+      CHECK(T, (pixel & 0xffffff) == expected[(phase+i)%3]);
+    }
+  }
+}
+
+#ifndef TRITON_LINUX_D3D11_NO_MAIN
 int main(int argc, char **argv) {
   triton_original_main(argc, argv);
   g_out = stdout;
   Ctx c;
   if (create_device(c)) {
     test_clear_validation(c);
-    if (getenv("TRITON_TEST_SHARED"))
+    if (getenv("TRITON_TEST_SHARED")) {
       test_linear_shared_texture(c);
-    else
-      emit("[SKIP] linear_shared_texture: set TRITON_TEST_SHARED=1 on a dma-buf GPU");
+      test_export_cpu_visibility(c);
+    } else {
+      emit("[SKIP] shared texture tests: set TRITON_TEST_SHARED=1 on a dma-buf GPU");
+    }
   }
   emit("[LINUX-SUMMARY] passed=%d failed=%d", g_passes, g_fails);
   return g_fails ? 1 : 0;
 }
+#endif

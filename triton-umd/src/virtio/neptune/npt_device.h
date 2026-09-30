@@ -2,7 +2,8 @@
  * Copyright 2026 Turing Software LLC
  * SPDX-License-Identifier: MIT
  *
- * Per-process Neptune device: refcounted singleton owning the
+ * Neptune device: per-runtime-device transport for D3D9/10 DDIs,
+ * otherwise a refcounted process singleton. Owns the
  * renderer, primary ring, wrapper cache, TLS / DC-SC / instance
  * rings, data shmem pool, and Win32 event emulation.
  */
@@ -36,7 +37,7 @@ struct npt_wrapper_cache {
 };
 
 struct npt_device {
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    atomic_uint runtime_refs;
 #endif
    struct npt_renderer *renderer;

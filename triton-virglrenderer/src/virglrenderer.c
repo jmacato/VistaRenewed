@@ -512,6 +512,29 @@ void virgl_renderer_ctx_detach_resource(int ctx_id, int res_handle)
    ctx->detach_resource(ctx, res);
 }
 
+/* Only exported, single-plane images have a complete layout here. Ordinary
+ * data/opaque blobs retain their untyped behavior. */
+static bool virgl_renderer_resource_has_export_layout(const struct virgl_resource *res)
+{
+   const struct virgl_attachment_layout *layout = &res->export_layout;
+
+   if (res->pipe_resource ||
+       (res->fd_type != VIRGL_RESOURCE_FD_DMABUF &&
+        res->fd_type != VIRGL_RESOURCE_FD_SHM) ||
+       layout->plane_count != 1 || !layout->width || !layout->height ||
+       !layout->fourcc || !layout->strides[0] ||
+       (res->fd_type == VIRGL_RESOURCE_FD_DMABUF &&
+        layout->modifier == DRM_FORMAT_MOD_INVALID) ||
+       layout->offsets[0] >= res->map_size)
+      return false;
+
+   for (unsigned i = 1; i < 4; i++) {
+      if (layout->strides[i] || layout->offsets[i])
+         return false;
+   }
+   return true;
+}
+
 static int virgl_renderer_resource_get_info_common(int res_handle,
                                                    struct virgl_renderer_resource_info *info,
                                                    enum virgl_renderer_native_handle_type *type,
@@ -527,11 +550,21 @@ static int virgl_renderer_resource_get_info_common(int res_handle,
    if (!info)
       return EINVAL;
 
+   memset(info, 0, sizeof(*info));
    info->handle = res_handle;
    info->fd = res->fd;
 
-   if (!res->pipe_resource)
+   if (!res->pipe_resource) {
+      if (virgl_renderer_resource_has_export_layout(res)) {
+         info->virgl_format = res->export_format;
+         info->width = res->export_layout.width;
+         info->height = res->export_layout.height;
+         info->depth = 1;
+         info->stride = res->export_layout.strides[0];
+         info->drm_fourcc = res->export_layout.fourcc;
+      }
       return 0;
+   }
 
    vrend_renderer_resource_get_info(res->pipe_resource,
                                     (struct vrend_renderer_resource_info *)info);
@@ -564,7 +597,8 @@ int virgl_renderer_resource_get_info(int res_handle,
    if ((ret = virgl_renderer_resource_get_info_common(res_handle, info, NULL, NULL)) != 0)
        return ret;
 
-   if (state.winsys_initialized) {
+   struct virgl_resource *res = virgl_resource_lookup(res_handle);
+   if (state.winsys_initialized && res->pipe_resource) {
       return vrend_winsys_get_attrs_for_texture(info->tex_id,
                                                 info->virgl_format,
                                                 &info->drm_fourcc,
@@ -582,6 +616,10 @@ int virgl_renderer_resource_get_info_ext(int res_handle,
    TRACE_FUNC();
    int ret;
 
+   if (!info_ext)
+      return EINVAL;
+   memset(info_ext, 0, sizeof(*info_ext));
+
    if ((ret = virgl_renderer_resource_get_info_common(res_handle,
                                                       &info_ext->base,
                                                       &info_ext->native_type,
@@ -590,7 +628,14 @@ int virgl_renderer_resource_get_info_ext(int res_handle,
 
    info_ext->version = VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION;
 
-   if (state.winsys_initialized) {
+   struct virgl_resource *res = virgl_resource_lookup(res_handle);
+   if (virgl_renderer_resource_has_export_layout(res)) {
+      info_ext->has_dmabuf_export = res->fd_type == VIRGL_RESOURCE_FD_DMABUF;
+      info_ext->planes = res->export_layout.plane_count;
+      info_ext->modifiers = res->export_layout.modifier;
+   }
+
+   if (state.winsys_initialized && res->pipe_resource) {
       return vrend_winsys_get_attrs_for_texture(info_ext->base.tex_id,
                                                 info_ext->base.virgl_format,
                                                 &info_ext->base.drm_fourcc,
@@ -1129,6 +1174,29 @@ static int virgl_renderer_export_query(void *execute_args, uint32_t execute_size
 
    if (res->pipe_resource) {
       return vrend_renderer_export_query(res->pipe_resource, export_query);
+   } else if (res->fd_type == VIRGL_RESOURCE_FD_DMABUF &&
+              virgl_renderer_resource_has_export_layout(res)) {
+      export_query->out_num_fds = 0;
+      export_query->out_fourcc = 0;
+      export_query->out_modifier = DRM_FORMAT_MOD_INVALID;
+      for (unsigned i = 0; i < 4; i++) {
+         export_query->out_fds[i] = -1;
+         export_query->out_strides[i] = 0;
+         export_query->out_offsets[i] = 0;
+      }
+
+      if (export_query->in_export_fds) {
+         int fd = -1;
+         if (virgl_resource_export_fd(res, &fd) != VIRGL_RESOURCE_FD_DMABUF)
+            return -EINVAL;
+         export_query->out_fds[0] = fd;
+      }
+      export_query->out_num_fds = 1;
+      export_query->out_fourcc = res->export_layout.fourcc;
+      export_query->out_modifier = res->export_layout.modifier;
+      export_query->out_strides[0] = res->export_layout.strides[0];
+      export_query->out_offsets[0] = res->export_layout.offsets[0];
+      return 0;
    } else if (!export_query->in_export_fds) {
       /* Untyped resources are expected to be exported with
        * virgl_renderer_resource_export_blob instead and have no type
@@ -1189,7 +1257,7 @@ int virgl_renderer_resource_create_blob(const struct virgl_renderer_resource_cre
    TRACE_FUNC();
    struct virgl_resource *res;
    struct virgl_context *ctx;
-   struct virgl_context_blob blob;
+   struct virgl_context_blob blob = {0};
    bool has_host_storage;
    bool has_guest_storage;
    int ret;
@@ -1273,6 +1341,7 @@ int virgl_renderer_resource_create_blob(const struct virgl_renderer_resource_cre
          return -ENOMEM;
    }
 
+   res->export_layout = blob.export_layout;
    res->map_info = blob.map_info;
    res->map_size = args->size;
 

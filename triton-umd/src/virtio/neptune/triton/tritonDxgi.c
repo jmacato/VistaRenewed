@@ -10,10 +10,13 @@
  * and dxgiddi.h.
  */
 
+#include <stdlib.h>
 #include "triton.h"
 #include "triton_log.h"
 #include "tritonDxgi.h"
+#include "tritonD3D10.h"
 #include "tritonPresent.h"
+#include "tritonSharedBridge.h"
 #include "npt_env.h"
 
 #include <dxgiddi.h>
@@ -533,6 +536,36 @@ tritonPresentSubmitCb(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb)
    return hr;
 }
 
+/* Internal presentation work must not depend on an application's predicate.
+ * Resolve keeps the real MSAA render texture intact for application views. */
+static void
+tritonResolveUnpredicated(PTRITON_DEVICE pD, ID3D11Resource *dst, UINT dstSub,
+                          ID3D11Resource *src, UINT srcSub, DXGI_FORMAT format)
+{
+   tritonPresentLock(pD);
+   ID3D11Predicate *predicate = NULL;
+   BOOL value = FALSE;
+   ID3D11DeviceContext1_GetPredication(pD->pCtx1, &predicate, &value);
+   ID3D11DeviceContext1_SetPredication(pD->pCtx1, NULL, FALSE);
+   ID3D11DeviceContext1_ResolveSubresource(pD->pCtx1, dst, dstSub, src, srcSub, format);
+   ID3D11DeviceContext1_SetPredication(pD->pCtx1, predicate, value);
+   if (predicate) ID3D11Predicate_Release(predicate);
+   tritonPresentUnlock(pD);
+}
+
+static void
+tritonResolveForPresent(PTRITON_DEVICE pD, PTRITON_RESOURCE r)
+{
+   if (r->pPresentResource) {
+      /* Export storage is UNORM, but an SRGB swapchain still resolves in
+       * linear colour space through an SRGB view of that storage. */
+      DXGI_FORMAT format = r->Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                           r->Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB
+                           ? r->Format : r->PresentFormat;
+      tritonResolveUnpredicated(pD, r->pPresentResource, 0, r->pResource, 0, format);
+   }
+}
+
 static HRESULT APIENTRY
 tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
 {
@@ -561,7 +594,7 @@ tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
          TR_LOG("Present dropped #%ld (kmalloc=0x%x %ux%u)",
                 n, src->hKMAllocation, src->Width, src->Height);
       InterlockedDecrement(&pD->presentInFlight);
-      return S_OK;
+      return DXGI_ERROR_DEVICE_REMOVED;
    }
    /* Nothing host-side flushes the producing context on present: the
     * scanout / DWM samples the dmabuf directly, so an unflushed frame
@@ -572,6 +605,7 @@ tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
     * submits), composited surfaces block until the GPU finishes (DWM's
     * sampling cannot be ordered any other way).  See
     * tritonPresentFlushAndGate. */
+   tritonResolveForPresent(pD, src);
    tritonPresentFlushAndGate(pD, TRUE /* arm */, !src->IsPresentable /* wait */);
 
    /* DXGIDDICB_PRESENT (MSDN):
@@ -693,7 +727,11 @@ tritonDxgiRotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *pArg
    {
       PTRITON_RESOURCE r0 = (PTRITON_RESOURCE)(uintptr_t)pArgs->pResources[0];
       ID3D11Resource *tmpRes    = r0->pResource;
+      ID3D11Resource *tmpPresent = r0->pPresentResource;
+      DXGI_FORMAT tmpFormat = r0->PresentFormat;
       D3DKMT_HANDLE   tmpAlloc  = r0->hKMAllocation;
+      BOOL tmpBorrowed = r0->BorrowedKMAllocation;
+      DXGI_FORMAT tmpHostFormat = r0->HostFormat;
       BOOL            tmpShared = r0->IsShared;
       D3DKMT_HANDLE   tmpImpA   = r0->hImportAlloc;
       D3DKMT_HANDLE   tmpImpR   = r0->hImportResKmt;
@@ -701,7 +739,11 @@ tritonDxgiRotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *pArg
          PTRITON_RESOURCE a = (PTRITON_RESOURCE)(uintptr_t)pArgs->pResources[i];
          PTRITON_RESOURCE b = (PTRITON_RESOURCE)(uintptr_t)pArgs->pResources[i + 1];
          a->pResource     = b->pResource;
+         a->pPresentResource = b->pPresentResource;
+         a->PresentFormat = b->PresentFormat;
          a->hKMAllocation = b->hKMAllocation;
+         a->BorrowedKMAllocation = b->BorrowedKMAllocation;
+         a->HostFormat = b->HostFormat;
          a->IsShared      = b->IsShared;
          a->hImportAlloc  = b->hImportAlloc;
          a->hImportResKmt = b->hImportResKmt;
@@ -710,7 +752,11 @@ tritonDxgiRotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *pArg
          PTRITON_RESOURCE last =
             (PTRITON_RESOURCE)(uintptr_t)pArgs->pResources[n - 1];
          last->pResource     = tmpRes;
+         last->pPresentResource = tmpPresent;
+         last->PresentFormat = tmpFormat;
          last->hKMAllocation = tmpAlloc;
+         last->BorrowedKMAllocation = tmpBorrowed;
+         last->HostFormat = tmpHostFormat;
          last->IsShared      = tmpShared;
          last->hImportAlloc  = tmpImpA;
          last->hImportResKmt = tmpImpR;
@@ -738,16 +784,16 @@ tritonDxgiRotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *pArg
          if (cb->pfnStatePsSrvCb)
             cb->pfnStatePsSrvCb(pD->hRTCoreLayer, 0,
                                 D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT);
-         if (cb->pfnStateHsSrvCb)
+         if (pD->uIfVersion >= D3D11_0_DDI_INTERFACE_VERSION && cb->pfnStateHsSrvCb)
             cb->pfnStateHsSrvCb(pD->hRTCoreLayer, 0,
                                 D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT);
-         if (cb->pfnStateDsSrvCb)
+         if (pD->uIfVersion >= D3D11_0_DDI_INTERFACE_VERSION && cb->pfnStateDsSrvCb)
             cb->pfnStateDsSrvCb(pD->hRTCoreLayer, 0,
                                 D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT);
-         if (cb->pfnStateCsSrvCb)
+         if (pD->uIfVersion >= D3D11_0_DDI_INTERFACE_VERSION && cb->pfnStateCsSrvCb)
             cb->pfnStateCsSrvCb(pD->hRTCoreLayer, 0,
                                 D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT);
-         if (cb->pfnStateCsUavCb)
+         if (pD->uIfVersion >= D3D11_0_DDI_INTERFACE_VERSION && cb->pfnStateCsUavCb)
             cb->pfnStateCsUavCb(pD->hRTCoreLayer, 0,
                                 D3D11_PS_CS_UAV_REGISTER_COUNT);
          if (cb->pfnStateOmRenderTargetsCb)
@@ -770,18 +816,29 @@ tritonBlitEnsureLocked(PTRITON_DEVICE pD)
       return FALSE;
    pD->blitInitFailed = TRUE;
 
+   SIZE_T vsSize = sizeof(g_tritonBlitVS), psSize = sizeof(g_tritonBlitPS);
+   void *vs40 = NULL, *ps40 = NULL;
+   if (pD->FeatureLevel < D3D_FEATURE_LEVEL_11_0) {
+      vs40 = tritonD3D10BlitBytecode(g_tritonBlitVS, sizeof(g_tritonBlitVS), &vsSize);
+      ps40 = tritonD3D10BlitBytecode(g_tritonBlitPS, sizeof(g_tritonBlitPS), &psSize);
+      if (!vs40 || !ps40) {
+         HeapFree(GetProcessHeap(), 0, vs40);
+         HeapFree(GetProcessHeap(), 0, ps40);
+         return FALSE;
+      }
+   }
    HRESULT hr = ID3D11Device1_CreateVertexShader(pD->pDev1,
-                                                 g_tritonBlitVS,
-                                                 sizeof(g_tritonBlitVS),
-                                                 NULL, &pD->pBlitVS);
+       vs40 ? vs40 : (const void *)g_tritonBlitVS, vsSize, NULL, &pD->pBlitVS);
+   HeapFree(GetProcessHeap(), 0, vs40);
    if (FAILED(hr) || !pD->pBlitVS) {
+      HeapFree(GetProcessHeap(), 0, ps40);
       TR_LOG("blit: CreateVertexShader failed 0x%08lx", hr);
       return FALSE;
    }
    hr = ID3D11Device1_CreatePixelShader(pD->pDev1,
-                                        g_tritonBlitPS,
-                                        sizeof(g_tritonBlitPS),
+                                        ps40 ? ps40 : (const void *)g_tritonBlitPS, psSize,
                                         NULL, &pD->pBlitPS);
+   HeapFree(GetProcessHeap(), 0, ps40);
    if (FAILED(hr) || !pD->pBlitPS) {
       TR_LOG("blit: CreatePixelShader failed 0x%08lx", hr);
       return FALSE;
@@ -824,9 +881,9 @@ tritonBlitEnsureLocked(PTRITON_DEVICE pD)
  * presentLock; afterwards every touched binding is dirtied through the
  * runtime's pfnState*Cb callbacks so the runtime replays the app's state
  * through the ordinary DDI before its next draw (the same mechanism
- * RotateResourceIdentities uses above).  Predication is deliberately left
- * alone: there is no dirty callback for it, and a present-path blt under
- * active predication does not occur in practice. */
+ * RotateResourceIdentities uses above). Predication and SO are saved
+ * explicitly below; internal draws must neither depend on app predicates
+ * nor append vertices to an app stream-output buffer. */
 static HRESULT
 tritonDxgiBltStretch(PTRITON_DEVICE pD,
                      PTRITON_RESOURCE dst, UINT DstSubresource,
@@ -924,6 +981,14 @@ tritonDxgiBltStretch(PTRITON_DEVICE pD,
       return E_FAIL;
    }
    ID3D11DeviceContext1 *c = pD->pCtx1;
+   ID3D11Predicate *predicate = NULL;
+   BOOL predicateValue = FALSE;
+   ID3D11Buffer *soTargets[D3D11_SO_BUFFER_SLOT_COUNT] = {0};
+   UINT soOffsets[D3D11_SO_BUFFER_SLOT_COUNT];
+   ID3D11DeviceContext1_GetPredication(c, &predicate, &predicateValue);
+   ID3D11DeviceContext1_SOGetTargets(c, D3D11_SO_BUFFER_SLOT_COUNT, soTargets);
+   ID3D11DeviceContext1_SetPredication(c, NULL, FALSE);
+   ID3D11DeviceContext1_SOSetTargets(c, 0, NULL, NULL);
    ID3D11DeviceContext1_UpdateSubresource(c, (ID3D11Resource *)pD->pBlitCB,
                                           0, NULL, consts, 0, 0);
    ID3D11DeviceContext1_OMSetRenderTargets(c, 1, &rtv, NULL);
@@ -951,6 +1016,12 @@ tritonDxgiBltStretch(PTRITON_DEVICE pD,
    ID3D11DeviceContext1_PSSetSamplers(c, 0, 1, &pD->pBlitSampler);
    ID3D11DeviceContext1_PSSetConstantBuffers(c, 0, 1, &pD->pBlitCB);
    ID3D11DeviceContext1_Draw(c, 3, 0);
+   for (UINT i = 0; i < D3D11_SO_BUFFER_SLOT_COUNT; ++i) soOffsets[i] = ~0u;
+   ID3D11DeviceContext1_SOSetTargets(c, D3D11_SO_BUFFER_SLOT_COUNT, soTargets, soOffsets);
+   ID3D11DeviceContext1_SetPredication(c, predicate, predicateValue);
+   if (predicate) ID3D11Predicate_Release(predicate);
+   for (UINT i = 0; i < D3D11_SO_BUFFER_SLOT_COUNT; ++i)
+      if (soTargets[i]) ID3D11Buffer_Release(soTargets[i]);
    {
       /* Unbind our views before the runtime replays app state, so the
        * primary is never simultaneously bound as PS resource and render
@@ -989,9 +1060,9 @@ tritonDxgiBltStretch(PTRITON_DEVICE pD,
             cb->pfnStatePsShaderCb(pD->hRTCoreLayer);
          if (cb->pfnStateGsShaderCb)
             cb->pfnStateGsShaderCb(pD->hRTCoreLayer);
-         if (cb->pfnStateHsShaderCb)
+         if (pD->uIfVersion >= D3D11_0_DDI_INTERFACE_VERSION && cb->pfnStateHsShaderCb)
             cb->pfnStateHsShaderCb(pD->hRTCoreLayer);
-         if (cb->pfnStateDsShaderCb)
+         if (pD->uIfVersion >= D3D11_0_DDI_INTERFACE_VERSION && cb->pfnStateDsShaderCb)
             cb->pfnStateDsShaderCb(pD->hRTCoreLayer);
          if (cb->pfnStatePsSrvCb)
             cb->pfnStatePsSrvCb(pD->hRTCoreLayer, 0, 1);
@@ -1025,30 +1096,53 @@ tritonDxgiBltCommon(DXGI_DDI_HDEVICE hDevice,
     * immediate context DestroyDevice releases. */
    InterlockedIncrement(&pD->presentInFlight);
 
-   /* MSAA resolve blt. */
-   if (Flags.Resolve) {
-      tritonPresentLock(pD);
-      ID3D11DeviceContext1_ResolveSubresource(pD->pCtx1,
-                                              dst->pResource, DstSubresource,
-                                              src->pResource, SrcSubresource,
-                                              (DXGI_FORMAT)dst->Format);
-      tritonPresentUnlock(pD);
-      if (Flags.Present)
-         tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */);
-      InterlockedDecrement(&pD->presentInFlight);
-      return S_OK;
+   const UINT dstW = (DstRight > DstLeft) ? DstRight - DstLeft : 0;
+   const UINT dstH = (DstBottom > DstTop) ? DstBottom - DstTop : 0;
+   D3D11_BOX box = {SrcLeft, SrcTop, 0, SrcRight, SrcBottom, 1};
+   HRESULT result = S_OK;
+   ID3D11Texture2D *temporary = NULL;
+   TRITON_RESOURCE resolved;
+   /* Resolve before sampling/stretch/conversion. A presentation resource
+    * already owns the single-sample texture; other MSAA sources need a
+    * temporary one. The destination remains its genuine render storage,
+    * including when a draw-based blit targets a multisampled primary. */
+   if (src->SampleDesc.Count > 1) {
+      resolved = *src;
+      if (src->pPresentResource && SrcSubresource == 0) {
+         tritonResolveForPresent(pD, src);
+         resolved.pResource = src->pPresentResource;
+         resolved.Format = src->PresentFormat;
+      } else {
+         D3D11_TEXTURE2D_DESC d = {0};
+         const UINT mip = SrcSubresource % (src->MipLevels ? src->MipLevels : 1);
+         d.Width = src->Width >> mip; if (!d.Width) d.Width = 1;
+         d.Height = src->Height >> mip; if (!d.Height) d.Height = 1;
+         d.MipLevels = d.ArraySize = d.SampleDesc.Count = 1;
+         d.Format = src->PresentFormat ? src->PresentFormat :
+             tritonResourceHostViewFormat(src, src->Format);
+         d.Usage = D3D11_USAGE_DEFAULT;
+         d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+         result = ID3D11Device1_CreateTexture2D(pD->pDev1, &d, NULL, &temporary);
+         if (FAILED(result) || !temporary) {
+            if (SUCCEEDED(result)) result = E_FAIL;
+            goto done;
+         }
+         tritonResolveUnpredicated(pD, (ID3D11Resource *)temporary, 0,
+                                   src->pResource, SrcSubresource, d.Format);
+         resolved.pResource = (ID3D11Resource *)temporary;
+         resolved.Format = d.Format;
+         resolved.Width = d.Width;
+         resolved.Height = d.Height;
+      }
+      resolved.HostFormat = DXGI_FORMAT_UNKNOWN;
+      resolved.MipLevels = resolved.ArraySize = resolved.SampleDesc.Count = 1;
+      resolved.SampleDesc.Quality = 0;
+      src = &resolved;
+      SrcSubresource = 0;
+   } else if (Flags.Resolve) {
+      result = E_INVALIDARG;
+      goto done;
    }
-
-   const UINT dstW = (DstRight  > DstLeft) ? DstRight  - DstLeft : 0;
-   const UINT dstH = (DstBottom > DstTop)  ? DstBottom - DstTop  : 0;
-
-   D3D11_BOX box;
-   box.left   = SrcLeft;
-   box.top    = SrcTop;
-   box.front  = 0;
-   box.right  = SrcRight;
-   box.bottom = SrcBottom;
-   box.back   = 1;
 
    /* Stretching and cross-format blts cannot ride CopySubresourceRegion:
     * it has no stretch semantics, and the host silently copies ZEROS
@@ -1062,48 +1156,215 @@ tritonDxgiBltCommon(DXGI_DDI_HDEVICE hDevice,
       const BOOL needStretch = Flags.Stretch || Flags.Convert ||
                                (dstW && bw != dstW) ||
                                (dstH && bh != dstH) ||
-                               src->Format != dst->Format;
+                               src->Format != dst->Format ||
+                               tritonResourceHostViewFormat(src, src->Format) !=
+                                   tritonResourceHostViewFormat(dst, dst->Format) ||
+                               dst->SampleDesc.Count > 1;
       if (needStretch && dstW && dstH && bw && bh &&
-          src->SampleDesc.Count <= 1 && dst->SampleDesc.Count <= 1) {
+          src->SampleDesc.Count <= 1) {
          HRESULT shr = tritonDxgiBltStretch(pD, dst, DstSubresource,
                                             DstLeft, DstTop,
                                             DstRight, DstBottom,
                                             src, SrcSubresource, &box);
-         if (SUCCEEDED(shr)) {
-            if (Flags.Present)
-               tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */);
-            InterlockedDecrement(&pD->presentInFlight);
-            return S_OK;
-         }
-         /* Fall through to the clamped copy as a last resort. */
+         result = shr;
+         goto done;
+      } else if (needStretch) {
+         result = E_INVALIDARG;
+         goto done;
       }
    }
 
-   /* Clamp the copied extent to the smaller of src box and dst rect (only
-    * reachable when the draw-based blit is unavailable). */
-   if (dstW && (box.right - box.left) != dstW) {
-      TR_STUB("DxgiBlt stretch width (copy clamped)");
-      if (box.right - box.left > dstW)
-         box.right = box.left + dstW;
+   {
+      tritonPresentLock(pD);
+      ID3D11Predicate *predicate = NULL;
+      BOOL value = FALSE;
+      ID3D11DeviceContext1_GetPredication(pD->pCtx1, &predicate, &value);
+      ID3D11DeviceContext1_SetPredication(pD->pCtx1, NULL, FALSE);
+      ID3D11DeviceContext1_CopySubresourceRegion(pD->pCtx1,
+                                                dst->pResource, DstSubresource,
+                                                DstLeft, DstTop, 0,
+                                                src->pResource, SrcSubresource,
+                                                &box);
+      ID3D11DeviceContext1_SetPredication(pD->pCtx1, predicate, value);
+      if (predicate) ID3D11Predicate_Release(predicate);
+      tritonPresentUnlock(pD);
    }
-   if (dstH && (box.bottom - box.top) != dstH) {
-      TR_STUB("DxgiBlt stretch height (copy clamped)");
-      if (box.bottom - box.top > dstH)
-         box.bottom = box.top + dstH;
-   }
-
-   tritonPresentLock(pD);
-   ID3D11DeviceContext1_CopySubresourceRegion(pD->pCtx1,
-                                              dst->pResource, DstSubresource,
-                                              DstLeft, DstTop, 0,
-                                              src->pResource, SrcSubresource,
-                                              &box);
-   tritonPresentUnlock(pD);
-   /* A presentation blt is the present: nothing later submits it. */
-   if (Flags.Present)
+done:
+   if (temporary) ID3D11Texture2D_Release(temporary);
+   /* A presentation blt is the present: resolve the destination's render
+    * storage too before flushing the exported allocation. */
+   if (SUCCEEDED(result) && Flags.Present) {
+      tritonResolveForPresent(pD, dst);
       tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */);
+   }
    InterlockedDecrement(&pD->presentInFlight);
-   return S_OK;
+   return result;
+}
+
+static DXGI_FORMAT
+tritonRawColorFormat(DXGI_FORMAT format)
+{
+   switch (format) {
+   case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
+      return DXGI_FORMAT_R8G8B8A8_UNORM;
+   case DXGI_FORMAT_B8G8R8A8_TYPELESS: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
+      return DXGI_FORMAT_B8G8R8A8_UNORM;
+   case DXGI_FORMAT_B8G8R8X8_TYPELESS: case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB:
+      return DXGI_FORMAT_B8G8R8X8_UNORM;
+   default: return format;
+   }
+}
+
+/* Physical RGBA/BGRA aliases require channel conversion even for a logical
+ * same-format copy. Raw UNORM scratch views preserve encoded SRGB bytes and
+ * allow resources without view bindings. The host meta operation suspends
+ * application queries; no rendered pixels cross through CPU storage. */
+HRESULT
+tritonResourceCopyConverted(PTRITON_DEVICE pD,
+                             PTRITON_RESOURCE dst, UINT dstSubresource,
+                             UINT x, UINT y, UINT z,
+                             PTRITON_RESOURCE src, UINT srcSubresource,
+                             const D3D11_BOX *sourceBox, DXGI_FORMAT resolveFormat)
+{
+   D3D11_RESOURCE_DIMENSION sourceType, destinationType;
+   ID3D11Resource_GetType(src->pResource, &sourceType);
+   ID3D11Resource_GetType(dst->pResource, &destinationType);
+   if (sourceType != D3D11_RESOURCE_DIMENSION_TEXTURE2D ||
+       destinationType != D3D11_RESOURCE_DIMENSION_TEXTURE2D || z)
+      return E_INVALIDARG;
+   D3D11_TEXTURE2D_DESC sourceDesc, destinationDesc;
+   ID3D11Texture2D_GetDesc((ID3D11Texture2D *)src->pResource, &sourceDesc);
+   ID3D11Texture2D_GetDesc((ID3D11Texture2D *)dst->pResource, &destinationDesc);
+   const DXGI_FORMAT sourceRaw = tritonRawColorFormat(sourceDesc.Format);
+   const DXGI_FORMAT destinationRaw = tritonRawColorFormat(destinationDesc.Format);
+   if ((sourceRaw != DXGI_FORMAT_R8G8B8A8_UNORM &&
+        sourceRaw != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        sourceRaw != DXGI_FORMAT_B8G8R8X8_UNORM) ||
+       (destinationRaw != DXGI_FORMAT_R8G8B8A8_UNORM &&
+        destinationRaw != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        destinationRaw != DXGI_FORMAT_B8G8R8X8_UNORM) ||
+       !sourceDesc.MipLevels || sourceDesc.MipLevels > 32 ||
+       !destinationDesc.MipLevels || destinationDesc.MipLevels > 32 ||
+       srcSubresource >= (UINT64)sourceDesc.MipLevels * sourceDesc.ArraySize ||
+       dstSubresource >= (UINT64)destinationDesc.MipLevels * destinationDesc.ArraySize ||
+       destinationDesc.SampleDesc.Count != 1 ||
+       (resolveFormat == DXGI_FORMAT_UNKNOWN ? sourceDesc.SampleDesc.Count != 1 :
+                                              sourceDesc.SampleDesc.Count <= 1))
+      return E_INVALIDARG;
+   UINT sw = sourceDesc.Width >> (srcSubresource % sourceDesc.MipLevels);
+   UINT sh = sourceDesc.Height >> (srcSubresource % sourceDesc.MipLevels);
+   UINT dw = destinationDesc.Width >> (dstSubresource % destinationDesc.MipLevels);
+   UINT dh = destinationDesc.Height >> (dstSubresource % destinationDesc.MipLevels);
+   if (!sw) sw = 1;
+   if (!sh) sh = 1;
+   if (!dw) dw = 1;
+   if (!dh) dh = 1;
+   D3D11_BOX box = {0, 0, 0, sw, sh, 1};
+   if (sourceBox) box = *sourceBox;
+   if (box.left >= box.right || box.top >= box.bottom || box.front >= box.back)
+      return S_OK; /* D3D copy defines every empty box as a no-op. */
+   if (box.left > box.right || box.top > box.bottom ||
+       box.right > sw || box.bottom > sh || box.front || box.back != 1 ||
+       x > dw || y > dh || box.right - box.left > dw - x ||
+       box.bottom - box.top > dh - y)
+      return E_INVALIDARG;
+   const UINT width = box.right - box.left, height = box.bottom - box.top;
+   if (!width || !height) return S_OK;
+   if (width > UINT32_MAX / 4u || (SIZE_T)height > (SIZE_T)-1 / (width * 4u))
+      return E_OUTOFMEMORY;
+
+   HRESULT hr = E_FAIL;
+   ID3D11Texture2D *typedSource = NULL, *resolved = NULL;
+   ID3D11Texture2D *rawSource = NULL, *converted = NULL;
+   ID3D11ShaderResourceView *srv = NULL;
+   ID3D11RenderTargetView *rtv = NULL;
+   ID3D11Resource *copySource = src->pResource;
+   ID3D11Predicate *predicate = NULL;
+   BOOL predicateValue = FALSE;
+   ID3D11DeviceContext1_GetPredication(pD->pCtx1, &predicate, &predicateValue);
+   ID3D11DeviceContext1_SetPredication(pD->pCtx1, NULL, FALSE);
+   if (resolveFormat != DXGI_FORMAT_UNKNOWN) {
+      const DXGI_FORMAT physicalFormat = tritonResourceHostViewFormat(src, resolveFormat);
+      const BOOL typeless = sourceDesc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS ||
+                            sourceDesc.Format == DXGI_FORMAT_B8G8R8A8_TYPELESS ||
+                            sourceDesc.Format == DXGI_FORMAT_B8G8R8X8_TYPELESS;
+      if (tritonRawColorFormat(physicalFormat) != sourceRaw) {
+         hr = E_INVALIDARG; goto done;
+      }
+      /* Typed resolves require matching source, destination and Format. A
+       * host-normalized SRGB source can first be copied to the typed peer;
+       * that copy retains every MSAA sample without conversion. */
+      if (!typeless && sourceDesc.Format != physicalFormat) {
+         D3D11_TEXTURE2D_DESC typed = sourceDesc;
+         typed.Format = physicalFormat;
+         typed.Usage = D3D11_USAGE_DEFAULT;
+         typed.BindFlags = typed.CPUAccessFlags = typed.MiscFlags = 0;
+         hr = ID3D11Device1_CreateTexture2D(pD->pDev1, &typed, NULL, &typedSource);
+         if (FAILED(hr) || !typedSource) { if (SUCCEEDED(hr)) hr = E_OUTOFMEMORY; goto done; }
+         ID3D11DeviceContext1_CopyResource(pD->pCtx1,
+             (ID3D11Resource *)typedSource, src->pResource);
+         copySource = (ID3D11Resource *)typedSource;
+      }
+      D3D11_TEXTURE2D_DESC resolveDesc = sourceDesc;
+      resolveDesc.Width = sw; resolveDesc.Height = sh;
+      resolveDesc.MipLevels = resolveDesc.ArraySize = resolveDesc.SampleDesc.Count = 1;
+      resolveDesc.SampleDesc.Quality = 0;
+      resolveDesc.Format = physicalFormat;
+      resolveDesc.Usage = D3D11_USAGE_DEFAULT;
+      resolveDesc.BindFlags = resolveDesc.CPUAccessFlags = resolveDesc.MiscFlags = 0;
+      hr = ID3D11Device1_CreateTexture2D(pD->pDev1, &resolveDesc, NULL, &resolved);
+      if (FAILED(hr) || !resolved) { if (SUCCEEDED(hr)) hr = E_OUTOFMEMORY; goto done; }
+      ID3D11DeviceContext1_ResolveSubresource(pD->pCtx1,
+          (ID3D11Resource *)resolved, 0, copySource, srcSubresource, physicalFormat);
+      copySource = (ID3D11Resource *)resolved;
+      sourceDesc.Format = physicalFormat;
+      srcSubresource = 0;
+   }
+   {
+      D3D11_TEXTURE2D_DESC desc = {0};
+      desc.Width = width; desc.Height = height;
+      desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+      desc.Format = sourceRaw;
+      desc.Usage = D3D11_USAGE_DEFAULT;
+      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+      hr = ID3D11Device1_CreateTexture2D(pD->pDev1, &desc, NULL, &rawSource);
+      if (FAILED(hr) || !rawSource) { if (SUCCEEDED(hr)) hr = E_OUTOFMEMORY; goto done; }
+      ID3D11DeviceContext1_CopySubresourceRegion(pD->pCtx1,
+          (ID3D11Resource *)rawSource, 0, 0, 0, 0, copySource, srcSubresource, &box);
+      hr = ID3D11Device1_CreateShaderResourceView(pD->pDev1,
+          (ID3D11Resource *)rawSource, NULL, &srv);
+      if (FAILED(hr) || !srv) { if (SUCCEEDED(hr)) hr = E_OUTOFMEMORY; goto done; }
+
+      /* Preserve the physical alpha byte on X8 destinations too. The X8
+       * source SRV supplies alpha one, as required for logical X8 reads. */
+      desc.Format = destinationRaw == DXGI_FORMAT_B8G8R8X8_UNORM
+         ? DXGI_FORMAT_B8G8R8A8_UNORM : destinationRaw;
+      desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+      hr = ID3D11Device1_CreateTexture2D(pD->pDev1, &desc, NULL, &converted);
+      if (FAILED(hr) || !converted) { if (SUCCEEDED(hr)) hr = E_OUTOFMEMORY; goto done; }
+      hr = ID3D11Device1_CreateRenderTargetView(pD->pDev1,
+          (ID3D11Resource *)converted, NULL, &rtv);
+      if (FAILED(hr) || !rtv) { if (SUCCEEDED(hr)) hr = E_OUTOFMEMORY; goto done; }
+      hr = tritonSharedBridgeCopyColor(pD->pCtx1, rtv, srv);
+      if (FAILED(hr)) goto done;
+
+      /* Preparation must run even when the application's predicate is false.
+       * Only the final destination operation inherits the application state. */
+      ID3D11DeviceContext1_SetPredication(pD->pCtx1, predicate, predicateValue);
+      ID3D11DeviceContext1_CopySubresourceRegion(pD->pCtx1, dst->pResource,
+          dstSubresource, x, y, z, (ID3D11Resource *)converted, 0, NULL);
+      hr = S_OK;
+   }
+done:
+   ID3D11DeviceContext1_SetPredication(pD->pCtx1, predicate, predicateValue);
+   if (predicate) ID3D11Predicate_Release(predicate);
+   if (rtv) ID3D11RenderTargetView_Release(rtv);
+   if (srv) ID3D11ShaderResourceView_Release(srv);
+   if (converted) ID3D11Texture2D_Release(converted);
+   if (rawSource) ID3D11Texture2D_Release(rawSource);
+   if (resolved) ID3D11Texture2D_Release(resolved);
+   if (typedSource) ID3D11Texture2D_Release(typedSource);
+   return hr;
 }
 
 static HRESULT APIENTRY
@@ -1126,12 +1387,28 @@ tritonDxgiBlt(DXGI_DDI_ARG_BLT *pArgs)
 static HRESULT APIENTRY
 tritonDxgiResolveSharedResource(DXGI_DDI_ARG_RESOLVESHAREDRESOURCE *pArgs)
 {
-   (void)pArgs;
-   /* No work: cross-process shared textures are resolved to host storage
-    * when opened (tritonSharedBridge), so there is nothing to resolve here. */
-   return S_OK;
+   if (!pArgs)
+      return E_INVALIDARG;
+   PTRITON_DEVICE pD = (PTRITON_DEVICE)(uintptr_t)pArgs->hDevice;
+   PTRITON_RESOURCE resource = (PTRITON_RESOURCE)(uintptr_t)pArgs->hResource;
+   if (!pD || !pD->pCtx1 || !pD->pDev1 || !resource || !resource->pResource)
+      return E_INVALIDARG;
+
+   /* Flush is a queued proxy call. Drain that context's ring before the
+    * ownership/GDI handoff, then report any host device failure. This is
+    * submission ordering, not a substitute for a GPU completion fence. */
+   if (pD->presentLockInit)
+      EnterCriticalSection(&pD->presentLock);
+   ID3D11DeviceContext1_Flush(pD->pCtx1);
+   HRESULT hr = tritonSharedBridgeDrain(pD->pCtx1, 15000u)
+      ? ID3D11Device1_GetDeviceRemovedReason(pD->pDev1)
+      : DXGI_ERROR_DEVICE_REMOVED;
+   if (pD->presentLockInit)
+      LeaveCriticalSection(&pD->presentLock);
+   return hr;
 }
 
+#if !defined(NPT_D3D10_RUNTIME_DDI)
 static HRESULT APIENTRY
 tritonDxgiBlt1(DXGI_DDI_ARG_BLT1 *pArgs)
 {
@@ -1193,12 +1470,13 @@ tritonDxgiPresent1(DXGI_DDI_ARG_PRESENT1 *pArgs)
          TR_LOG("Present1 dropped #%ld (kmalloc=0x%x %ux%u)",
                 n, src->hKMAllocation, src->Width, src->Height);
       InterlockedDecrement(&pD->presentInFlight);
-      return S_OK;
+      return DXGI_ERROR_DEVICE_REMOVED;
    }
    /* See tritonDxgiPresent: the frame must be submitted or it never reaches
     * the shared dmabuf.  Arm always -- the KMD's flip gate is keyed on the
     * token the arm submits; wait only for composited (non-primary)
     * surfaces. */
+   tritonResolveForPresent(pD, src);
    tritonPresentFlushAndGate(pD, TRUE /* arm */, !src->IsPresentable /* wait */);
 
    DXGIDDICB_PRESENT cb;
@@ -1221,6 +1499,8 @@ tritonDxgiCheckPresentDurationSupport(DXGI_DDI_ARG_CHECKPRESENTDURATIONSUPPORT *
    pArgs->ClosestLargerDuration  = 0;
    return S_OK;
 }
+
+#endif
 
 /* ---------- Installer ---------- */
 
@@ -1246,6 +1526,7 @@ triton_fill_1_1(DXGI1_1_DDI_BASE_FUNCTIONS *p)
    p->pfnResolveSharedResource = tritonDxgiResolveSharedResource;
 }
 
+#if !defined(NPT_D3D10_RUNTIME_DDI)
 static void
 triton_fill_1_2(DXGI1_2_DDI_BASE_FUNCTIONS *p)
 {
@@ -1287,6 +1568,7 @@ triton_fill_1_3(DXGI1_3_DDI_BASE_FUNCTIONS *p)
    p->pfnPresent1                      = tritonDxgiPresent1;
    p->pfnCheckPresentDurationSupport   = tritonDxgiCheckPresentDurationSupport;
 }
+#endif
 
 void
 tritonInstallDXGIFuncs(PTRITON_DEVICE pD,
@@ -1308,15 +1590,21 @@ tritonInstallDXGIFuncs(PTRITON_DEVICE pD,
    /* Pick the tier matching the runtime-requested DDI interface.  The
     * SDK overlays the version-specific pointers as a union inside
     * DXGI_DDI_BASE_ARGS, so the chosen field aliases the same storage. */
+#if !defined(NPT_D3D10_RUNTIME_DDI)
    if (IS_DXGI1_3_BASE_FUNCTIONS(pArgs->Interface, pArgs->Version)) {
       triton_fill_1_3(pArgs->DXGIBaseDDI.pDXGIDDIBaseFunctions4);
       TR_LOG("InstallDXGIFuncs: tier DXGI1_3");
    } else if (IS_DXGI1_2_BASE_FUNCTIONS(pArgs->Interface, pArgs->Version)) {
       triton_fill_1_2(pArgs->DXGIBaseDDI.pDXGIDDIBaseFunctions3);
       TR_LOG("InstallDXGIFuncs: tier DXGI1_2");
+   } else
+#endif
+   if (IS_DXGI1_1_BASE_FUNCTIONS(pArgs->Interface, pArgs->Version)) {
+      triton_fill_1_1(pArgs->DXGIBaseDDI.pDXGIDDIBaseFunctions2);
+      TR_LOG("InstallDXGIFuncs: tier DXGI1_1");
    } else {
-      /* DXGI 1.0/1.1 callers get the base table; the 1.1-only
-       * pfnResolveSharedResource is a no-op, so nothing is lost. */
+      /* The runtime version determines the allocation size, including for
+       * baseline D3D10 interfaces on the updated Vista runtime. */
       triton_fill_base(pArgs->DXGIBaseDDI.pDXGIDDIBaseFunctions);
       TR_LOG("InstallDXGIFuncs: tier DXGI1_0");
    }

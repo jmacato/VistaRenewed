@@ -51,6 +51,8 @@ struct virgl_context_blob {
    /* enum virgl_formats the exporting context actually created this
     * blob's texture with, or 0 if unknown.  See virgl_resource. */
    uint32_t export_format;
+   /* Exporter-provided image layout; zero planes means an untyped blob. */
+   struct virgl_attachment_layout export_layout;
 
    struct virgl_resource_vulkan_info vulkan_info;
 };

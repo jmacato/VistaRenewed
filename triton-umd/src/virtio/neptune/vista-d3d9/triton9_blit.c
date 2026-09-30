@@ -6,6 +6,7 @@ typedef struct TRITON9_STRETCH_STATE {
     ID3D11DeviceContext *context;
     ID3D11VertexShader *vs;
     ID3D11PixelShader *ps;
+    ID3D11PixelShader *formatPS[3];
     ID3D11SamplerState *samplers[2];
     ID3D11Buffer *constants;
 } TRITON9_STRETCH_STATE;
@@ -17,6 +18,8 @@ void triton9ReleaseStretchBlit(TRITON9_DEVICE *device)
     if (state->context) ID3D11DeviceContext_Release(state->context);
     if (state->vs) ID3D11VertexShader_Release(state->vs);
     if (state->ps) ID3D11PixelShader_Release(state->ps);
+    for (UINT i = 0; i < 3; ++i)
+        if (state->formatPS[i]) ID3D11PixelShader_Release(state->formatPS[i]);
     for (UINT i = 0; i < 2; ++i)
         if (state->samplers[i]) ID3D11SamplerState_Release(state->samplers[i]);
     if (state->constants) ID3D11Buffer_Release(state->constants);
@@ -43,6 +46,15 @@ static HRESULT triton9EnsureStretchBlit(TRITON9_DEVICE *device)
     hr = ID3D11Device1_CreatePixelShader(device->hostDevice, g_tritonBlitPS,
             sizeof(g_tritonBlitPS), NULL, &state->ps);
     if (FAILED(hr)) goto fail;
+    {
+        const void *code[3] = { g_tritonBlitRaaaPS, g_tritonBlitRgaaPS, g_tritonBlitRgbOnePS };
+        const SIZE_T size[3] = { sizeof(g_tritonBlitRaaaPS), sizeof(g_tritonBlitRgaaPS),
+            sizeof(g_tritonBlitRgbOnePS) };
+        for (UINT i = 0; i < 3; ++i) {
+            hr = ID3D11Device1_CreatePixelShader(device->hostDevice, code[i], size[i], NULL, &state->formatPS[i]);
+            if (FAILED(hr)) goto fail;
+        }
+    }
     for (UINT i = 0; i < 2; ++i) {
         D3D11_SAMPLER_DESC sampler = {0};
         sampler.Filter = i ? D3D11_FILTER_MIN_MAG_MIP_LINEAR : D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -72,6 +84,7 @@ HRESULT triton9StretchBlt(TRITON9_DEVICE *device, TRITON9_RESOURCE *source,
     ID3D11ShaderResourceView *srv = NULL;
     ID3D11RenderTargetView *rtv = NULL;
     ID3D11CommandList *commands = NULL;
+    ID3D11PixelShader *pixelShader;
     D3D11_TEXTURE2D_DESC desc = {0};
     D3D11_VIEWPORT viewport = {0};
     D3D11_BOX box;
@@ -84,6 +97,16 @@ HRESULT triton9StretchBlt(TRITON9_DEVICE *device, TRITON9_RESOURCE *source,
     hr = triton9EnsureStretchBlit(device);
     if (FAILED(hr)) return hr;
     state = device->stretchBlitState;
+    pixelShader = state->ps;
+    switch (source->format) {
+    case D3DDDIFMT_R16F: case D3DDDIFMT_R32F:
+        pixelShader = state->formatPS[0]; break;
+    case D3DDDIFMT_G16R16: case D3DDDIFMT_G16R16F: case D3DDDIFMT_G32R32F:
+        pixelShader = state->formatPS[1]; break;
+    case D3DDDIFMT_X8B8G8R8: case D3DDDIFMT_X1R5G5B5: case D3DDDIFMT_X4R4G4B4:
+        pixelShader = state->formatPS[2]; break;
+    default: break;
+    }
     desc.Width = sourceRect->right - sourceRect->left;
     desc.Height = sourceRect->bottom - sourceRect->top;
     desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
@@ -94,6 +117,7 @@ HRESULT triton9StretchBlt(TRITON9_DEVICE *device, TRITON9_RESOURCE *source,
     if (FAILED(hr)) goto done;
     desc.Width = destinationRect->right - destinationRect->left;
     desc.Height = destinationRect->bottom - destinationRect->top;
+    desc.Format = destination->hostFormat;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET;
     hr = ID3D11Device1_CreateTexture2D(device->hostDevice, &desc, NULL, &output);
     if (FAILED(hr)) goto done;
@@ -106,27 +130,42 @@ HRESULT triton9StretchBlt(TRITON9_DEVICE *device, TRITON9_RESOURCE *source,
     box.left = sourceRect->left; box.top = sourceRect->top;
     box.right = sourceRect->right; box.bottom = sourceRect->bottom;
     box.front = 0; box.back = 1;
-    ID3D11DeviceContext_CopySubresourceRegion(state->context, (ID3D11Resource *)input,
-        0, 0, 0, 0, source->hostResource, 0, &box);
+    if (triton9ResourceIsSystemMemory(source)) {
+        D3D11_BOX uploadBox = { 0, 0, 0, (UINT)(sourceRect->right - sourceRect->left),
+            (UINT)(sourceRect->bottom - sourceRect->top), 1 };
+        hr = triton9UpdateHostTexture(device, source, state->context,
+            (ID3D11Resource *)input, 0, &uploadBox,
+            source->shadow + (SIZE_T)sourceRect->top * source->pitch +
+                (SIZE_T)sourceRect->left * source->bytesPerPixel,
+            source->pitch, source->slicePitch);
+        if (FAILED(hr)) goto done;
+    } else {
+        ID3D11DeviceContext_CopySubresourceRegion(state->context, (ID3D11Resource *)input,
+            0, 0, 0, 0, source->hostResource, source->subresourceIndex, &box);
+    }
     viewport.Width = (FLOAT)desc.Width; viewport.Height = (FLOAT)desc.Height;
     viewport.MaxDepth = 1;
     ID3D11DeviceContext_RSSetViewports(state->context, 1, &viewport);
     ID3D11DeviceContext_OMSetRenderTargets(state->context, 1, &rtv, NULL);
     ID3D11DeviceContext_IASetPrimitiveTopology(state->context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D11DeviceContext_VSSetShader(state->context, state->vs, NULL, 0);
-    ID3D11DeviceContext_PSSetShader(state->context, state->ps, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(state->context, pixelShader, NULL, 0);
     ID3D11DeviceContext_PSSetShaderResources(state->context, 0, 1, &srv);
     ID3D11DeviceContext_PSSetSamplers(state->context, 0, 1, &state->samplers[linear ? 1 : 0]);
     ID3D11DeviceContext_PSSetConstantBuffers(state->context, 0, 1, &state->constants);
     ID3D11DeviceContext_Draw(state->context, 3, 0);
     ID3D11DeviceContext_OMSetRenderTargets(state->context, 0, NULL, NULL);
-    ID3D11DeviceContext_CopySubresourceRegion(state->context, destination->hostResource,
-        0, destinationRect->left, destinationRect->top, 0, (ID3D11Resource *)output, 0, NULL);
+    ID3D11DeviceContext_CopySubresourceRegion(state->context,
+        triton9ResourceIsSystemMemory(destination) ? destination->stagingResource
+                                                  : destination->hostResource,
+        triton9ResourceIsSystemMemory(destination) ? 0 : destination->subresourceIndex,
+        destinationRect->left, destinationRect->top, 0, (ID3D11Resource *)output, 0, NULL);
     hr = ID3D11DeviceContext_FinishCommandList(state->context, FALSE, &commands);
     if (SUCCEEDED(hr)) {
         /* RestoreContextState preserves every app binding, including states
          * not shadowed by the Vista UMD. Finish(FALSE) resets our recorder. */
         ID3D11DeviceContext1_ExecuteCommandList(device->hostContext, commands, TRUE);
+        triton9ResourceWritten(destination);
         hr = triton9CheckHostDevice(device);
     } else {
         /* Discard a failed recording before a later request can reuse it. */

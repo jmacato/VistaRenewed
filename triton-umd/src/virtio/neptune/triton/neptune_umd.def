@@ -1,3 +1,4 @@
 LIBRARY neptune_umd.dll
 EXPORTS
+    OpenAdapter10
     OpenAdapter10_2

@@ -34,6 +34,7 @@
 #include <xf86drm.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include "util/u_math.h"
 #include "util/u_memory.h"
@@ -135,8 +136,7 @@ static int rendernode_open(void)
 
    fd = -1;
    while ((dir_ent = readdir(dir))) {
-      if (dir_ent->d_type != DT_CHR)
-         continue;
+      struct stat stat_buf;
 
       if (strncmp(dir_ent->d_name, "renderD", 7))
          continue;
@@ -150,6 +150,13 @@ static int rendernode_open(void)
 
       if (fd < 0)
          continue;
+
+      /* A bind mount can hide the device type in the directory entry. */
+      if (fstat(fd, &stat_buf) < 0 || !S_ISCHR(stat_buf.st_mode)) {
+         close(fd);
+         fd = -1;
+         continue;
+      }
 
       version = drmGetVersion(fd);
       if (!version) {

@@ -1,0 +1,140 @@
+diff --git a/dxbc/dxbc_converter.cpp b/dxbc/dxbc_converter.cpp
+index 52fdfd829330f8d4fa1f35f9e4756785013f88bf..13f0b923fb4179a57a7d513844006ceef3e6b7d8 100644
+--- a/dxbc/dxbc_converter.cpp
++++ b/dxbc/dxbc_converter.cpp
+@@ -50,9 +50,11 @@ bool Converter::createPassthroughGs(ir::Builder& builder) {
+     return false;
+ 
+   /* Set up GS state, I/O map code is going to read this */
+-  m_gs.inputPrimitive = PrimitiveType::ePoint;
+-  m_gs.outputTopology = PrimitiveTopology::ePointList;
+-  m_gs.outputVertices = 1u;
++  /* Declare the largest input. Pipeline linkage specializes the primitive
++   * type and array size before lowering the vertex-count built-in. */
++  m_gs.inputPrimitive = PrimitiveType::eTriangleAdj;
++  m_gs.outputTopology = PrimitiveTopology::eTriangleStrip;
++  m_gs.outputVertices = 3u;
+   m_gs.streamMask = 0x1u;
+ 
+   if (!m_ioMap.emitGsPassthrough(builder))
+diff --git a/dxbc/dxbc_io_map.cpp b/dxbc/dxbc_io_map.cpp
+index d1e9dc2b42c3a6143354b9ee92b3ea1f2436420b..3b4a18ac698ff3e72d0126b1be70f6597ea2fa17 100644
+--- a/dxbc/dxbc_io_map.cpp
++++ b/dxbc/dxbc_io_map.cpp
+@@ -365,28 +365,51 @@ bool IoMap::emitHsControlPointPhasePassthrough(ir::Builder& builder) {
+ bool IoMap::emitGsPassthrough(ir::Builder& builder) {
+   for (const auto& e : m_osgn) {
+     if (!declareIoSignatureVars(builder, &m_osgn, RegisterType::eInput,
+-        e.getRegisterIndex(), 1u, e.getComponentMask(), ir::InterpolationModes()))
++        e.getRegisterIndex(), 6u, e.getComponentMask(), ir::InterpolationModes()))
+       return false;
+ 
+     if (!declareIoSignatureVars(builder, &m_osgn, RegisterType::eOutput,
+         e.getRegisterIndex(), 0u, e.getComponentMask(), ir::InterpolationModes()))
+       return false;
++  }
+ 
+-    auto value = loadIoRegister(builder, e.getScalarType(), RegisterType::eInput,
+-      builder.makeConstant(0u), ir::SsaDef(), e.getRegisterIndex(), Swizzle::identity(), e.getComponentMask());
++  /* Keep the vertex count symbolic until pipeline linkage specializes the
++   * input topology. Strip primitives arrive as independent lines/triangles. */
++  auto count = determineActualVertexCount(builder);
++  auto lineAdj = builder.add(ir::Op::IEq(ir::ScalarType::eBool, count, builder.makeConstant(4u)));
++  auto triangleAdj = builder.add(ir::Op::IEq(ir::ScalarType::eBool, count, builder.makeConstant(6u)));
++  auto outputCount = builder.add(ir::Op::Select(ir::ScalarType::eU32, lineAdj,
++    builder.makeConstant(2u), builder.add(ir::Op::Select(ir::ScalarType::eU32,
++      triangleAdj, builder.makeConstant(3u), count))));
++
++  for (uint32_t i = 0u; i < 3u; i++) {
++    auto cond = builder.add(ir::Op::ULt(ir::ScalarType::eBool, builder.makeConstant(i), outputCount));
++    auto block = builder.add(ir::Op::ScopedIf(ir::SsaDef(), cond));
++
++    /* Lines with adjacency keep vertices 1,2; triangles keep 0,2,4. */
++    auto index = builder.add(ir::Op::Select(ir::ScalarType::eU32, lineAdj,
++      builder.makeConstant(i + 1u), builder.add(ir::Op::Select(ir::ScalarType::eU32,
++        triangleAdj, builder.makeConstant(2u * i), builder.makeConstant(i)))));
++
++    for (const auto& e : m_osgn) {
++      auto value = loadIoRegister(builder, e.getScalarType(), RegisterType::eInput,
++        index, ir::SsaDef(), e.getRegisterIndex(), Swizzle::identity(), e.getComponentMask());
++
++      if (!value)
++        return false;
+ 
+-    if (!value)
+-      return false;
++      /* The declaration has no explicit stream, so use its implicit stream 0. */
++      if (!storeIoRegister(builder, RegisterType::eOutput, ir::SsaDef(), ir::SsaDef(),
++          e.getRegisterIndex(), -1, e.getComponentMask(), value))
++        return false;
++    }
+ 
+-    /* Actually need to pass -1 as the stream index here since we don't fix up the
+-     * actual declaration. Pass-through GS only ever has one stream anyway. */
+-    if (!storeIoRegister(builder, RegisterType::eOutput, ir::SsaDef(), ir::SsaDef(),
+-        e.getRegisterIndex(), -1, e.getComponentMask(), value))
+-      return false;
++    builder.add(ir::Op::EmitVertex(0u));
++    auto end = builder.add(ir::Op::ScopedEndIf(block));
++    builder.rewriteOp(block, ir::Op(builder.getOp(block)).setOperand(0u, end));
+   }
+ 
+-  /* Commit output vertex */
+-  builder.add(ir::Op::EmitVertex(0u));
++  builder.add(ir::Op::EmitPrimitive(0u));
+   return true;
+ }
+ 
+diff --git a/ir/passes/ir_pass_lower_io.cpp b/ir/passes/ir_pass_lower_io.cpp
+index c71e63e9fcd6380d87362da6f71b9926acdc3488..6b919c7e9d49f39facd6d6e44e6f8591451f1db7 100644
+--- a/ir/passes/ir_pass_lower_io.cpp
++++ b/ir/passes/ir_pass_lower_io.cpp
+@@ -360,6 +360,33 @@ bool LowerIoPass::changeGsInputPrimitiveType(PrimitiveType primitiveType) {
+ }
+ 
+ 
++bool LowerIoPass::changeGsPassthroughOutputPrimitiveType(PrimitiveType primitiveType) {
++  if (primitiveType == PrimitiveType::eLinesAdj)
++    primitiveType = PrimitiveType::eLines;
++  else if (primitiveType == PrimitiveType::eTrianglesAdj)
++    primitiveType = PrimitiveType::eTriangles;
++
++  if (primitiveType != PrimitiveType::ePoints &&
++      primitiveType != PrimitiveType::eLines &&
++      primitiveType != PrimitiveType::eTriangles)
++    return false;
++
++  auto [a, b] = m_builder.getDeclarations();
++
++  for (auto iter = a; iter != b; iter++) {
++    if (iter->getOpCode() == OpCode::eSetGsOutputPrimitive) {
++      m_builder.rewriteOp(iter->getDef(), Op::SetGsOutputPrimitive(
++        SsaDef(iter->getOperand(0u)), primitiveType, 0x1u));
++    } else if (iter->getOpCode() == OpCode::eSetGsOutputVertices) {
++      m_builder.rewriteOp(iter->getDef(), Op::SetGsOutputVertices(
++        SsaDef(iter->getOperand(0u)), primitiveVertexCount(primitiveType)));
++    }
++  }
++
++  return true;
++}
++
++
+ bool LowerIoPass::resolveUnusedOutputs(const IoMap& consumedOutputs) {
+   auto iter = m_builder.getDeclarations().first;
+   bool progress = false;
+diff --git a/ir/passes/ir_pass_lower_io.h b/ir/passes/ir_pass_lower_io.h
+index 14939be60da018a061417345105f4039ce2f351f..debc434604850490d029ab758d7f32f513622f5a 100644
+--- a/ir/passes/ir_pass_lower_io.h
++++ b/ir/passes/ir_pass_lower_io.h
+@@ -297,6 +297,10 @@ public:
+    *  of any relevant input variable to match the new vertex count. */
+   bool changeGsInputPrimitiveType(PrimitiveType primitiveType);
+ 
++  /** Matches the output primitive and vertex limit of a generated passthrough
++   *  shader to its input. Adjacency vertices are discarded by the shader. */
++  bool changeGsPassthroughOutputPrimitiveType(PrimitiveType primitiveType);
++
+   /** Removes outputs not in the given output set. This is primarily intended for
+    *  pixel shader outputs. If any outputs are removed, all code contributing to
+    *  those outputs will also be removed. */

@@ -352,6 +352,9 @@
       <WppEnabled>true</WppEnabled>
       <WppScanConfigurationData>trace.h</WppScanConfigurationData>
     </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>VIOGPU_TARGET_VISTA=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win11 Release|Win32'">
     <Link>
@@ -548,6 +551,7 @@
     <ClCompile Include="..\common\viogpu_queue.cpp" />
     <ClCompile Include="driver.cpp" />
     <ClCompile Include="viogpu_command.cpp" />
+    <ClCompile Include="viogpu_trace.cpp" />
     <ClCompile Include="viogpu_device.cpp" />
     <ClCompile Include="viogpu_allocation.cpp">
       <LanguageStandard>stdcpp20</LanguageStandard>
@@ -719,6 +723,31 @@
            Text="Vista x64 package requires VISTA_D3D9_WOW_UMD (the x86 neptune_d3d9.dll build)." />
     <Copy SourceFiles="$(VISTA_D3D9_UMD)" DestinationFiles="$(VistaD3D9NativeStaged)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(VISTA_D3D9_WOW_UMD)" DestinationFiles="$(VistaD3D9WowStaged)"
+          SkipUnchangedFiles="true" Condition="'$(Configuration)'=='Vista x64'" />
+  </Target>
+  <PropertyGroup Condition="'$(Configuration)'=='Vista x86' OR '$(Configuration)'=='Vista x64'">
+    <!-- Inputs from the standalone Vista D3D10 UMD build.  Stage under the
+         exact INF names so the native and WoW64 packages cannot accidentally
+         pick up the modern neptune_umd.dll. -->
+    <VistaD3D10NativeStaged>$(IntDir)neptune_d3d10.dll</VistaD3D10NativeStaged>
+    <VistaD3D10WowStaged>$(IntDir)neptune_d3d10_wow.dll</VistaD3D10WowStaged>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(Configuration)'=='Vista x86' OR '$(Configuration)'=='Vista x64'">
+    <FilesToPackage Include="$(VistaD3D10NativeStaged)" />
+    <PackOne_Files Include="$(VistaD3D10NativeStaged)" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Configuration)'=='Vista x64'">
+    <FilesToPackage Include="$(VistaD3D10WowStaged)" />
+    <PackOne_Files Include="$(VistaD3D10WowStaged)" />
+  </ItemGroup>
+  <Target Name="StageVistaD3D10Umd" BeforeTargets="PrepareForBuild"
+          Condition="'$(Configuration)'=='Vista x86' OR '$(Configuration)'=='Vista x64'">
+    <Error Condition="'$(VISTA_D3D10_UMD)'=='' OR !Exists('$(VISTA_D3D10_UMD)')"
+           Text="Vista package requires VISTA_D3D10_UMD (the native neptune_d3d10.dll build)." />
+    <Error Condition="'$(Configuration)'=='Vista x64' AND ('$(VISTA_D3D10_WOW_UMD)'=='' OR !Exists('$(VISTA_D3D10_WOW_UMD)'))"
+           Text="Vista x64 package requires VISTA_D3D10_WOW_UMD (the x86 neptune_d3d10.dll build)." />
+    <Copy SourceFiles="$(VISTA_D3D10_UMD)" DestinationFiles="$(VistaD3D10NativeStaged)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(VISTA_D3D10_WOW_UMD)" DestinationFiles="$(VistaD3D10WowStaged)"
           SkipUnchangedFiles="true" Condition="'$(Configuration)'=='Vista x64'" />
   </Target>
   <Target Name="StageNeptuneWowUmd" BeforeTargets="PrepareForBuild" Condition="'$(UseNeptuneWow)'=='true'" Inputs="$(NeptuneWowUmdSource)" Outputs="$(NeptuneWowUmd)">

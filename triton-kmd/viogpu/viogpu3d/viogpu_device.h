@@ -2,6 +2,7 @@
 #include "handle.h"
 #include "viogpum.h"
 #include "viogpu.h"
+#include "viogpu_trace.h"
 
 class VioGpuAdapter;
 class VioGpuDevice;
@@ -69,6 +70,7 @@ class VioGpuDevice final : public HandleBase<"VIOGDEVI"_M, VioGpuDevice>
   friend class VioGpuContext;
   friend class VioGpuCommander;
   public:
+    VioGpuTraceTag traceTag = {};
     VioGpuDevice(VioGpuAdapter *pAdapter);
     ~VioGpuDevice();
 
@@ -80,6 +82,8 @@ class VioGpuDevice final : public HandleBase<"VIOGDEVI"_M, VioGpuDevice>
 
     NTSTATUS OpenAllocation(_In_ CONST DXGKARG_OPENALLOCATION *pOpenAllocation);
 
+    NTSTATUS EnsureVirglAttachment(VioGpuDeviceAllocation *allocation);
+
     NTSTATUS GenerateBltPresent(DXGKARG_PRESENT *pPresent,
                                 VioGpuDeviceAllocation *src,
                                 VioGpuDeviceAllocation *dst,
@@ -87,6 +91,11 @@ class VioGpuDevice final : public HandleBase<"VIOGDEVI"_M, VioGpuDevice>
     NTSTATUS GenerateBltPresentUM(DXGKARG_PRESENT *pPresent, VioGpuAllocation *src, VioGpuAllocation *dst);
     NTSTATUS Present(_Inout_ DXGKARG_PRESENT *pPresent);
     NTSTATUS Render(DXGKARG_RENDER *pRender);
+
+    // Bounded per-device diagnostics: a desktop device must not consume the
+    // trace budget of a subsequently created fullscreen application.
+    void TracePresent(ULONG stage, ULONG flags, ULONG source,
+                      LONG generation, BOOLEAN armed);
 
     CtrlQueue *GetCtrlQueue();
 
@@ -97,6 +106,7 @@ class VioGpuDevice final : public HandleBase<"VIOGDEVI"_M, VioGpuDevice>
     volatile PVIOGPU_BLIT_PRESENT m_pBlit;
   protected:
     VioGpuAdapter *m_pAdapter;
+    volatile LONG m_presentTraceCount;
 };
 
 class VioGpuDeviceAllocation final : public HandleBase<"VIOGDEAL"_M, VioGpuDeviceAllocation>

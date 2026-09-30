@@ -36,6 +36,11 @@
 
 struct npt_context;
 struct npt_cmd_shared_open_res;
+struct npt_cmd_shared_query_layout_reply;
+
+HRESULT
+npt_shared_query_layout(struct npt_context *ctx, uint32_t res_id,
+                        struct npt_cmd_shared_query_layout_reply *reply);
 
 /* Exporter: export the shared host texture identified by
  * \p texture_id (a guest object id in \p ctx) as an fd, stage it as

@@ -2,7 +2,7 @@
  * Copyright 2026 Turing Software LLC
  * SPDX-License-Identifier: MIT
  *
- * Vista D3D9 event and occlusion queries.  The internal D3D11 proxy reaches
+ * Vista D3D9 event, occlusion and GPU timestamp queries. The D3D11 proxy reaches
  * Neptune's renderer, whose drain path appends the private render-event
  * command and waits for KMD retirement with a finite timeout.
  */
@@ -23,8 +23,15 @@ struct Triton9Query {
 static D3D11_QUERY
 triton9QueryType(D3DDDIQUERYTYPE type)
 {
-    return type == D3DDDIQUERYTYPE_EVENT ? D3D11_QUERY_EVENT
-                                         : D3D11_QUERY_OCCLUSION;
+    switch (type) {
+    case D3DDDIQUERYTYPE_EVENT: return D3D11_QUERY_EVENT;
+    case D3DDDIQUERYTYPE_OCCLUSION: return D3D11_QUERY_OCCLUSION;
+    case D3DDDIQUERYTYPE_TIMESTAMP: return D3D11_QUERY_TIMESTAMP;
+    case D3DDDIQUERYTYPE_TIMESTAMPDISJOINT:
+    case D3DDDIQUERYTYPE_TIMESTAMPFREQ:
+        return D3D11_QUERY_TIMESTAMP_DISJOINT;
+    default: return static_cast<D3D11_QUERY>(-1);
+    }
 }
 
 /* The caller owns shaderLock. */
@@ -71,8 +78,7 @@ triton9CreateQuery(HANDLE hDevice, D3DDDIARG_CREATEQUERY *args)
         return E_INVALIDARG;
     if (device->deviceLost)
         return D3DDDIERR_DEVICEREMOVED;
-    if (args->QueryType != D3DDDIQUERYTYPE_EVENT &&
-        args->QueryType != D3DDDIQUERYTYPE_OCCLUSION)
+    if (triton9QueryType(args->QueryType) == static_cast<D3D11_QUERY>(-1))
         return D3DDDIERR_NOTAVAILABLE;
     /* Reject an unsupported query before lazy host-device startup.  Invalid
      * input must not have a transport side effect. */
@@ -160,11 +166,17 @@ triton9IssueQuery(HANDLE hDevice, const D3DDDIARG_ISSUEQUERY *args)
         LeaveCriticalSection(&device->shaderLock);
         return D3DDDIERR_INVALIDCALL;
     }
-    if (query->type == D3DDDIQUERYTYPE_EVENT) {
+    if (query->type == D3DDDIQUERYTYPE_EVENT ||
+        query->type == D3DDDIQUERYTYPE_TIMESTAMP ||
+        query->type == D3DDDIQUERYTYPE_TIMESTAMPFREQ) {
         if (!args->Flags.End) {
             LeaveCriticalSection(&device->shaderLock);
             return D3DDDIERR_INVALIDCALL;
         }
+        /* D3D9 frequency is an END-only query. D3D11 supplies frequency
+         * through a disjoint interval, so delimit that interval here. */
+        if (query->type == D3DDDIQUERYTYPE_TIMESTAMPFREQ)
+            device->hostContext->Begin(query->hostQuery);
         device->hostContext->End(query->hostQuery);
         query->active = FALSE;
         query->ended = TRUE;
@@ -197,12 +209,16 @@ triton9GetQueryData(HANDLE hDevice, const D3DDDIARG_GETQUERYDATA *args)
 {
     TRITON9_DEVICE *device = static_cast<TRITON9_DEVICE *>(hDevice);
     Triton9Query *query;
-    BOOL eventResult = FALSE;
-    DWORD occlusionResult = 0;
+    union {
+        BOOL boolean;
+        DWORD samples;
+        UINT64 ticks;
+    } result = {};
+    SIZE_T resultSize = 0;
     BOOL publishResult = FALSE;
     HRESULT hr;
 
-    if (!device || !args || !args->hQuery || !args->pData ||
+    if (!device || !args || !args->hQuery ||
         !device->hostContext || !device->shaderLockInitialized)
         return E_INVALIDARG;
     if (device->deviceLost)
@@ -220,19 +236,42 @@ triton9GetQueryData(HANDLE hDevice, const D3DDDIARG_GETQUERYDATA *args)
         /* S_OK is a completion result at the Vista DDI boundary.  Do not turn
          * an inconsistent host S_OK/FALSE pair into a completed event query. */
         if (hr == S_OK && complete) {
-            eventResult = TRUE;
+            result.boolean = TRUE;
+            resultSize = sizeof(result.boolean);
             publishResult = TRUE;
         } else if (hr == S_OK) {
             hr = S_FALSE;
         }
-    } else {
+    } else if (query->type == D3DDDIQUERYTYPE_OCCLUSION) {
         UINT64 samples = 0;
         hr = device->hostContext->GetData(query->hostQuery, &samples,
                                           sizeof(samples), 0);
         if (hr == S_OK) {
-            occlusionResult = samples > 0xffffffffu
+            result.samples = samples > 0xffffffffu
                 ? 0xffffffffu : static_cast<DWORD>(samples);
+            resultSize = sizeof(result.samples);
             publishResult = TRUE;
+        }
+    } else if (query->type == D3DDDIQUERYTYPE_TIMESTAMP) {
+        hr = device->hostContext->GetData(query->hostQuery, &result.ticks,
+                                          sizeof(result.ticks), 0);
+        resultSize = sizeof(result.ticks);
+        publishResult = hr == S_OK;
+    } else {
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT timing = {};
+        hr = device->hostContext->GetData(query->hostQuery, &timing,
+                                          sizeof(timing), 0);
+        if (hr == S_OK) {
+            if (query->type == D3DDDIQUERYTYPE_TIMESTAMPFREQ) {
+                result.ticks = timing.Frequency;
+                resultSize = sizeof(result.ticks);
+                if (!timing.Frequency)
+                    hr = E_FAIL;
+            } else {
+                result.boolean = timing.Disjoint;
+                resultSize = sizeof(result.boolean);
+            }
+            publishResult = hr == S_OK;
         }
     }
     /* A local feedback slot can report a completed query without another wire
@@ -240,12 +279,8 @@ triton9GetQueryData(HANDLE hDevice, const D3DDDIARG_GETQUERYDATA *args)
      * poisoned either the context ring or the primary ring. */
     if (hr == S_OK)
         hr = triton9CheckHostDevice(device);
-    if (hr == S_OK && publishResult) {
-        if (query->type == D3DDDIQUERYTYPE_EVENT)
-            *static_cast<BOOL *>(args->pData) = eventResult;
-        else
-            *static_cast<DWORD *>(args->pData) = occlusionResult;
-    }
+    if (hr == S_OK && publishResult && args->pData)
+        CopyMemory(args->pData, &result, resultSize);
     LeaveCriticalSection(&device->shaderLock);
     return triton9MapQueryFailure(device, hr);
 }

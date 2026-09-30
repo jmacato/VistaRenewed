@@ -149,6 +149,9 @@ struct render_context_op_create_resource_request {
    uint32_t blob_flags; /* VIRGL_RENDERER_BLOB_FLAG_* */
 };
 
+/* Both endpoints are built together; reject a mismatched layout payload. */
+#define RENDER_RESOURCE_LAYOUT_VERSION 1
+
 struct render_context_op_create_resource_reply {
    enum virgl_resource_fd_type fd_type;
    uint32_t map_info; /* VIRGL_RENDERER_MAP_* */
@@ -159,6 +162,8 @@ struct render_context_op_create_resource_reply {
     * to it as a bare fd, and the guest's own idea of the format is a
     * depth/bpp guess with no channel order in it. */
    uint32_t export_format;
+   uint32_t layout_version;
+   struct virgl_attachment_layout export_layout;
    /* followed by 1 fd if not VIRGL_RESOURCE_FD_INVALID */
 };
 
@@ -173,6 +178,7 @@ struct render_context_op_import_resource_request {
    uint32_t res_id;
    enum virgl_resource_fd_type fd_type;
    uint64_t size;
+   struct virgl_attachment_layout layout;
    /* followed by 1 fd */
 };
 

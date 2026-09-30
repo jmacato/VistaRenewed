@@ -1716,3 +1716,50 @@
 { 'command': 'client_migrate_info',
   'data': { 'protocol': 'str', 'hostname': 'str', '*port': 'int',
             '*tls-port': 'int', '*cert-subject': 'str' } }
+
+##
+# @TritonTraceStatus:
+#
+# Triton downstream diagnostic recorder status. Timestamps use the host monotonic
+# clock; a displayed update is not proof of physical monitor delivery.
+#
+# @run: Capture identity.
+# @records: Stored event count.
+# @dropped: Events lost to bounded capacity.
+# @enabled: Whether recording is active.
+#
+# Since: 10.0.12
+##
+{ 'struct': 'TritonTraceStatus',
+  'data': { 'run': 'uint64', 'records': 'uint64', 'dropped': 'uint64',
+            'enabled': 'bool' } }
+
+##
+# @triton-trace-start:
+#
+# Start a bounded in-memory Triton downstream diagnostic capture.
+#
+# @run: Nonzero capture identity supplied by the collector.
+#
+# Returns: Recorder status.
+#
+# Since: 10.0.12
+##
+{ 'command': 'triton-trace-start', 'data': { 'run': 'uint64' },
+  'returns': 'TritonTraceStatus' }
+
+##
+# @triton-trace-stop:
+#
+# Stop recording and write the header and events to a new file.
+# Existing output files are never overwritten. The capture remains frozen
+# after an export error and can be retried with another path.
+#
+# @path: Output filename accessible to QEMU.
+#
+# Returns: Recorder status.
+#
+# Since: 10.0.12
+##
+{ 'command': 'triton-trace-stop', 'data': { 'path': 'str' },
+  'returns': 'TritonTraceStatus' }

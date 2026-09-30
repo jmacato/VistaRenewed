@@ -1,0 +1,3060 @@
+diff --git a/include/native/dxvk_neptune.h b/include/native/dxvk_neptune.h
+index bfd58cb1c79b90a84e7ed5864330c4167429fe49..d6b579d5a9ba0ccac1761087b33aadaf097d3d42 100644
+--- a/include/native/dxvk_neptune.h
++++ b/include/native/dxvk_neptune.h
+@@ -20,6 +20,23 @@ int32_t dxvk_d3d11_clear_depth_stencil_rects(
+     void *context, void *view, uint32_t flags, float depth,
+     uint8_t stencil, uint32_t count, const int32_t *rects);
+ 
++/* Native host ABI. Context, RTV and SRV must belong to this DXVK module and
++ * the same device. Only immediate contexts and private DEFAULT Texture2D
++ * scratch resources with no CPU access, sharing or other misc flags are
++ * supported. Both textures must have one mip, one layer, one sample and
++ * matching dimensions. Aliased resources and external images are rejected.
++ * Both view formats must be UNORM R8G8B8A8, B8G8R8A8 or B8G8R8X8. SRGB views
++ * are unsupported: callers use raw UNORM scratch textures to preserve the
++ * encoded bytes. X8 sources supply alpha 1 through their component mapping.
++ * Copies the whole texture using nearest sampling, without CPU pixel access.
++ * This internal operation is unconditional and preserves application state,
++ * predication and queries. Success acknowledges queued work, not completion;
++ * subsequent operations on the same context execute after the conversion.
++ * Invalid objects/layouts return E_INVALIDARG, unsupported view formats return
++ * DXGI_ERROR_UNSUPPORTED, and device/allocation failures return an error.
++ */
++int32_t dxvk_d3d11_copy_color(void *context, void *dst_rtv, void *src_srv);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/include/native/dxvk_shared_resource.h b/include/native/dxvk_shared_resource.h
+index 3a6f9bfe2c1e6c1700c22ef47d2d1b677d4418ef..5fbff3007dcf2fc565143d202132444487219e93 100644
+--- a/include/native/dxvk_shared_resource.h
++++ b/include/native/dxvk_shared_resource.h
+@@ -51,6 +51,14 @@ extern "C" {
+  */
+ #define DXVK_D3D11_RESOURCE_MISC_LINEAR_EXPORT 0x40000000u
+ 
++/*
++ * Native-only export bit for modifier-aware consumers that accept one
++ * memory plane.  A supported linear layout is preferred, otherwise a
++ * supported single-plane modifier is negotiated.  The bit is stripped
++ * from the texture's public description.
++ */
++#define DXVK_D3D11_RESOURCE_MISC_SINGLE_PLANE_EXPORT 0x20000000u
++
+ /*
+  * D3D11-level description of a shared texture.  Fields mirror
+  * D3D11_TEXTURE2D_DESC plus the texture layout; fixed-width types keep
+diff --git a/src/d3d11/d3d11.sym b/src/d3d11/d3d11.sym
+index 1842edd999f60ae54c649abc08a50c37a7454218..58ee8a37e4d047b3b7fc19016965469ec18c6be9 100644
+--- a/src/d3d11/d3d11.sym
++++ b/src/d3d11/d3d11.sym
+@@ -1,6 +1,7 @@
+ {
+   global:
+     dxvk_d3d11_clear_depth_stencil_rects;
++    dxvk_d3d11_copy_color;
+     D3D11CoreCreateDevice;
+     D3D11CreateDevice;
+     D3D11CreateDeviceAndSwapChain;
+diff --git a/src/d3d11/d3d11_context.cpp b/src/d3d11/d3d11_context.cpp
+index a8fd99f643760766755058f8339b097a9d1bcb05..0ceb2254446ca1615f7fffb72a72426377dd8102 100644
+--- a/src/d3d11/d3d11_context.cpp
++++ b/src/d3d11/d3d11_context.cpp
+@@ -404,7 +404,7 @@ namespace dxvk {
+ 
+     AddCost(GpuCostEstimate::Transfer);
+ 
+-    EmitCs([
++    EmitCsResource([
+       cDstSlice = buf->GetBufferSlice(DstAlignedByteOffset),
+       cSrcSlice = DxvkBufferSlice(counterView)
+     ] (DxvkContext* ctx) {
+@@ -437,7 +437,7 @@ namespace dxvk {
+     auto view  = rtv->GetImageView();
+     auto color = ConvertColorValue(ColorRGBA, view->formatInfo());
+ 
+-    EmitCs([
++    EmitCsResource([
+       cClearValue = color,
+       cImageView  = std::move(view)
+     ] (DxvkContext* ctx) {
+@@ -520,7 +520,7 @@ namespace dxvk {
+        || bufferView->info().format == VK_FORMAT_R32_SINT
+        || bufferView->info().format == VK_FORMAT_R32_SFLOAT
+        || bufferView->info().format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) {
+-        EmitCs([
++        EmitCsResource([
+           cClearValue = clearValue.color.uint32[0],
+           cDstSlice   = DxvkBufferSlice(bufferView)
+         ] (DxvkContext* ctx) {
+@@ -539,7 +539,7 @@ namespace dxvk {
+           bufferView = bufferView->buffer()->createView(info);
+         }
+ 
+-        EmitCs([
++        EmitCsResource([
+           cClearValue = clearValue,
+           cDstView    = bufferView
+         ] (DxvkContext* ctx) {
+@@ -557,7 +557,7 @@ namespace dxvk {
+       bool isZeroClearValue = !(clearValue.color.uint32[0] | clearValue.color.uint32[1]
+                               | clearValue.color.uint32[2] | clearValue.color.uint32[3]);
+ 
+-      EmitCs([
++      EmitCsResource([
+         cClearValue = clearValue,
+         cDstView    = imageView,
+         cDstFormat  = isZeroClearValue ? uavFormat : rawFormat
+@@ -620,7 +620,7 @@ namespace dxvk {
+     clearValue.color.float32[3] = Values[3];
+ 
+     if (uav->GetResourceType() == D3D11_RESOURCE_DIMENSION_BUFFER) {
+-      EmitCs([
++      EmitCsResource([
+         cClearValue = clearValue,
+         cDstView    = std::move(bufView)
+       ] (DxvkContext* ctx) {
+@@ -630,7 +630,7 @@ namespace dxvk {
+           cClearValue.color);
+       });
+     } else {
+-      EmitCs([
++      EmitCsResource([
+         cClearValue = clearValue,
+         cDstView    = std::move(imgView)
+       ] (DxvkContext* ctx) {
+@@ -678,7 +678,7 @@ namespace dxvk {
+     clearValue.depthStencil.depth   = Depth;
+     clearValue.depthStencil.stencil = Stencil;
+ 
+-    EmitCs([
++    EmitCsResource([
+       cClearValue = clearValue,
+       cAspectMask = aspectMask,
+       cImageView  = dsv->GetImageView()
+@@ -746,7 +746,7 @@ namespace dxvk {
+       shadowLayers.layerCount = imageLayers.layerCount;
+ 
+       if (shadow && NumRects)
+-        SyncImage(shadow, shadowLayers, vov->GetCommon().GetImage(), imageLayers);
++        SyncImage(shadow, shadowLayers, vov->GetCommon().GetImage(), imageLayers, true);
+ 
+       // Assume that planar video formats use Y - Cb - Cr
+       // order for the purpose of mapping color components.
+@@ -772,7 +772,7 @@ namespace dxvk {
+ 
+       // If the video view has a shadow image, copy it back to the base image
+       if (shadow)
+-        SyncImage(vov->GetCommon().GetImage(), imageLayers, shadow, shadowLayers);
++        SyncImage(vov->GetCommon().GetImage(), imageLayers, shadow, shadowLayers, true);
+     }
+   }
+ 
+@@ -793,7 +793,7 @@ namespace dxvk {
+ 
+     AddCost(GpuCostEstimate::Transfer);
+ 
+-    EmitCs([cDstImageView = view->GetImageView()]
++    EmitCsResource([cDstImageView = view->GetImageView()]
+     (DxvkContext* ctx) {
+       ctx->generateMipmaps(cDstImageView, VK_FILTER_LINEAR);
+     });
+@@ -871,7 +871,7 @@ namespace dxvk {
+       srcSubresource.arrayLayer, 1 };
+ 
+     if (srcDesc.SampleDesc.Count == 1 || m_parent->GetOptions()->disableMsaa) {
+-      EmitCs([
++      EmitCsResource([
+         cDstImage  = dstTextureInfo->GetImage(),
+         cSrcImage  = srcTextureInfo->GetImage(),
+         cDstLayers = dstSubresourceLayers,
+@@ -886,7 +886,7 @@ namespace dxvk {
+       VkFormat format = m_parent->LookupFormat(
+         Format, DXGI_VK_FORMAT_MODE_ANY).Format;
+ 
+-      EmitCs([
++      EmitCsResource([
+         cDstImage  = dstTextureInfo->GetImage(),
+         cSrcImage  = srcTextureInfo->GetImage(),
+         cDstSubres = dstSubresourceLayers,
+@@ -992,13 +992,15 @@ namespace dxvk {
+     // so reset any tracking we may have been doing here.
+     m_state.id.reset();
+ 
++    const UINT vertexOffset = m_state.ia.vertexBuffers[0].offset;
++
+     EmitCs([=] (DxvkContext* ctx) mutable {
+       ctx->bindDrawBuffers(DxvkBufferSlice(),
+         Forwarder::move(ctrBuf));
+ 
+       ctx->drawIndirectXfb(0u,
+         vtxBuf.buffer()->getXfbVertexStride(),
+-        vtxBuf.offset());
++        vtxBuf.offset() + vertexOffset);
+ 
+       // Reset draw buffer right away so we don't
+       // keep the SO counter alive indefinitely
+@@ -2655,13 +2657,19 @@ namespace dxvk {
+     D3D10DeviceLock lock = LockContext();
+ 
+     auto predicate = D3D11Query::FromPredicate(pPredicate);
++    if (predicate) {
++      Com<ID3D11Device> owner;
++      predicate->GetDevice(&owner);
++      if (owner.ptr() != GetParentInterface() || !predicate->IsPredicate())
++        return;
++      if constexpr (!IsDeferred) {
++        if (!predicate->IsIssuedPredicate())
++          return;
++      }
++    }
+     m_state.pr.predicateObject = predicate;
+-    m_state.pr.predicateValue  = PredicateValue;
+-
+-    static bool s_errorShown = false;
+-
+-    if (pPredicate && !std::exchange(s_errorShown, true))
+-      Logger::err("D3D11DeviceContext::SetPredication: Stub");
++    m_state.pr.predicateValue = PredicateValue;
++    ApplyPredication();
+   }
+ 
+ 
+@@ -2806,7 +2814,7 @@ namespace dxvk {
+       ? DxvkSparseBindFlags(DxvkSparseBindFlag::SkipSynchronization)
+       : DxvkSparseBindFlags();
+ 
+-    EmitCs([
++    EmitCsResource([
+       cBindInfo = std::move(bindInfo),
+       cFlags    = flags
+     ] (DxvkContext* ctx) {
+@@ -3015,7 +3023,7 @@ namespace dxvk {
+       ? DxvkSparseBindFlags(DxvkSparseBindFlag::SkipSynchronization)
+       : DxvkSparseBindFlags();
+ 
+-    EmitCs([
++    EmitCsResource([
+       cBindInfo = std::move(bindInfo),
+       cFlags    = flags
+     ] (DxvkContext* ctx) {
+@@ -4052,6 +4060,8 @@ namespace dxvk {
+       cView       = std::move(View),
+       cClearValue = clearValue
+     ] (DxvkContext* ctx, const VkRect2D* rects, size_t count) {
++      if (!ctx->testPredicate())
++        return;
+       constexpr VkImageUsageFlags rtUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+       VkImageAspectFlags clearAspect = cView->formatInfo()->aspectMask & (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT);
+ 
+@@ -4108,6 +4118,8 @@ namespace dxvk {
+       cView       = std::move(View),
+       cClearValue = clearValue
+     ] (DxvkContext* ctx, const VkRect2D* rects, size_t count) {
++      if (!ctx->testPredicate())
++        return;
+       for (size_t i = 0; i < count; i++) {
+         if (rects[i].extent.width) {
+           ctx->clearBufferView(cView,
+@@ -4192,7 +4204,7 @@ namespace dxvk {
+     ByteCount = std::min(dstLength - DstOffset, ByteCount);
+     ByteCount = std::min(srcLength - SrcOffset, ByteCount);
+ 
+-    EmitCs([
++    EmitCsResource([
+       cDstBuffer = pDstBuffer->GetBufferSlice(DstOffset, ByteCount),
+       cSrcBuffer = pSrcBuffer->GetBufferSlice(SrcOffset, ByteCount)
+     ] (DxvkContext* ctx) {
+@@ -4292,7 +4304,7 @@ namespace dxvk {
+     bool srcIsImage = pSrcTexture->HasImage();
+ 
+     if (dstIsImage && srcIsImage) {
+-      EmitCs([
++      EmitCsResource([
+         cDstImage  = pDstTexture->GetImage(),
+         cSrcImage  = pSrcTexture->GetImage(),
+         cDstLayers = *pDstLayers,
+@@ -4352,7 +4364,7 @@ namespace dxvk {
+             VkImageSubresourceLayers dstLayer = { dstAspectMask,
+               pDstLayers->mipLevel, pDstLayers->baseArrayLayer + i, 1 };
+ 
+-            EmitCs([
++            EmitCsResource([
+               cDstImage   = pDstTexture->GetImage(),
+               cDstLayers  = dstLayer,
+               cDstOffset  = DstOffset,
+@@ -4372,7 +4384,7 @@ namespace dxvk {
+             VkImageSubresourceLayers srcLayer = { srcAspectMask,
+               pSrcLayers->mipLevel, pSrcLayers->baseArrayLayer + i, 1 };
+ 
+-            EmitCs([
++            EmitCsResource([
+               cSrcImage   = pSrcTexture->GetImage(),
+               cSrcFormat  = pSrcTexture->GetPackedFormat(),
+               cSrcLayers  = srcLayer,
+@@ -4407,7 +4419,7 @@ namespace dxvk {
+               elementSize = plane->elementSize;
+             }
+ 
+-            EmitCs([
++            EmitCsResource([
+               cPixelSize = elementSize,
+               cSrcBuffer = pSrcTexture->GetMappedBuffer(srcSubresource),
+               cSrcStart  = pSrcTexture->GetSubresourceLayout(srcAspectMask, srcSubresource).Offset,
+@@ -4506,7 +4518,7 @@ namespace dxvk {
+     // If D3D12 is anything to go by, not passing this flag will trigger
+     // the other code path, regardless of whether TO_LINEAR_BUFFER is set.
+     if (Flags & D3D11_TILE_COPY_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE) {
+-      EmitCs([
++      EmitCsResource([
+         cResource = std::move(resource),
+         cTiles    = std::move(tiles),
+         cBuffer   = std::move(BufferSlice)
+@@ -4519,7 +4531,7 @@ namespace dxvk {
+           cBuffer.offset());
+       });
+     } else {
+-      EmitCs([
++      EmitCsResource([
+         cResource = std::move(resource),
+         cTiles    = std::move(tiles),
+         cBuffer   = std::move(BufferSlice)
+@@ -4829,6 +4841,8 @@ namespace dxvk {
+       cUsedBindings  = GetMaxUsedBindings(),
+       cMaxTessFactor = m_maxTessFactor
+     ] (DxvkContext* ctx) {
++      ctx->setPredicate(nullptr, false);
++
+       // Reset render targets
+       ctx->bindRenderTargets(DxvkRenderTargets(), 0u);
+ 
+@@ -4926,6 +4940,83 @@ namespace dxvk {
+   }
+ 
+ 
++  template<typename ContextType>
++  bool D3D11CommonContext<ContextType>::HandlePrivateControl(
++      REFGUID guid, bool write, bool interfaceValue, UINT* size, void* data, HRESULT* result) {
++    const bool caps = guid == GUID TRITON_DITHER_CAPS_GUID;
++    if (!caps && guid != GUID TRITON_DITHER_STATE_GUID)
++      return false;
++
++    D3D10DeviceLock lock = LockContext();
++    *result = E_INVALIDARG;
++    if (interfaceValue || !size)
++      return true;
++
++    const bool supported = m_device->features().extLegacyDithering.legacyDithering;
++    if (write) {
++      if (caps || *size != sizeof(TritonDitherState) || !data)
++        return true;
++      TritonDitherState value;
++      std::memcpy(&value, data, sizeof(value));
++      if (value.version != TRITON_DITHER_VERSION || value.enabled > 1u)
++        return true;
++      if (value.enabled && !supported) {
++        *result = DXGI_ERROR_UNSUPPORTED;
++        return true;
++      }
++      if (m_state.om.legacyDithering != bool(value.enabled)) {
++        m_state.om.legacyDithering = bool(value.enabled);
++        ApplyLegacyDithering();
++      }
++      *result = S_OK;
++      return true;
++    }
++
++    // Both public packets consist of exactly two DWORDs; memcpy also permits
++    // unaligned transport buffers without assuming the caller's C ABI alignment.
++    const uint32_t value[2] = { TRITON_DITHER_VERSION, caps
++      ? (supported ? TRITON_DITHER_NATIVE : 0u)
++      : uint32_t(m_state.om.legacyDithering) };
++    const UINT available = *size;
++    *size = sizeof(value);
++    if (data && available < sizeof(value)) {
++      *result = DXGI_ERROR_MORE_DATA;
++      return true;
++    }
++    if (data)
++      std::memcpy(data, value, sizeof(value));
++    *result = S_OK;
++    return true;
++  }
++
++
++  template<typename ContextType>
++  void D3D11CommonContext<ContextType>::ApplyPredication() {
++    EmitCs([query = m_state.pr.predicateObject,
++            value = bool(m_state.pr.predicateValue)] (DxvkContext* ctx) {
++      Rc<DxvkPredicate> predicate;
++      if (query) {
++        predicate = query->GetPredicate(ctx);
++        // Invalid (unissued or active) predicates must never become an
++        // unconditional command stream. Retain the preceding backend state.
++        if (!predicate) {
++          Logger::err("D3D11: SetPredication requires an ended predicate");
++          return;
++        }
++      }
++      ctx->setPredicate(predicate, value);
++    });
++  }
++
++
++  template<typename ContextType>
++  void D3D11CommonContext<ContextType>::ApplyLegacyDithering() {
++    EmitCs([enabled = m_state.om.legacyDithering] (DxvkContext* ctx) {
++      ctx->setLegacyDithering(enabled);
++    });
++  }
++
++
+   template<typename ContextType>
+   void D3D11CommonContext<ContextType>::ResetContextState() {
+     // Reset shaders
+@@ -4940,9 +5031,11 @@ namespace dxvk {
+     m_state.id.reset();
+     m_state.ia.reset();
+     m_state.om.reset();
++    ApplyLegacyDithering();
+     m_state.rs.reset();
+     m_state.so.reset();
+     m_state.pr.reset();
++    ApplyPredication();
+ 
+     // Reset resource bindings
+     m_state.cbv.reset();
+@@ -5080,6 +5173,8 @@ namespace dxvk {
+     ApplyInputLayout();
+     ApplyPrimitiveTopology();
+     ApplyBlendState();
++    ApplyLegacyDithering();
++    ApplyPredication();
+     ApplyBlendFactor();
+     ApplyDepthStencilState();
+     ApplyStencilRef();
+@@ -5451,8 +5546,9 @@ namespace dxvk {
+     const Rc<DxvkImage>&                    DstImage,
+     const VkImageSubresourceLayers&         DstLayers,
+     const Rc<DxvkImage>&                    SrcImage,
+-    const VkImageSubresourceLayers&         SrcLayers) {
+-    EmitCs([
++    const VkImageSubresourceLayers&         SrcLayers,
++          bool Predicated) {
++    EmitCsResource([
+       cDstImage = DstImage,
+       cDstLayers = DstLayers,
+       cSrcImage = SrcImage,
+@@ -5462,7 +5558,7 @@ namespace dxvk {
+         cDstImage, cDstLayers, VkOffset3D(),
+         cSrcImage, cSrcLayers, VkOffset3D(),
+         cDstImage->mipLevelExtent(cDstLayers.mipLevel));
+-    });
++    }, Predicated);
+   }
+ 
+ 
+@@ -5578,6 +5674,8 @@ namespace dxvk {
+       EmitCsCmd<uint32_t>(D3D11CmdType::None, dwordCount, [
+         cBufferSlice = std::move(bufferSlice)
+       ] (DxvkContext* ctx, const uint32_t* data, size_t) {
++        if (!ctx->testPredicate())
++          return;
+         ctx->updateBuffer(
+           cBufferSlice.buffer(),
+           cBufferSlice.offset(),
+@@ -5596,7 +5694,7 @@ namespace dxvk {
+       DxvkBufferSlice stagingSlice = AllocStagingBuffer(Length);
+       std::memcpy(stagingSlice.mapPtr(0), pSrcData, Length);
+ 
+-      EmitCs([
++      EmitCsResource([
+         cStagingSlice = std::move(stagingSlice),
+         cBufferSlice  = std::move(bufferSlice)
+       ] (DxvkContext* ctx) {
+@@ -5665,7 +5763,7 @@ namespace dxvk {
+       formatInfo, formatInfo->aspectMask);
+ 
+     UpdateImage(pDstTexture, &subresource,
+-      offset, extent, std::move(stagingSlice));
++      offset, extent, std::move(stagingSlice), true);
+ 
+     if constexpr (!IsDeferred)
+       static_cast<ContextType*>(this)->ThrottleAllocation();
+@@ -5678,14 +5776,15 @@ namespace dxvk {
+     const VkImageSubresource*               pDstSubresource,
+           VkOffset3D                        DstOffset,
+           VkExtent3D                        DstExtent,
+-          DxvkBufferSlice                   StagingBuffer) {
++          DxvkBufferSlice                   StagingBuffer,
++          bool Predicated) {
+     bool dstIsImage = pDstTexture->HasImage();
+ 
+     uint32_t dstSubresource = D3D11CalcSubresource(pDstSubresource->mipLevel,
+       pDstSubresource->arrayLayer, pDstTexture->Desc()->MipLevels);
+ 
+     if (dstIsImage) {
+-      EmitCs([
++      EmitCsResource([
+         cDstImage         = pDstTexture->GetImage(),
+         cDstLayers        = vk::makeSubresourceLayers(*pDstSubresource),
+         cDstOffset        = DstOffset,
+@@ -5698,7 +5797,7 @@ namespace dxvk {
+           cStagingSlice.buffer(),
+           cStagingSlice.offset(), 0, 0,
+           cPackedFormat);
+-      });
++      }, Predicated);
+     } else {
+       // If the destination image is backed only by a buffer, we need to use
+       // the packed buffer copy function which does not know about planes and
+@@ -5733,7 +5832,7 @@ namespace dxvk {
+ 
+         VkExtent3D blockCount = util::computeBlockCount(DstExtent, blockSize);
+ 
+-        EmitCs([
++        EmitCsResource([
+           cDstBuffer      = pDstTexture->GetMappedBuffer(dstSubresource),
+           cDstStart       = pDstTexture->GetSubresourceLayout(dstAspectMask, dstSubresource).Offset,
+           cDstOffset      = util::computeBlockOffset(DstOffset, blockSize),
+@@ -5747,7 +5846,7 @@ namespace dxvk {
+             cDstBuffer, cDstStart, cDstOffset, cDstSize,
+             cSrcBuffer, cSrcStart, VkOffset3D(), cDstExtent,
+             cDstExtent, cPixelSize);
+-        });
++        }, Predicated);
+ 
+         srcPlaneOffset += util::flattenImageExtent(blockCount) * elementSize;
+       }
+@@ -5783,7 +5882,7 @@ namespace dxvk {
+ 
+       // Provide a fast path for mapped buffer updates since some
+       // games use UpdateSubresource to update constant buffers.
+-      if (likely(bufferResource->GetMapMode() == D3D11_COMMON_BUFFER_MAP_MODE_DIRECT) && likely(!pDstBox)) {
++      if (!m_state.pr.predicateObject && likely(bufferResource->GetMapMode() == D3D11_COMMON_BUFFER_MAP_MODE_DIRECT) && likely(!pDstBox)) {
+         context->UpdateMappedBuffer(bufferResource, 0, bufferSize, pSrcData, 0);
+         return;
+       }
+@@ -5801,7 +5900,7 @@ namespace dxvk {
+         return;
+ 
+       // Still try to be fast if a box is provided but we update the full buffer
+-      if (likely(bufferResource->GetMapMode() == D3D11_COMMON_BUFFER_MAP_MODE_DIRECT)) {
++      if (!m_state.pr.predicateObject && likely(bufferResource->GetMapMode() == D3D11_COMMON_BUFFER_MAP_MODE_DIRECT)) {
+         CopyFlags &= D3D11_COPY_DISCARD | D3D11_COPY_NO_OVERWRITE;
+ 
+         if (likely(length == bufferSize) || unlikely(CopyFlags != 0)) {
+diff --git a/src/d3d11/d3d11_context.h b/src/d3d11/d3d11_context.h
+index 76de0ebd80ccdd02e43bb1d54ae6d935056b556c..38f7b6a46e475ca75e1f428eb5b89cf11a635eff 100644
+--- a/src/d3d11/d3d11_context.h
++++ b/src/d3d11/d3d11_context.h
+@@ -19,6 +19,7 @@
+ #include "d3d11_context_ext.h"
+ #include "d3d11_context_state.h"
+ #include "d3d11_device_child.h"
++#include "d3d11_dither_control.h"
+ #include "d3d11_texture.h"
+ 
+ namespace dxvk {
+@@ -77,6 +78,11 @@ namespace dxvk {
+     // of the time we're fine with hitting the global allocator
+     constexpr static VkDeviceSize StagingBufferSize = 256ull << 10;
+   protected:
++    bool HandlePrivateControl(REFGUID guid, bool write, bool interfaceValue,
++      UINT* size, void* data, HRESULT* result) override;
++    void ApplyLegacyDithering();
++    void ApplyPredication();
++
+     // Compile-time debug flag to force lazy binding on (True) or off (False)
+     constexpr static Tristate DebugLazyBinding = Tristate::Auto;
+   public:
+@@ -1116,7 +1122,8 @@ namespace dxvk {
+       const Rc<DxvkImage>&                    DstImage,
+       const VkImageSubresourceLayers&         DstLayers,
+       const Rc<DxvkImage>&                    SrcImage,
+-      const VkImageSubresourceLayers&         SrcLayers);
++      const VkImageSubresourceLayers&         SrcLayers,
++            bool                              Predicated = false);
+ 
+     bool TestRtvUavHazards(
+             UINT                              NumRTVs,
+@@ -1150,7 +1157,8 @@ namespace dxvk {
+       const VkImageSubresource*               pDstSubresource,
+             VkOffset3D                        DstOffset,
+             VkExtent3D                        DstExtent,
+-            DxvkBufferSlice                   StagingBuffer);
++            DxvkBufferSlice                   StagingBuffer,
++            bool                              Predicated = false);
+ 
+     void UpdateResource(
+             ID3D11Resource*                   pDstResource,
+@@ -1219,6 +1227,16 @@ namespace dxvk {
+       }
+     }
+ 
++    // Only public resource operations use this wrapper. Internal uploads,
++    // UAV counter initialization, map/unmap and meta work remain unconditional.
++    template<typename Cmd>
++    void EmitCsResource(Cmd&& command, bool predicated = true) {
++      EmitCs([cCommand = std::forward<Cmd>(command), predicated] (DxvkContext* ctx) mutable {
++        if (!predicated || ctx->testPredicate())
++          cCommand(ctx);
++      });
++    }
++
+     template<typename M, bool AllowFlush = true, typename Cmd>
+     void EmitCsCmd(D3D11CmdType type, size_t count, Cmd&& command) {
+       m_csDataType = type;
+diff --git a/src/d3d11/d3d11_context_def.cpp b/src/d3d11/d3d11_context_def.cpp
+index d58774c3ec09967a4b488cc9a569f548b91e41d8..bdfbb7eb3d8078c295931920bbc582b2cafd166c 100644
+--- a/src/d3d11/d3d11_context_def.cpp
++++ b/src/d3d11/d3d11_context_def.cpp
+@@ -47,6 +47,9 @@ namespace dxvk {
+ 
+     Com<D3D11Query, false> query(static_cast<D3D11Query*>(pAsync));
+ 
++    if (query == m_state.pr.predicateObject)
++      return;
++
+     if (unlikely(!query->IsScoped()))
+       return;
+ 
+@@ -75,6 +78,9 @@ namespace dxvk {
+ 
+     Com<D3D11Query, false> query(static_cast<D3D11Query*>(pAsync));
+ 
++    if (query == m_state.pr.predicateObject)
++      return;
++
+     if (query->IsScoped()) {
+       auto entry = std::find(
+         m_queriesBegun.begin(),
+@@ -193,7 +199,7 @@ namespace dxvk {
+     // Any use of ExecuteCommandList will reset command list state
+     // before the command list is actually executed.
+     m_commandList = CreateCommandList();
+-    m_chunkId = 0;
++    m_chunkId = ~0ull;
+     
+     if (RestoreDeferredContextState)
+       RestoreCommandListState();
+diff --git a/src/d3d11/d3d11_context_def.h b/src/d3d11/d3d11_context_def.h
+index feabf4481dde96df4c04779944808c0097eaab0c..81b2bcfc8da5f05f58efce429fb818af615bb812 100644
+--- a/src/d3d11/d3d11_context_def.h
++++ b/src/d3d11/d3d11_context_def.h
+@@ -92,7 +92,9 @@ namespace dxvk {
+     std::vector<Com<D3D11Query, false>> m_queriesBegun;
+ 
+     // Chunk ID within the current command list
+-    uint64_t m_chunkId = 0ull;
++    // Index of the last emitted chunk. Before the first emission, adding
++    // one in GetCurrentChunkId must produce chunk zero.
++    uint64_t m_chunkId = ~0ull;
+ 
+     D3DDestructionNotifier m_destructionNotifier;
+ 
+diff --git a/src/d3d11/d3d11_context_imm.cpp b/src/d3d11/d3d11_context_imm.cpp
+index 270bbb46e42ef7328ff7a218fc8049fdd5754d9f..cdcf1368a91958e258abc2480aa05c073a0c97f3 100644
+--- a/src/d3d11/d3d11_context_imm.cpp
++++ b/src/d3d11/d3d11_context_imm.cpp
+@@ -4,6 +4,8 @@
+ #include "d3d11_fence.h"
+ #include "d3d11_texture.h"
+ #include "d3d11_view_dsv.h"
++#include "d3d11_view_rtv.h"
++#include "d3d11_view_srv.h"
+ #include <vector>
+ 
+ #include "../util/util_win32_compat.h"
+@@ -124,6 +126,9 @@ namespace dxvk {
+     
+     auto query = static_cast<D3D11Query*>(pAsync);
+ 
++    if (query == m_state.pr.predicateObject.ptr())
++      return;
++
+     if (unlikely(!query->DoBegin()))
+       return;
+ 
+@@ -142,6 +147,9 @@ namespace dxvk {
+     
+     auto query = static_cast<D3D11Query*>(pAsync);
+ 
++    if (query == m_state.pr.predicateObject.ptr())
++      return;
++
+     if (unlikely(!query->DoEnd())) {
+       EmitCs([cQuery = Com<D3D11Query, false>(query)]
+       (DxvkContext* ctx) {
+@@ -211,7 +219,7 @@ namespace dxvk {
+       });
+     }
+     AddCost(GpuCostEstimate::Transfer);
+-    EmitCs([cView = std::move(view), cAspects = aspects, cValue = value,
++    EmitCsResource([cView = std::move(view), cAspects = aspects, cValue = value,
+             cRects = std::move(rectangles)] (DxvkContext* ctx) {
+       for (const auto& rect : cRects) {
+         ctx->clearImageView(cView,
+@@ -230,6 +238,96 @@ namespace dxvk {
+   }
+ 
+ 
++  HRESULT D3D11ImmediateContext::CopyColor(
++          ID3D11RenderTargetView* DstView,
++          ID3D11ShaderResourceView* SrcView) {
++    D3D10DeviceLock lock = LockContext();
++    auto rtv = dynamic_cast<D3D11RenderTargetView*>(DstView);
++    auto srv = dynamic_cast<D3D11ShaderResourceView*>(SrcView);
++    if (!rtv || !srv)
++      return E_INVALIDARG;
++
++    Com<ID3D11Device> dstDevice, srcDevice;
++    rtv->GetDevice(&dstDevice);
++    srv->GetDevice(&srcDevice);
++    if (dstDevice.ptr() != GetParentInterface()
++     || srcDevice.ptr() != GetParentInterface())
++      return E_INVALIDARG;
++
++    D3D11_RENDER_TARGET_VIEW_DESC dstDesc;
++    D3D11_SHADER_RESOURCE_VIEW_DESC srcDesc;
++    rtv->GetDesc(&dstDesc);
++    srv->GetDesc(&srcDesc);
++    if (dstDesc.ViewDimension != D3D11_RTV_DIMENSION_TEXTURE2D
++     || srcDesc.ViewDimension != D3D11_SRV_DIMENSION_TEXTURE2D
++     || dstDesc.Texture2D.MipSlice
++     || srcDesc.Texture2D.MostDetailedMip
++     || srcDesc.Texture2D.MipLevels != 1)
++      return E_INVALIDARG;
++
++    auto isRawColor = [] (DXGI_FORMAT format) {
++      return format == DXGI_FORMAT_R8G8B8A8_UNORM
++          || format == DXGI_FORMAT_B8G8R8A8_UNORM
++          || format == DXGI_FORMAT_B8G8R8X8_UNORM;
++    };
++    if (!isRawColor(dstDesc.Format) || !isRawColor(srcDesc.Format))
++      return DXGI_ERROR_UNSUPPORTED;
++
++    Com<ID3D11Resource> dstResource, srcResource;
++    rtv->GetResource(&dstResource);
++    srv->GetResource(&srcResource);
++    auto dstTexture = dynamic_cast<D3D11Texture2D*>(dstResource.ptr());
++    auto srcTexture = dynamic_cast<D3D11Texture2D*>(srcResource.ptr());
++    if (!dstTexture || !srcTexture || dstTexture == srcTexture)
++      return E_INVALIDARG;
++
++    auto isScratch = [] (D3D11Texture2D* texture) {
++      D3D11_TEXTURE2D_DESC desc;
++      texture->GetDesc(&desc);
++      auto common = texture->GetCommonTexture();
++      return desc.Usage == D3D11_USAGE_DEFAULT && !desc.CPUAccessFlags
++          && !desc.MiscFlags && desc.MipLevels == 1 && desc.ArraySize == 1
++          && desc.SampleDesc.Count == 1
++          && !common->Get11on12Info().Resource;
++    };
++    if (!isScratch(dstTexture) || !isScratch(srcTexture))
++      return E_INVALIDARG;
++
++    auto dstView = rtv->GetImageView();
++    auto srcView = srv->GetImageView();
++    if (!dstView || !srcView || dstView->image() == srcView->image()
++     || dstView->image()->info().shared || srcView->image()->info().shared
++     || dstView->image()->info().sharing.mode != DxvkSharedHandleMode::None
++     || srcView->image()->info().sharing.mode != DxvkSharedHandleMode::None)
++      return E_INVALIDARG;
++
++    VkExtent3D extent = dstView->mipLevelExtent(0);
++    VkExtent3D srcExtent = srcView->mipLevelExtent(0);
++    if (!extent.width || !extent.height || extent.depth != 1
++     || extent.width > INT32_MAX || extent.height > INT32_MAX
++     || extent.width != srcExtent.width || extent.height != srcExtent.height
++     || srcExtent.depth != 1)
++      return E_INVALIDARG;
++
++    HRESULT hr = m_parent->GetDeviceRemovedReason();
++    if (FAILED(hr))
++      return hr;
++
++    AddCost(GpuCostEstimate::Transfer);
++    EmitCsResource([cDstView = std::move(dstView), cSrcView = std::move(srcView),
++            cExtent = extent] (DxvkContext* ctx) {
++      const VkOffset3D offsets[] = {
++        { 0, 0, 0 }, { int32_t(cExtent.width), int32_t(cExtent.height), 1 }
++      };
++      // The meta path spills rendering and pauses application queries. It
++      // resolves component mappings, including the opaque alpha of X8 views,
++      // without rebinding any D3D11 state or exposing frame pixels to the CPU.
++      ctx->blitImageView(cDstView, offsets, cSrcView, offsets, VK_FILTER_NEAREST);
++    }, false);
++    return S_OK;
++  }
++
++
+   void STDMETHODCALLTYPE D3D11ImmediateContext::Flush() {
+     RequestFlush(D3D11_CONTEXT_TYPE_ALL, nullptr);
+   }
+diff --git a/src/d3d11/d3d11_context_imm.h b/src/d3d11/d3d11_context_imm.h
+index a1c4363b972a6b168b58f2234e6e205c4bda78c1..d198f7e52e7570e91e4ffa1903f7de093c8a50e5 100644
+--- a/src/d3d11/d3d11_context_imm.h
++++ b/src/d3d11/d3d11_context_imm.h
+@@ -48,6 +48,12 @@ namespace dxvk {
+     HRESULT ClearDepthStencilRects(
+             ID3D11DepthStencilView* View, UINT Flags, FLOAT Depth,
+             UINT8 Stencil, UINT Count, const int32_t* Rects);
++
++    // Queue a query-neutral, unconditional color conversion between private
++    // GPU scratch textures. Application state and predication are preserved.
++    HRESULT CopyColor(
++            ID3D11RenderTargetView* DstView,
++            ID3D11ShaderResourceView* SrcView);
+     
+     void STDMETHODCALLTYPE Flush1(
+             D3D11_CONTEXT_TYPE          ContextType,
+diff --git a/src/d3d11/d3d11_context_state.h b/src/d3d11/d3d11_context_state.h
+index b2f7a47e8ead0b91742a7f6996523c0825d282e1..197b08cb4a1afa15208c403e8c69656cb4d6f099 100644
+--- a/src/d3d11/d3d11_context_state.h
++++ b/src/d3d11/d3d11_context_state.h
+@@ -197,6 +197,8 @@ namespace dxvk {
+     
+     FLOAT blendFactor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+ 
++    bool  legacyDithering = false;
++
+     UINT  sampleCount    = 0u;
+     UINT  sampleMask     = D3D11_DEFAULT_SAMPLE_MASK;
+     UINT  stencilRef     = D3D11_DEFAULT_STENCIL_REFERENCE;
+@@ -220,6 +222,7 @@ namespace dxvk {
+       for (uint32_t i = 0; i < 4; i++)
+         blendFactor[i] = 1.0f;
+ 
++      legacyDithering = false;
+       sampleCount = 0u;
+       sampleMask = D3D11_DEFAULT_SAMPLE_MASK;
+       stencilRef = D3D11_DEFAULT_STENCIL_REFERENCE;
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index f80646241751bbcbd6b055080b19b22ad6db5da9..9197493e05d3930aa1f7984932d3a736f9b5dc1b 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -1252,11 +1252,20 @@ namespace dxvk {
+     desc.MiscFlags   = pPredicateDesc->MiscFlags;
+     desc.ContextType = D3D11_CONTEXT_TYPE_ALL;
+ 
+-    if (desc.Query != D3D11_QUERY_OCCLUSION_PREDICATE) {
++    if (desc.Query != D3D11_QUERY_OCCLUSION_PREDICATE
++     && desc.Query != D3D11_QUERY_SO_OVERFLOW_PREDICATE
++     && desc.Query != D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0
++     && desc.Query != D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1
++     && desc.Query != D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2
++     && desc.Query != D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3) {
+       Logger::warn(str::format("D3D11: Unhandled predicate type: ", pPredicateDesc->Query));
+       return E_INVALIDARG;
+     }
+     
++    if ((desc.MiscFlags & ~D3D11_QUERY_MISC_PREDICATEHINT)
++     || (desc.MiscFlags && desc.Query != D3D11_QUERY_OCCLUSION_PREDICATE))
++      return E_INVALIDARG;
++
+     if (!ppPredicate)
+       return S_FALSE;
+     
+diff --git a/src/d3d11/d3d11_device_child.h b/src/d3d11/d3d11_device_child.h
+index 5e8b0e335585f1a6c0904a376ab589d15ecae1f2..df89afafd3dccabfa4c4bd87227effb7692ac798 100644
+--- a/src/d3d11/d3d11_device_child.h
++++ b/src/d3d11/d3d11_device_child.h
+@@ -23,6 +23,9 @@ namespace dxvk {
+             REFGUID               guid,
+             UINT*                 pDataSize,
+             void*                 pData) final {
++      HRESULT result;
++      if (HandlePrivateControl(guid, false, false, pDataSize, pData, &result))
++        return result;
+       return m_privateData.getData(
+         guid, pDataSize, pData);
+     }
+@@ -31,6 +34,9 @@ namespace dxvk {
+             REFGUID               guid,
+             UINT                  DataSize,
+       const void*                 pData) final {
++      HRESULT result;
++      if (HandlePrivateControl(guid, true, false, &DataSize, const_cast<void*>(pData), &result))
++        return result;
+       // WKPDID_D3DDebugObjectName, can't use directly due to MSVC link errors
+       if (guid == GUID{0x429b8c22,0x9188,0x4b0c,0x87,0x42,0xac,0xb0,0xbf,0x85,0xc2,0x00})
+         SetDebugName(static_cast<const char*>(pData));
+@@ -42,6 +48,9 @@ namespace dxvk {
+     HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(
+             REFGUID               guid,
+       const IUnknown*             pUnknown) final {
++      HRESULT result;
++      if (HandlePrivateControl(guid, true, true, nullptr, nullptr, &result))
++        return result;
+       return m_privateData.setInterface(
+         guid, pUnknown);
+     }
+@@ -57,6 +66,12 @@ namespace dxvk {
+ 
+   protected:
+ 
++    // Context-specific controls must explicitly claim an exact reserved GUID.
++    // Every other object and GUID retains ordinary private-data semantics.
++    virtual bool HandlePrivateControl(REFGUID, bool, bool, UINT*, void*, HRESULT*) {
++      return false;
++    }
++
+     ID3D11Device* GetParentInterface() const {
+       // We don't know the definition of ID3D11Device
+       // here, because D3D11Device includes this file.
+diff --git a/src/d3d11/d3d11_dither_control.h b/src/d3d11/d3d11_dither_control.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5747521d2a518ede8659e987eb793a5597b7a9da
+--- /dev/null
++++ b/src/d3d11/d3d11_dither_control.h
+@@ -0,0 +1,19 @@
++/* Copyright 2026 Turing Software LLC
++ * SPDX-License-Identifier: MIT
++ * Private D3D11 context control ABI. Keep the guest and host copies identical.
++ */
++#ifndef TRITON_DITHER_CONTROL_H
++#define TRITON_DITHER_CONTROL_H
++#include <stdint.h>
++#define TRITON_DITHER_VERSION 1u
++#define TRITON_DITHER_NATIVE 1u
++#define TRITON_DITHER_CAPS_GUID {0x7d40f743,0x4f61,0x4a49,{0xa3,0x25,0xe9,0x75,0x36,0xf7,0x03,0x98}}
++#define TRITON_DITHER_STATE_GUID {0x4b245d9d,0x2e17,0x4c38,{0x91,0xb2,0x67,0x84,0xdd,0x4a,0x2b,0xd6}}
++/* CAPS is read-only. STATE Get/Set uses version=1 and enabled=0 or 1.
++ * GetPrivateData follows the standard size-query/MORE_DATA convention.
++ * Invalid schemas and interface-valued writes return E_INVALIDARG.
++ * Enabling without NATIVE support returns DXGI_ERROR_UNSUPPORTED.
++ */
++struct TritonDitherCaps { uint32_t version; uint32_t flags; };
++struct TritonDitherState { uint32_t version; uint32_t enabled; };
++#endif
+diff --git a/src/d3d11/d3d11_main.cpp b/src/d3d11/d3d11_main.cpp
+index 8733a11bc679b6a09c7e076fa2ea2bebe808fa90..8d6a577783ededded7996082842ae46764ef5a77 100644
+--- a/src/d3d11/d3d11_main.cpp
++++ b/src/d3d11/d3d11_main.cpp
+@@ -1,4 +1,5 @@
+ #include <array>
++#include <exception>
+ 
+ #include "../dxgi/dxgi_adapter.h"
+ 
+@@ -40,6 +41,28 @@ extern "C" {
+     }
+   }
+   
++  HRESULT dxvk_d3d11_copy_color(void* context, void* dst_rtv, void* src_srv) {
++    try {
++      auto immediate = dynamic_cast<D3D11ImmediateContext*>(
++        static_cast<ID3D11DeviceContext*>(context));
++      if (!immediate)
++        return E_INVALIDARG;
++      return immediate->CopyColor(
++        static_cast<ID3D11RenderTargetView*>(dst_rtv),
++        static_cast<ID3D11ShaderResourceView*>(src_srv));
++    } catch (const std::bad_alloc&) {
++      return E_OUTOFMEMORY;
++    } catch (const DxvkError& e) {
++      Logger::err(e.message());
++      return E_FAIL;
++    } catch (const std::exception& e) {
++      Logger::err(e.what());
++      return E_FAIL;
++    } catch (...) {
++      return E_FAIL;
++    }
++  }
++
+   HRESULT D3D11InternalCreateDevice(
+           IDXGIFactory*       pFactory,
+           IDXGIAdapter*       pAdapter,
+diff --git a/src/d3d11/d3d11_query.cpp b/src/d3d11/d3d11_query.cpp
+index 3e059be229f0e9686356d67369f21f0d36de3569..da931fd234c7a202cd74b7a26ab08ccb6f703d29 100644
+--- a/src/d3d11/d3d11_query.cpp
++++ b/src/d3d11/d3d11_query.cpp
+@@ -48,15 +48,17 @@ namespace dxvk {
+       
+       case D3D11_QUERY_SO_STATISTICS:
+       case D3D11_QUERY_SO_STATISTICS_STREAM0:
+-      case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
+       case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0:
+-        // FIXME it is technically incorrect to map
+-        // SO_OVERFLOW_PREDICATE to the first stream,
+-        // but this is good enough for D3D10 behaviour
+         m_query[0] = dxvkDevice->createGpuQuery(
+           VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT, 0, 0);
+         break;
+       
++      case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
++        for (uint32_t stream = 0; stream < MaxGpuQueries; stream++)
++          m_query[stream] = dxvkDevice->createGpuQuery(
++            VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT, 0, stream);
++        break;
++
+       case D3D11_QUERY_SO_STATISTICS_STREAM1:
+       case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
+         m_query[0] = dxvkDevice->createGpuQuery(
+@@ -109,7 +111,7 @@ namespace dxvk {
+       return S_OK;
+     }
+     
+-    if (m_desc.Query == D3D11_QUERY_OCCLUSION_PREDICATE) {
++    if (IsPredicate()) {
+       if (riid == __uuidof(ID3D11Predicate)) {
+         *ppvObject = AsPredicate(ref(this));
+         return S_OK;
+@@ -186,6 +188,27 @@ namespace dxvk {
+   }
+   
+   
++  bool D3D11Query::IsPredicate() const {
++    return m_desc.Query == D3D11_QUERY_OCCLUSION_PREDICATE
++        || m_desc.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE
++        || m_desc.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0
++        || m_desc.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1
++        || m_desc.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2
++        || m_desc.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3;
++  }
++
++  bool D3D11Query::IsIssuedPredicate() const {
++    return IsPredicate() && m_state == D3D11_VK_QUERY_ENDED;
++  }
++
++  Rc<DxvkPredicate> D3D11Query::GetPredicate(DxvkContext* ctx) {
++    if (!m_predicate)
++      m_predicate = ctx->createPredicate(m_query.size(), m_query.data(),
++        m_desc.Query != D3D11_QUERY_OCCLUSION_PREDICATE);
++    return m_predicate;
++  }
++
++
+   void D3D11Query::Begin(DxvkContext* ctx) {
+     switch (m_desc.Query) {
+       case D3D11_QUERY_EVENT:
+@@ -197,7 +220,9 @@ namespace dxvk {
+         break;
+       
+       default:
+-        ctx->beginQuery(m_query[0]);
++        m_predicate = nullptr;
++        for (const auto& query : m_query)
++          if (query) ctx->beginQuery(query);
+     }
+   }
+   
+@@ -214,7 +239,8 @@ namespace dxvk {
+         break;
+       
+       default:
+-        ctx->endQuery(m_query[0]);
++        for (const auto& query : m_query)
++          if (query) ctx->endQuery(query);
+     }
+ 
+     m_resetCtr.fetch_sub(1, std::memory_order_release);
+@@ -329,8 +355,10 @@ namespace dxvk {
+         case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
+         case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3: {
+           auto data = static_cast<BOOL*>(pData);
+-          *data = queryData[0].xfbStream.primitivesNeeded
+-                > queryData[0].xfbStream.primitivesWritten;
++          *data = FALSE;
++          for (uint32_t i = 0; i < MaxGpuQueries && m_query[i]; ++i)
++            *data |= queryData[i].xfbStream.primitivesNeeded
++                   > queryData[i].xfbStream.primitivesWritten;
+         } return S_OK;
+ 
+         default:
+diff --git a/src/d3d11/d3d11_query.h b/src/d3d11/d3d11_query.h
+index 06715bdcbe6eae72640d4f162b2b5e28cada1b07..ce75c77f7e28bb830c7335710e81cab08040b4f2 100644
+--- a/src/d3d11/d3d11_query.h
++++ b/src/d3d11/d3d11_query.h
+@@ -2,6 +2,7 @@
+ 
+ #include "../dxvk/dxvk_gpu_event.h"
+ #include "../dxvk/dxvk_gpu_query.h"
++#include "../dxvk/dxvk_meta_predicate.h"
+ 
+ #include "../d3d10/d3d10_query.h"
+ 
+@@ -16,7 +17,7 @@ namespace dxvk {
+   };
+   
+   class D3D11Query : public D3D11DeviceChild<ID3D11Query1> {
+-    constexpr static uint32_t MaxGpuQueries = 2;
++    constexpr static uint32_t MaxGpuQueries = 4;
+     constexpr static uint32_t MaxGpuEvents  = 1;
+   public:
+     
+@@ -36,6 +37,10 @@ namespace dxvk {
+ 
+     void STDMETHODCALLTYPE GetDesc1(D3D11_QUERY_DESC1* pDesc) final;
+ 
++    bool IsPredicate() const;
++    bool IsIssuedPredicate() const;
++    Rc<DxvkPredicate> GetPredicate(DxvkContext* ctx);
++
+     void Begin(DxvkContext* ctx);
+     
+     void End(DxvkContext* ctx);
+@@ -102,6 +107,7 @@ namespace dxvk {
+     D3D11_QUERY_DESC1  m_desc;
+ 
+     D3D11_VK_QUERY_STATE m_state;
++    Rc<DxvkPredicate> m_predicate;
+     
+     std::array<Rc<DxvkQuery>, MaxGpuQueries> m_query;
+     std::array<Rc<DxvkEvent>, MaxGpuEvents>  m_event;
+diff --git a/src/d3d11/d3d11_shader.cpp b/src/d3d11/d3d11_shader.cpp
+index e3821d0124e7932c6c785a884b6e92f36d9b2e92..dae9b4cd9050083ab4a6d2bdfabd419563dbc274 100644
+--- a/src/d3d11/d3d11_shader.cpp
++++ b/src/d3d11/d3d11_shader.cpp
+@@ -158,16 +158,28 @@ namespace dxvk {
+       pDevice->InitShaderIcb(this, icbSizeInBytes, Icb.data);
+     }
+ 
++    // A stream-output alias has no application GS and follows the preceding
++    // stage's primitive topology. Include this property in the shader cache key.
++    auto moduleInfo = ModuleInfo;
++
++    if (ShaderKey.stage() == VK_SHADER_STAGE_GEOMETRY_BIT) {
++      dxbc_spv::dxbc::Container container(pShaderBytecode, BytecodeLength);
++      auto type = dxbc_spv::dxbc::Parser(container.getCodeChunk()).getShaderInfo().getType();
++
++      if (type != dxbc_spv::dxbc::ShaderType::eGeometry)
++        moduleInfo.options.flags.set(DxvkShaderCompileFlag::PassthroughGeometry);
++    }
++
+     // Create actual shader converter
+     m_shader = pDevice->GetDXVKDevice()->createCachedShader(
+-      ShaderKey.toString(), ModuleInfo, nullptr);
++      ShaderKey.toString(), moduleInfo, nullptr);
+ 
+     if (!m_shader) {
+       Rc<D3D11ShaderConverter> converter = new D3D11ShaderConverter(ShaderKey,
+         ModuleInfo, pShaderBytecode, BytecodeLength, bool(m_buffer));
+ 
+       m_shader = pDevice->GetDXVKDevice()->createCachedShader(
+-        ShaderKey.toString(), ModuleInfo, std::move(converter));
++        ShaderKey.toString(), moduleInfo, std::move(converter));
+     }
+   }
+ 
+diff --git a/src/d3d11/d3d11_texture.cpp b/src/d3d11/d3d11_texture.cpp
+index 34daed47fc3eff96990d166c547b54010087c5d3..0017bdf508a198594a7596e4299c8cd5b3efb276 100644
+--- a/src/d3d11/d3d11_texture.cpp
++++ b/src/d3d11/d3d11_texture.cpp
+@@ -54,12 +54,16 @@ namespace dxvk {
+       hSharedHandle = INVALID_HANDLE_VALUE;
+ 
+ #ifndef _WIN32
+-    // Vendor bit: linear dmabuf export for scanout consumers.  Strip it
+-    // from the public description before any further MiscFlags checks.
++    // Vendor bits select the dmabuf export layout.  Strip them from
++    // the public description before any further MiscFlags checks.
+     if (m_desc.MiscFlags & DXVK_D3D11_RESOURCE_MISC_LINEAR_EXPORT) {
+       m_desc.MiscFlags &= ~DXVK_D3D11_RESOURCE_MISC_LINEAR_EXPORT;
+       imageInfo.sharing.dmabufForceLinear = VK_TRUE;
+     }
++    if (m_desc.MiscFlags & DXVK_D3D11_RESOURCE_MISC_SINGLE_PLANE_EXPORT) {
++      m_desc.MiscFlags &= ~DXVK_D3D11_RESOURCE_MISC_SINGLE_PLANE_EXPORT;
++      imageInfo.sharing.dmabufSinglePlane = VK_TRUE;
++    }
+ #endif
+ 
+     const auto sharingFlags = D3D11_RESOURCE_MISC_SHARED|D3D11_RESOURCE_MISC_SHARED_NTHANDLE|D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+diff --git a/src/dxvk/dxvk_cmdlist.cpp b/src/dxvk/dxvk_cmdlist.cpp
+index 8db2243afb6601fa41bfd1f389864e06ebe9929d..b384cc30420e56443d945c856e8f8e4b4ffc2ca6 100644
+--- a/src/dxvk/dxvk_cmdlist.cpp
++++ b/src/dxvk/dxvk_cmdlist.cpp
+@@ -160,6 +160,7 @@ namespace dxvk {
+         case DxvkCmdBuffer::ExecBuffer: label = vk::makeLabel(0xdcc0a2, "Graphics commands"); break;
+         case DxvkCmdBuffer::InitBuffer: label = vk::makeLabel(0xc0dca2, "Init commands"); break;
+         case DxvkCmdBuffer::InitBarriers: label = vk::makeLabel(0xd0e6b8, "Init barriers"); break;
++        case DxvkCmdBuffer::SharedAcquires: label = vk::makeLabel(0xd0e6b8, "Shared image acquires"); break;
+         case DxvkCmdBuffer::SdmaBuffer: label = vk::makeLabel(0xc0a2dc, "Upload commands"); break;
+         case DxvkCmdBuffer::SdmaBarriers: label = vk::makeLabel(0xd0b8e6, "Upload barriers"); break;
+         default: ;
+@@ -252,8 +253,8 @@ namespace dxvk {
+ 
+     static const std::array<DxvkCmdBuffer, 2> SdmaCmdBuffers =
+       { DxvkCmdBuffer::SdmaBarriers, DxvkCmdBuffer::SdmaBuffer };
+-    static const std::array<DxvkCmdBuffer, 2> InitCmdBuffers =
+-      { DxvkCmdBuffer::InitBarriers, DxvkCmdBuffer::InitBuffer };
++    static const std::array<DxvkCmdBuffer, 3> InitCmdBuffers =
++      { DxvkCmdBuffer::SharedAcquires, DxvkCmdBuffer::InitBarriers, DxvkCmdBuffer::InitBuffer };
+ 
+     const auto& graphics = m_device->queues().graphics;
+     const auto& transfer = m_device->queues().transfer;
+@@ -264,6 +265,7 @@ namespace dxvk {
+     for (size_t i = 0; i < m_cmdSubmissions.size(); i++) {
+       bool isFirst = i == 0;
+       bool isLast  = i == m_cmdSubmissions.size() - 1;
++      bool hasGraphicsWait = !isFirst && m_cmdSubmissions[i - 1].syncSdma;
+ 
+       const auto& cmd = m_cmdSubmissions[i];
+ 
+@@ -280,6 +282,7 @@ namespace dxvk {
+       }
+ 
+       if (sparseBind) {
++        hasGraphicsWait = true;
+         // Sparse binding needs to serialize command execution, so wait
+         // for any prior submissions, then block any subsequent ones
+         sparseBind->waitSemaphore(semaphores.graphics, timelines.graphics);
+@@ -321,6 +324,15 @@ namespace dxvk {
+       }
+ 
+       // Submit initialization commands, if any
++      if (cmd.cmdBuffers[uint32_t(DxvkCmdBuffer::SharedAcquires)]
++       && timelines.graphics && !hasGraphicsWait) {
++        // Order acquires after prior local releases even without an external
++        // consumer. A pending SDMA/sparse wait already supplies this ordering,
++        // directly or through the transfer semaphore; do not wait twice.
++        m_commandSubmission.waitSemaphore(semaphores.graphics,
++          timelines.graphics, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
++      }
++
+       for (auto cmdBuffer : InitCmdBuffers) {
+         if (cmd.cmdBuffers[uint32_t(cmdBuffer)])
+           m_commandSubmission.executeCommandBuffer(cmd.cmdBuffers[uint32_t(cmdBuffer)]);
+@@ -345,7 +357,7 @@ namespace dxvk {
+       }
+ 
+       m_commandSubmission.signalSemaphore(semaphores.graphics,
+-        ++timelines.graphics, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
++        ++timelines.graphics, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+ 
+       // Finally, submit all graphics commands of the current submission
+       if ((status = m_commandSubmission.submit(m_device, graphics.queueHandle, trackedId)))
+@@ -384,6 +396,61 @@ namespace dxvk {
+     m_cmd = DxvkCommandSubmissionInfo();
+     m_cmd.cmdBuffers[uint32_t(DxvkCmdBuffer::ExecBuffer)] = allocateCommandBuffer(DxvkCmdBuffer::ExecBuffer);
+   }
++
++
++  void DxvkCommandList::trackSharedImage(DxvkImage* image) {
++    if (!image->isDmabufShared())
++      return;
++
++    // Lifetime is covered by track(), including views which only read an
++    // image and therefore never need an ordinary image memory barrier.
++    for (auto* tracked : m_sharedImages) {
++      if (tracked == image)
++        return;
++    }
++    m_sharedImages.push_back(image);
++
++    if (!image->needsForeignAcquire())
++      return;
++
++    VkImageMemoryBarrier2 barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
++    barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
++    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
++    barrier.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
++    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
++    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
++    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
++    barrier.dstQueueFamilyIndex = m_device->queues().graphics.queueFamily;
++    barrier.image = image->handle();
++    barrier.subresourceRange = image->getAvailableSubresources();
++
++    VkDependencyInfo dependency = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
++    dependency.imageMemoryBarrierCount = 1;
++    dependency.pImageMemoryBarriers = &barrier;
++    cmdPipelineBarrier(DxvkCmdBuffer::SharedAcquires, &dependency);
++  }
++
++
++  void DxvkCommandList::releaseSharedImages() {
++    for (auto* image : m_sharedImages) {
++      VkImageMemoryBarrier2 barrier = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
++      barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
++      barrier.srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
++      barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
++      barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
++      barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
++      barrier.srcQueueFamilyIndex = m_device->queues().graphics.queueFamily;
++      barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
++      barrier.image = image->handle();
++      barrier.subresourceRange = image->getAvailableSubresources();
++
++      VkDependencyInfo dependency = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
++      dependency.imageMemoryBarrierCount = 1;
++      dependency.pImageMemoryBarriers = &barrier;
++      cmdPipelineBarrier(DxvkCmdBuffer::ExecBuffer, &dependency);
++    }
++    m_sharedImages.clear();
++  }
+   
+   
+   void DxvkCommandList::finalize() {
+@@ -420,6 +487,7 @@ namespace dxvk {
+ 
+   void DxvkCommandList::next() {
+     bool push = m_cmd.sparseBind || m_cmd.execCommands;
++    const auto completed = m_cmd;
+ 
+     for (uint32_t i = 0; i < m_cmd.cmdBuffers.size(); i++) {
+       DxvkCmdBuffer cmdBuffer = DxvkCmdBuffer(i);
+@@ -441,7 +509,7 @@ namespace dxvk {
+     if (!push)
+       return;
+ 
+-    m_cmdSubmissions.push_back(m_cmd);
++    m_cmdSubmissions.push_back(completed);
+ 
+     m_cmd.execCommands = VK_FALSE;
+     m_cmd.syncSdma = VK_FALSE;
+diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
+index 97989f689228285fed2f642748839c46304f16dc..9a67c5a7aa76e1beb1145c28160578dfbf10a213 100644
+--- a/src/dxvk/dxvk_cmdlist.h
++++ b/src/dxvk/dxvk_cmdlist.h
+@@ -70,6 +70,7 @@ namespace dxvk {
+     ExecBuffer,
+     InitBuffer,
+     InitBarriers,
++    SharedAcquires,
+     SdmaBuffer,
+     SdmaBarriers,
+ 
+@@ -306,6 +307,9 @@ namespace dxvk {
+      * to split the command list into multiple submissions.
+      */
+     void next();
++
++    // Call after shared layouts and all local barriers have been finalized.
++    void releaseSharedImages();
+     
+     /**
+      * \brief Tracks an object
+@@ -349,18 +353,24 @@ namespace dxvk {
+      */
+     template<typename T>
+     void track(Rc<T>&& object, DxvkAccess access) {
++      if constexpr (std::is_same_v<T, DxvkImage>)
++        trackSharedImage(object.ptr());
+       if (object->trackId(m_trackingId, access))
+         m_objectTracker.track<DxvkResourceRef>(std::move(object), access);
+     }
+ 
+     template<typename T>
+     void track(const Rc<T>& object, DxvkAccess access) {
++      if constexpr (std::is_same_v<T, DxvkImage>)
++        trackSharedImage(object.ptr());
+       if (object->trackId(m_trackingId, access))
+         m_objectTracker.track<DxvkResourceRef>(object.ptr(), access);
+     }
+ 
+     template<typename T>
+     void track(T* object, DxvkAccess access) {
++      if constexpr (std::is_same_v<T, DxvkImage>)
++        trackSharedImage(object);
+       if (object->trackId(m_trackingId, access))
+         m_objectTracker.track<DxvkResourceRef>(object, access);
+     }
+@@ -768,20 +778,30 @@ namespace dxvk {
+             DxvkCmdBuffer           cmdBuffer,
+             uint32_t                x,
+             uint32_t                y,
+-            uint32_t                z) {
++            uint32_t                z,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
+       m_cmd.execCommands |= cmdBuffer == DxvkCmdBuffer::ExecBuffer;
+ 
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(cmdBuffer), predicate);
+       m_vkd->vkCmdDispatch(getCmdBuffer(cmdBuffer), x, y, z);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer(cmdBuffer));
+     }
+     
+     
+     void cmdDispatchIndirect(
+             DxvkCmdBuffer           cmdBuffer,
+             VkBuffer                buffer,
+-            VkDeviceSize            offset) {
++            VkDeviceSize            offset,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
+       m_cmd.execCommands |= cmdBuffer == DxvkCmdBuffer::ExecBuffer;
+ 
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(cmdBuffer), predicate);
+       m_vkd->vkCmdDispatchIndirect(getCmdBuffer(cmdBuffer), buffer, offset);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer(cmdBuffer));
+     }
+     
+     
+@@ -789,10 +809,15 @@ namespace dxvk {
+             uint32_t                vertexCount,
+             uint32_t                instanceCount,
+             uint32_t                firstVertex,
+-            uint32_t                firstInstance) {
++            uint32_t                firstInstance,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDraw(getCmdBuffer(),
+         vertexCount, instanceCount,
+         firstVertex, firstInstance);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+ 
+ 
+@@ -800,9 +825,14 @@ namespace dxvk {
+             uint32_t                drawCount,
+       const VkMultiDrawInfoEXT*     drawInfos,
+             uint32_t                instanceCount,
+-            uint32_t                firstInstance) {
++            uint32_t                firstInstance,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDrawMultiEXT(getCmdBuffer(),
+         drawCount, drawInfos, instanceCount, firstInstance, sizeof(*drawInfos));
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+     
+     
+@@ -810,9 +840,14 @@ namespace dxvk {
+             VkBuffer                buffer,
+             VkDeviceSize            offset,
+             uint32_t                drawCount,
+-            uint32_t                stride) {
++            uint32_t                stride,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDrawIndirect(getCmdBuffer(),
+         buffer, offset, drawCount, stride);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+     
+     
+@@ -822,9 +857,14 @@ namespace dxvk {
+             VkBuffer                countBuffer,
+             VkDeviceSize            countOffset,
+             uint32_t                maxDrawCount,
+-            uint32_t                stride) {
++            uint32_t                stride,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDrawIndirectCount(getCmdBuffer(), buffer,
+         offset, countBuffer, countOffset, maxDrawCount, stride);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+     
+     
+@@ -833,11 +873,16 @@ namespace dxvk {
+             uint32_t                instanceCount,
+             uint32_t                firstIndex,
+             int32_t                 vertexOffset,
+-            uint32_t                firstInstance) {
++            uint32_t                firstInstance,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDrawIndexed(getCmdBuffer(),
+         indexCount, instanceCount,
+         firstIndex, vertexOffset,
+         firstInstance);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+     
+     
+@@ -845,9 +890,14 @@ namespace dxvk {
+             uint32_t                drawCount,
+       const VkMultiDrawIndexedInfoEXT* drawInfos,
+             uint32_t                instanceCount,
+-            uint32_t                firstInstance) {
++            uint32_t                firstInstance,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDrawMultiIndexedEXT(getCmdBuffer(), drawCount,
+         drawInfos, instanceCount, firstInstance, sizeof(*drawInfos), nullptr);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+ 
+ 
+@@ -855,9 +905,14 @@ namespace dxvk {
+             VkBuffer                buffer,
+             VkDeviceSize            offset,
+             uint32_t                drawCount,
+-            uint32_t                stride) {
++            uint32_t                stride,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDrawIndexedIndirect(getCmdBuffer(),
+         buffer, offset, drawCount, stride);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+ 
+ 
+@@ -867,9 +922,14 @@ namespace dxvk {
+             VkBuffer                countBuffer,
+             VkDeviceSize            countOffset,
+             uint32_t                maxDrawCount,
+-            uint32_t                stride) {
++            uint32_t                stride,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDrawIndexedIndirectCount(getCmdBuffer(),
+         buffer, offset, countBuffer, countOffset, maxDrawCount, stride);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+     
+     
+@@ -879,10 +939,15 @@ namespace dxvk {
+             VkBuffer                counterBuffer,
+             VkDeviceSize            counterBufferOffset,
+             uint32_t                counterOffset,
+-            uint32_t                vertexStride) {
++            uint32_t                vertexStride,
++      const VkConditionalRenderingBeginInfoEXT* predicate = nullptr) {
++      if (predicate)
++        m_vkd->vkCmdBeginConditionalRenderingEXT(getCmdBuffer(), predicate);
+       m_vkd->vkCmdDrawIndirectByteCountEXT(getCmdBuffer(),
+         instanceCount, firstInstance, counterBuffer,
+         counterBufferOffset, counterOffset, vertexStride);
++      if (predicate)
++        m_vkd->vkCmdEndConditionalRenderingEXT(getCmdBuffer());
+     }
+     
+     
+@@ -1270,6 +1335,7 @@ namespace dxvk {
+     uint64_t                  m_trackingId = 0u;
+ 
+     DxvkObjectTracker         m_objectTracker;
++    small_vector<DxvkImage*, 4> m_sharedImages;
+     DxvkSignalTracker         m_signalTracker;
+     DxvkStatCounters          m_statCounters;
+ 
+@@ -1283,6 +1349,8 @@ namespace dxvk {
+     
+     std::vector<Rc<DxvkDescriptorPool>> m_descriptorPools;
+ 
++    void trackSharedImage(DxvkImage* image);
++
+     Rc<DxvkDescriptorPool>    m_descriptorPool;
+     sync::SyncPoint           m_descriptorSync;
+ 
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index 97aee05862b17a671b8a86945b0e1c2f4e78d9a0..4021563ac1a3b1e4dd1061ecc155dab709d689e8 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -92,6 +92,7 @@ namespace dxvk {
+   Rc<DxvkCommandList> DxvkContext::endRecording(
+     const VkDebugUtilsLabelEXT*       reason) {
+     this->endCurrentCommands();
++    m_cmd->releaseSharedImages();
+     this->relocateQueuedResources();
+ 
+     m_implicitResolves.cleanup(m_trackingId);
+@@ -177,6 +178,123 @@ namespace dxvk {
+   }
+ 
+   
++  Rc<DxvkPredicate> DxvkContext::createPredicate(
++          uint32_t count, const Rc<DxvkQuery>* queries, bool overflow) {
++    // End all physical query fragments before copying their results. A snapshot
++    // includes fragments already consumed by GetData and retains the others.
++    endCurrentPass(false);
++    std::vector<DxvkQueryXfbStreamData> initial;
++    std::vector<Rc<DxvkGpuQuery>> pending;
++    for (uint32_t i = 0; i < count; i++) {
++      if (!queries[i])
++        continue;
++      DxvkQueryData aggregate = { };
++      std::vector<Rc<DxvkGpuQuery>> fragments;
++      if (!queries[i]->snapshot(aggregate, fragments))
++        return nullptr;
++      initial.push_back(overflow ? aggregate.xfbStream
++        : DxvkQueryXfbStreamData { aggregate.occlusion.samplesPassed, 0 });
++      pending.insert(pending.end(), fragments.begin(), fragments.end());
++    }
++    DxvkBufferCreateInfo info = { };
++    info.size = (initial.size() + pending.size()) * sizeof(DxvkQueryXfbStreamData);
++    info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
++               | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
++    info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++    info.access = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
++    auto source = m_device->createBuffer(info,
++      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
++    std::memset(source->mapPtr(0), 0, info.size);
++    std::memcpy(source->mapPtr(0), initial.data(), initial.size() * sizeof(initial[0]));
++
++    bool conditional = m_device->features().extConditionalRendering.conditionalRendering;
++    info.size = sizeof(uint32_t);
++    info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
++    info.stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_HOST_BIT;
++    info.access = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
++    if (conditional) {
++      info.usage |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
++      info.stages |= VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT;
++      info.access |= VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT;
++    }
++    Rc<DxvkPredicate> predicate = new DxvkPredicate();
++    predicate->buffer = m_device->createBuffer(info,
++      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
++
++    auto src = source->getSliceInfo();
++    for (size_t i = 0; i < pending.size(); i++) {
++      auto query = pending[i]->getQuery();
++      m_cmd->cmdCopyQueryPoolResults(DxvkCmdBuffer::ExecBuffer,
++        query.first, query.second, 1, src.buffer,
++        src.offset + (initial.size() + i) * sizeof(initial[0]), sizeof(initial[0]),
++        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
++      m_cmd->track(pending[i]);
++    }
++    accessMemory(DxvkCmdBuffer::ExecBuffer,
++      VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
++      VK_ACCESS_2_HOST_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
++      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
++    flushBarriers();
++    unbindComputePipeline();
++    auto& meta = m_common->metaPredicate();
++    DxvkPredicateArgs args = { src.gpuAddress,
++      predicate->buffer->getSliceInfo().gpuAddress,
++      uint32_t(initial.size() + pending.size()), uint32_t(overflow) };
++    m_cmd->cmdBindPipeline(DxvkCmdBuffer::ExecBuffer,
++      VK_PIPELINE_BIND_POINT_COMPUTE, meta.pipeline());
++    m_cmd->bindResources(DxvkCmdBuffer::ExecBuffer, meta.layout(),
++      0, nullptr, sizeof(args), &args);
++    m_cmd->cmdDispatch(DxvkCmdBuffer::ExecBuffer, 1, 1, 1);
++    accessMemory(DxvkCmdBuffer::ExecBuffer,
++      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
++      VK_PIPELINE_STAGE_2_HOST_BIT | (conditional ? VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT : 0),
++      VK_ACCESS_2_HOST_READ_BIT | (conditional ? VK_ACCESS_2_CONDITIONAL_RENDERING_READ_BIT_EXT : 0));
++    flushBarriers();
++    m_cmd->track(source, DxvkAccess::Write);
++    m_cmd->track(predicate->buffer, DxvkAccess::Write);
++    return predicate;
++  }
++
++
++  void DxvkContext::setPredicate(const Rc<DxvkPredicate>& predicate, bool value) {
++    m_predicate = predicate;
++    m_predicateValue = value;
++  }
++
++
++  bool DxvkContext::testPredicate() {
++    if (!m_predicate)
++      return true;
++    if (!m_predicate->cpuValue.has_value()) {
++      // Vulkan cannot predicate transfers or sparse bindings. Resolve once per
++      // immutable query generation, on the CS worker rather than the API thread.
++      flushCommandList(nullptr, nullptr);
++      m_device->waitForResource(*m_predicate->buffer, DxvkAccess::Write);
++      if (m_device->getDeviceStatus() != VK_SUCCESS)
++        throw DxvkError("Device lost while resolving predicate");
++      uint32_t value;
++      std::memcpy(&value, m_predicate->buffer->mapPtr(0), sizeof(value));
++      m_predicate->cpuValue = value != 0;
++    }
++    return *m_predicate->cpuValue != m_predicateValue;
++  }
++
++
++  bool DxvkContext::preparePredicate(VkConditionalRenderingBeginInfoEXT& info) {
++    info = { VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT };
++    if (!m_predicate)
++      return true;
++    if (!m_device->features().extConditionalRendering.conditionalRendering)
++      return testPredicate();
++    auto slice = m_predicate->buffer->getSliceInfo();
++    info.buffer = slice.buffer;
++    info.offset = slice.offset;
++    info.flags = m_predicateValue ? VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT : 0;
++    m_cmd->track(m_predicate->buffer, DxvkAccess::Read);
++    return true;
++  }
++
++
+   void DxvkContext::beginQuery(const Rc<DxvkQuery>& query) {
+     m_queryManager.enableQuery(m_cmd, query);
+   }
+@@ -810,11 +928,16 @@ namespace dxvk {
+           uint32_t x,
+           uint32_t y,
+           uint32_t z) {
++    VkConditionalRenderingBeginInfoEXT condition;
++    if (!preparePredicate(condition))
++      return;
++    const auto* predicate = condition.buffer ? &condition : nullptr;
++
+     if (this->commitComputeState<false>()) {
+       m_queryManager.beginQueries(m_cmd,
+         VK_QUERY_TYPE_PIPELINE_STATISTICS);
+       
+-      m_cmd->cmdDispatch(DxvkCmdBuffer::ExecBuffer, x, y, z);
++      m_cmd->cmdDispatch(DxvkCmdBuffer::ExecBuffer, x, y, z, predicate);
+       m_cmd->addStatCtr(DxvkStatCounter::CmdDispatchCalls, 1u);
+ 
+       m_queryManager.endQueries(m_cmd,
+@@ -825,6 +948,11 @@ namespace dxvk {
+   
+   void DxvkContext::dispatchIndirect(
+           VkDeviceSize      offset) {
++    VkConditionalRenderingBeginInfoEXT condition;
++    if (!preparePredicate(condition))
++      return;
++    const auto* predicate = condition.buffer ? &condition : nullptr;
++
+     auto argInfo = m_state.id.argBuffer.getSliceInfo();
+ 
+     if (this->commitComputeState<true>()) {
+@@ -832,7 +960,7 @@ namespace dxvk {
+         VK_QUERY_TYPE_PIPELINE_STATISTICS);
+ 
+       m_cmd->cmdDispatchIndirect(DxvkCmdBuffer::ExecBuffer,
+-        argInfo.buffer, argInfo.offset + offset);
++        argInfo.buffer, argInfo.offset + offset, predicate);
+       m_cmd->addStatCtr(DxvkStatCounter::CmdDispatchCalls, 1u);
+ 
+       m_queryManager.endQueries(m_cmd,
+@@ -898,23 +1026,85 @@ namespace dxvk {
+   void DxvkContext::drawIndirectXfb(
+           VkDeviceSize      counterOffset,
+           uint32_t          counterDivisor,
+-          uint32_t          counterBias) {
+-    if (this->commitGraphicsState<false, true>()) {
+-      auto argInfo = m_state.id.cntBuffer.getSliceInfo();
++          VkDeviceSize      counterBias) {
++    // SO counters and strides are DWORD-aligned, but an R8/R16 IA binding
++    // may start between DWORDs. Keep the full buffer + IA offset until this
++    // check: every aligned 32-bit SO counter is smaller than a bias above
++    // 0xfffffffc.
++    if (counterBias > uint64_t(0xfffffffc))
++      return;
++    const uint32_t drawCounterBias = uint32_t(counterBias);
++
++    VkConditionalRenderingBeginInfoEXT condition;
++    if (!preparePredicate(condition))
++      return;
++    const auto* predicate = condition.buffer ? &condition : nullptr;
+ 
++    // Some byte-count implementations perform an unsigned subtraction before
++    // clamping. Normalize on the GPU so a bias past the filled region cannot
++    // underflow, and leave the original SO counter available for append draws.
++    auto argInfo = drawCounterBias
++      ? normalizeXfbCounter(counterOffset, drawCounterBias)
++      : m_state.id.cntBuffer.getSliceInfo();
++    const VkDeviceSize drawCounterOffset = drawCounterBias ? 0 : counterOffset;
++
++    if (this->commitGraphicsState<false, true>()) {
+       m_cmd->cmdDrawIndirectVertexCount(1, 0,
+-        argInfo.buffer, argInfo.offset + counterOffset,
+-        counterBias, counterDivisor);
++        argInfo.buffer, argInfo.offset + drawCounterOffset,
++        0, counterDivisor, predicate);
+       m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1u);
+ 
+       // The count will generally be written from streamout
+-      if (m_flags.test(DxvkContextFlag::GpRenderPassUnsynchronized)
+-       || m_state.id.cntBuffer.buffer()->hasGfxStores())
++      if (!drawCounterBias
++       && (m_flags.test(DxvkContextFlag::GpRenderPassUnsynchronized)
++        || m_state.id.cntBuffer.buffer()->hasGfxStores()))
+         accessDrawCountBuffer(counterOffset);
+     }
+   }
+ 
+ 
++  DxvkResourceBufferInfo DxvkContext::normalizeXfbCounter(
++          VkDeviceSize counterOffset,
++          uint32_t counterBias) {
++    endCurrentPass(false);
++
++    auto& source = *m_state.id.cntBuffer.buffer();
++    auto src = m_state.id.cntBuffer.getSliceInfo();
++    DxvkBufferCreateInfo info = { };
++    info.size = sizeof(uint32_t);
++    info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
++    info.stages = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
++    info.access = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
++    info.debugName = "DrawAuto counter";
++    auto destination = m_device->createBuffer(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++    auto dst = destination->getSliceInfo();
++
++    accessMemory(DxvkCmdBuffer::ExecBuffer,
++      source.info().stages, source.info().access & vk::AccessWriteMask,
++      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT);
++    flushBarriers();
++    unbindComputePipeline();
++    auto& meta = m_common->metaDrawAuto();
++    DxvkDrawAutoArgs args = { src.gpuAddress + counterOffset, dst.gpuAddress, counterBias };
++    m_cmd->cmdBindPipeline(DxvkCmdBuffer::ExecBuffer,
++      VK_PIPELINE_BIND_POINT_COMPUTE, meta.pipeline());
++    m_cmd->bindResources(DxvkCmdBuffer::ExecBuffer, meta.layout(),
++      0, nullptr, sizeof(args), &args);
++    m_cmd->cmdDispatch(DxvkCmdBuffer::ExecBuffer, 1, 1, 1);
++    accessMemory(DxvkCmdBuffer::ExecBuffer,
++      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
++      VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
++    accessBuffer(DxvkCmdBuffer::ExecBuffer, source,
++      m_state.id.cntBuffer.offset() + counterOffset, sizeof(uint32_t),
++      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
++      DxvkAccessOp::None);
++    flushBarriers();
++    m_cmd->track(m_state.id.cntBuffer.buffer(), DxvkAccess::Read);
++    m_cmd->track(destination, DxvkAccess::Write);
++    return dst;
++  }
++
++
+   void DxvkContext::initBuffer(
+     const Rc<DxvkBuffer>&           buffer) {
+     auto dstSlice = buffer->getSliceInfo();
+@@ -1562,15 +1752,20 @@ namespace dxvk {
+   void DxvkContext::drawGeneric(
+           uint32_t                  count,
+     const T*                        draws) {
++    VkConditionalRenderingBeginInfoEXT condition;
++    if (!preparePredicate(condition))
++      return;
++    const auto* predicate = condition.buffer ? &condition : nullptr;
++
+     if (this->commitGraphicsState<Indexed, false>()) {
+       if (count == 1u) {
+         // Most common case, just emit a single draw
+         if constexpr (Indexed) {
+           m_cmd->cmdDrawIndexed(draws->indexCount, draws->instanceCount,
+-            draws->firstIndex, draws->vertexOffset, draws->firstInstance);
++            draws->firstIndex, draws->vertexOffset, draws->firstInstance, predicate);
+         } else {
+           m_cmd->cmdDraw(draws->vertexCount, draws->instanceCount,
+-            draws->firstVertex, draws->firstInstance);
++            draws->firstVertex, draws->firstInstance, predicate);
+         }
+ 
+         m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1u);
+@@ -1583,10 +1778,10 @@ namespace dxvk {
+ 
+           if constexpr (Indexed) {
+             m_cmd->cmdDrawIndexed(draws[i].indexCount, draws[i].instanceCount,
+-              draws[i].firstIndex, draws[i].vertexOffset, draws[i].firstInstance);
++              draws[i].firstIndex, draws[i].vertexOffset, draws[i].firstInstance, predicate);
+           } else {
+             m_cmd->cmdDraw(draws[i].vertexCount, draws[i].instanceCount,
+-              draws[i].firstVertex, draws[i].firstInstance);
++              draws[i].firstVertex, draws[i].firstInstance, predicate);
+           }
+         }
+ 
+@@ -1634,10 +1829,10 @@ namespace dxvk {
+             if (m_features.test(DxvkContextFeature::DirectMultiDraw)) {
+               if constexpr (Indexed) {
+                 m_cmd->cmdDrawMultiIndexed(batchSize, batch.data(),
+-                  instanceCount, instanceIndex);
++                  instanceCount, instanceIndex, predicate);
+               } else {
+                 m_cmd->cmdDrawMulti(batchSize, batch.data(),
+-                  instanceCount, instanceIndex);
++                  instanceCount, instanceIndex, predicate);
+               }
+             } else {
+               // This path only really exists for consistency reasons; all drivers
+@@ -1653,10 +1848,10 @@ namespace dxvk {
+ 
+                 if constexpr (Indexed) {
+                   m_cmd->cmdDrawIndexed(entry.indexCount, instanceCount,
+-                    entry.firstIndex, entry.vertexOffset, instanceIndex);
++                    entry.firstIndex, entry.vertexOffset, instanceIndex, predicate);
+                 } else {
+                   m_cmd->cmdDraw(entry.vertexCount, instanceCount,
+-                    entry.firstVertex, instanceIndex);
++                    entry.firstVertex, instanceIndex, predicate);
+                 }
+               }
+ 
+@@ -1681,6 +1876,11 @@ namespace dxvk {
+           uint32_t                  count,
+           uint32_t                  stride,
+           bool                      unroll) {
++    VkConditionalRenderingBeginInfoEXT condition;
++    if (!preparePredicate(condition))
++      return;
++    const auto* predicate = condition.buffer ? &condition : nullptr;
++
+     constexpr VkDeviceSize elementSize = Indexed
+       ? sizeof(VkDrawIndexedIndirectCommand)
+       : sizeof(VkDrawIndirectCommand);
+@@ -1691,10 +1891,10 @@ namespace dxvk {
+       if (likely(count == 1u || !unroll || !needsDrawBarriers())) {
+         if (Indexed) {
+           m_cmd->cmdDrawIndexedIndirect(argInfo.buffer,
+-            argInfo.offset + offset, count, stride);
++            argInfo.offset + offset, count, stride, predicate);
+         } else {
+           m_cmd->cmdDrawIndirect(argInfo.buffer,
+-            argInfo.offset + offset, count, stride);
++            argInfo.offset + offset, count, stride, predicate);
+         }
+ 
+         m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1u);
+@@ -1717,10 +1917,10 @@ namespace dxvk {
+ 
+           if (Indexed) {
+             m_cmd->cmdDrawIndexedIndirect(argInfo.buffer,
+-              argInfo.offset + offset, 1u, 0u);
++              argInfo.offset + offset, 1u, 0u, predicate);
+           } else {
+             m_cmd->cmdDrawIndirect(argInfo.buffer,
+-              argInfo.offset + offset, 1u, 0u);
++              argInfo.offset + offset, 1u, 0u, predicate);
+           }
+ 
+           if (m_flags.test(DxvkContextFlag::GpRenderPassUnsynchronized)
+@@ -1742,6 +1942,11 @@ namespace dxvk {
+           VkDeviceSize          countOffset,
+           uint32_t              maxCount,
+           uint32_t              stride) {
++    VkConditionalRenderingBeginInfoEXT condition;
++    if (!preparePredicate(condition))
++      return;
++    const auto* predicate = condition.buffer ? &condition : nullptr;
++
+     if (this->commitGraphicsState<Indexed, true>()) {
+       auto argInfo = m_state.id.argBuffer.getSliceInfo();
+       auto cntInfo = m_state.id.cntBuffer.getSliceInfo();
+@@ -1750,12 +1955,12 @@ namespace dxvk {
+         m_cmd->cmdDrawIndexedIndirectCount(
+           argInfo.buffer, argInfo.offset + offset,
+           cntInfo.buffer, cntInfo.offset + countOffset,
+-          maxCount, stride);
++          maxCount, stride, predicate);
+       } else {
+         m_cmd->cmdDrawIndirectCount(
+           argInfo.buffer, argInfo.offset + offset,
+           cntInfo.buffer, cntInfo.offset + countOffset,
+-          maxCount, stride);
++          maxCount, stride, predicate);
+       }
+ 
+       m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1u);
+@@ -2830,11 +3035,24 @@ namespace dxvk {
+   }
+   
+   
++  void DxvkContext::setLegacyDithering(bool enabled) {
++    if (bool(m_state.gp.state.om.legacyDithering()) == enabled)
++      return;
++
++    // The hardware state belongs to the render pass, not an individual draw.
++    // End the old pass before changing it and preserve all attachment contents.
++    endCurrentPass(false);
++    m_state.gp.state.om.setLegacyDithering(enabled);
++    m_flags.set(DxvkContextFlag::GpDirtyPipelineState);
++  }
++
++
+   void DxvkContext::setLogicOpState(const DxvkLogicOpState& lo) {
+     m_state.gp.state.om = DxvkOmInfo(
+       lo.logicOpEnable(),
+       lo.logicOp(),
+-      m_state.gp.state.om.feedbackLoop());
++      m_state.gp.state.om.feedbackLoop(),
++      m_state.gp.state.om.legacyDithering());
+     
+     m_flags.set(DxvkContextFlag::GpDirtyPipelineState);
+   }
+@@ -6371,12 +6589,17 @@ namespace dxvk {
+         useSecondaryCmdBuffer |= depthStencilAspects || colorInfoCount > 1u || !hasMipmappedRt;
+     }
+ 
++    if (m_state.gp.state.om.legacyDithering()) {
++      renderingInfo.flags |= VK_RENDERING_ENABLE_LEGACY_DITHERING_BIT_EXT;
++      renderingInheritance.flags |= VK_RENDERING_ENABLE_LEGACY_DITHERING_BIT_EXT;
++    }
++
+     if (useSecondaryCmdBuffer) {
+       // Begin secondary command buffer on tiling GPUs so that subsequent
+       // resolve, discard and clear commands can modify render pass ops.
+       m_flags.set(DxvkContextFlag::GpRenderPassSecondaryCmd);
+ 
+-      renderingInfo.flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
++      renderingInfo.flags |= VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT;
+ 
+       m_cmd->beginSecondaryCommandBuffer(inheritance);
+     } else {
+@@ -9155,6 +9378,7 @@ namespace dxvk {
+     // beginRecording calls, except that we keep the same
+     // command list object for subsequent commands.
+     this->endCurrentCommands();
++    m_cmd->releaseSharedImages();
+ 
+     m_trackingId += 1u;
+     m_cmd->next();
+@@ -9454,16 +9678,30 @@ namespace dxvk {
+ 
+ 
+   void DxvkContext::prepareSharedImages() {
+-    // Only flush clears for shared images, and restore layouts
+-    bool hasSharedClear = false;
+-
+-    for (const auto& image : m_nonDefaultLayoutImages) {
+-      if (image->info().shared)
+-        hasSharedClear = flushDeferredClear(*image, image->getAvailableSubresources());
++    // A deferred clear need not have changed the image layout yet. Walking
++    // only m_nonDefaultLayoutImages misses such writes and can signal external
++    // consumers while the shared allocation still contains the previous frame.
++    DxvkClearBatch clearBatch;
++    size_t dstIndex = 0u;
++    for (size_t srcIndex = 0u; srcIndex < m_deferredClears.size(); srcIndex++) {
++      auto& clear = m_deferredClears[srcIndex];
++      if (clear.imageView->image()->info().shared) {
++        clearBatch.add(batchClear(clear.imageView, -1,
++          clear.discardAspects, clear.clearAspects, clear.clearValue));
++      } else {
++        if (dstIndex != srcIndex)
++          m_deferredClears[dstIndex] = std::move(clear);
++        dstIndex++;
++      }
+     }
++    m_deferredClears.resize(dstIndex);
+ 
+-    if (hasSharedClear)
++    // Remove the selected entries before executing them: clear execution can
++    // process other deferred work and add images to the layout-tracking list.
++    if (!clearBatch.empty()) {
++      performClears(clearBatch);
+       flushBarriers();
++    }
+ 
+     restoreImageLayouts([] (DxvkImage& image) {
+       return image.info().shared;
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index dacdfd5f17294e72c1a2b4de0ef90f111ae8f54d..214b5272d8bcec83da5ec330dd91ef8f415fd716 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -126,6 +126,11 @@ namespace dxvk {
+      * \brief Begins generating query data
+      * \param [in] query The query to end
+      */
++    Rc<DxvkPredicate> createPredicate(uint32_t count, const Rc<DxvkQuery>* queries, bool overflow);
++    void setPredicate(const Rc<DxvkPredicate>& predicate, bool value);
++    bool testPredicate();
++    bool preparePredicate(VkConditionalRenderingBeginInfoEXT& info);
++
+     void beginQuery(
+       const Rc<DxvkQuery>&      query);
+     
+@@ -793,7 +798,7 @@ namespace dxvk {
+     void drawIndirectXfb(
+             VkDeviceSize      counterOffset,
+             uint32_t          counterDivisor,
+-            uint32_t          counterBias);
++            VkDeviceSize      counterBias);
+     
+     /**
+      * \brief Emits graphics barrier
+@@ -1155,6 +1160,9 @@ namespace dxvk {
+     void setDepthStencilState(
+       const DxvkDepthStencilState& ds);
+     
++    /** Enable native legacy output dithering for subsequent draw calls. */
++    void setLegacyDithering(bool enabled);
++
+     /**
+      * \brief Sets logic op state
+      * \param [in] lo New state object
+@@ -1366,6 +1374,8 @@ namespace dxvk {
+     small_vector<DxvkResourceAccess, MaxNumRenderTargets + 1u> m_rtAccess;
+ 
+     DxvkGpuQueryManager     m_queryManager;
++    Rc<DxvkPredicate>       m_predicate;
++    bool                    m_predicateValue = false;
+ 
+     DxvkGlobalPipelineBarrier m_renderPassBarrierSrc = { };
+     DxvkGlobalPipelineBarrier m_renderPassBarrierDst = { };
+@@ -2222,6 +2232,10 @@ namespace dxvk {
+ 
+     void endActiveDebugRegions();
+ 
++    DxvkResourceBufferInfo normalizeXfbCounter(
++            VkDeviceSize counterOffset,
++            uint32_t counterBias);
++
+     DxvkResourceBufferInfo allocateScratchMemory(
+             VkDeviceSize                alignment,
+             VkDeviceSize                size);
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index d0df438fdea5eda62438075b67674e6b2acc54bb..5ccebd88ab5a10114d2e3ddbf3c4dac30c1fee07 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -18,6 +18,7 @@ namespace dxvk {
+   #define EXTENSIONS_WITH_FEATURES                 \
+     HANDLE_EXT(extAttachmentFeedbackLoopLayout);   \
+     HANDLE_EXT(extBorderColorSwizzle);             \
++    HANDLE_EXT(extConditionalRendering);           \
+     HANDLE_EXT(extConservativeRasterization);      \
+     HANDLE_EXT(extCustomBorderColor);              \
+     HANDLE_EXT(extDepthClipEnable);                \
+@@ -31,6 +32,7 @@ namespace dxvk {
+     HANDLE_EXT(extGraphicsPipelineLibrary);        \
+     HANDLE_EXT(extHdrMetadata);                    \
+     HANDLE_EXT(extImageDrmFormatModifier);         \
++    HANDLE_EXT(extLegacyDithering);                \
+     HANDLE_EXT(extLineRasterization);              \
+     HANDLE_EXT(extMemoryBudget);                   \
+     HANDLE_EXT(extMemoryPriority);                 \
+@@ -566,6 +568,10 @@ namespace dxvk {
+     if (m_featuresSupported.extRobustness2.robustImageAccess2)
+       m_featuresSupported.vk13.robustImageAccess = VK_FALSE;
+ 
++    // Dynamic rendering requires revision 2's 64-bit pipeline creation flag.
++    if (m_extensionsSupported.extLegacyDithering.specVersion < 2u)
++      m_featuresSupported.extLegacyDithering.legacyDithering = VK_FALSE;
++
+     // Vertex attribute divisor is unusable before spec version 3
+     if (m_extensionsSupported.extVertexAttributeDivisor.specVersion < 3u) {
+       m_featuresSupported.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor = VK_FALSE;
+@@ -929,6 +935,12 @@ namespace dxvk {
+       /* HDR metadata */
+       ENABLE_EXT(extHdrMetadata, false),
+ 
++      /* Conditional blocks are recorded directly in each command buffer. */
++      ENABLE_EXT_FEATURE(extConditionalRendering, conditionalRendering, false),
++
++      /* Native low-bit color dithering, controlled by legacy API contexts. */
++      ENABLE_EXT_FEATURE(extLegacyDithering, legacyDithering, false),
++
+       /* Line rasterization features for client APIs */
+       ENABLE_EXT_FEATURE(extLineRasterization, rectangularLines,  false),
+       ENABLE_EXT_FEATURE(extLineRasterization, smoothLines, false),
+diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
+index 62ce776e76b370ab1632422a7203ed749e358bfd..1db1eddbb6ff3b46702cb7c36cfeed28782010c5 100644
+--- a/src/dxvk/dxvk_device_info.h
++++ b/src/dxvk/dxvk_device_info.h
+@@ -61,6 +61,7 @@ namespace dxvk {
+     VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT   extAttachmentFeedbackLoopLayout = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT };
+     VkPhysicalDeviceBorderColorSwizzleFeaturesEXT             extBorderColorSwizzle           = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT };
+     VkBool32                                                  extConservativeRasterization    = VK_FALSE;
++    VkPhysicalDeviceConditionalRenderingFeaturesEXT           extConditionalRendering        = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT };
+     VkPhysicalDeviceCustomBorderColorFeaturesEXT              extCustomBorderColor            = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT };
+     VkPhysicalDeviceDepthClipEnableFeaturesEXT                extDepthClipEnable              = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT };
+     VkPhysicalDeviceDepthBiasControlFeaturesEXT               extDepthBiasControl             = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT };
+@@ -73,6 +74,7 @@ namespace dxvk {
+     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT        extGraphicsPipelineLibrary      = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT };
+     VkBool32                                                  extHdrMetadata                  = VK_FALSE;
+     VkBool32                                                  extImageDrmFormatModifier       = VK_FALSE;
++    VkPhysicalDeviceLegacyDitheringFeaturesEXT                extLegacyDithering              = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LEGACY_DITHERING_FEATURES_EXT };
+     VkPhysicalDeviceLineRasterizationFeaturesEXT              extLineRasterization            = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES_EXT };
+     VkBool32                                                  extMemoryBudget                 = VK_FALSE;
+     VkPhysicalDeviceMemoryPriorityFeaturesEXT                 extMemoryPriority               = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PRIORITY_FEATURES_EXT };
+@@ -136,6 +138,7 @@ namespace dxvk {
+     VkExtensionProperties extAttachmentFeedbackLoopLayout   = vk::makeExtension(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
+     VkExtensionProperties extBorderColorSwizzle             = vk::makeExtension(VK_EXT_BORDER_COLOR_SWIZZLE_EXTENSION_NAME);
+     VkExtensionProperties extConservativeRasterization      = vk::makeExtension(VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME);
++    VkExtensionProperties extConditionalRendering           = vk::makeExtension(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME);
+     VkExtensionProperties extCustomBorderColor              = vk::makeExtension(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
+     VkExtensionProperties extDepthClipEnable                = vk::makeExtension(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
+     VkExtensionProperties extDepthBiasControl               = vk::makeExtension(VK_EXT_DEPTH_BIAS_CONTROL_EXTENSION_NAME);
+@@ -148,6 +151,7 @@ namespace dxvk {
+     VkExtensionProperties extGraphicsPipelineLibrary        = vk::makeExtension(VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME);
+     VkExtensionProperties extHdrMetadata                    = vk::makeExtension(VK_EXT_HDR_METADATA_EXTENSION_NAME);
+     VkExtensionProperties extImageDrmFormatModifier         = vk::makeExtension(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME);
++    VkExtensionProperties extLegacyDithering                = vk::makeExtension(VK_EXT_LEGACY_DITHERING_EXTENSION_NAME);
+     VkExtensionProperties extLineRasterization              = vk::makeExtension(VK_EXT_LINE_RASTERIZATION_EXTENSION_NAME);
+     VkExtensionProperties extMemoryBudget                   = vk::makeExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+     VkExtensionProperties extMemoryPriority                 = vk::makeExtension(VK_EXT_MEMORY_PRIORITY_EXTENSION_NAME);
+diff --git a/src/dxvk/dxvk_gpu_query.cpp b/src/dxvk/dxvk_gpu_query.cpp
+index cac562c437857d81d87231b2b5e2d71289501919..5082ed0bd373ccb71c92be4358dc097dc359d058 100644
+--- a/src/dxvk/dxvk_gpu_query.cpp
++++ b/src/dxvk/dxvk_gpu_query.cpp
+@@ -58,6 +58,16 @@ namespace dxvk {
+   }
+ 
+ 
++  bool DxvkQuery::snapshot(DxvkQueryData& accumulated, std::vector<Rc<DxvkGpuQuery>>& queries) {
++    std::lock_guard lock(m_mutex);
++    if (!m_ended)
++      return false;
++    accumulated = m_queryData;
++    queries.assign(m_queries.begin(), m_queries.end());
++    return true;
++  }
++
++
+   void DxvkQuery::begin() {
+     std::lock_guard lock(m_mutex);
+     m_queries.clear();
+@@ -93,11 +103,22 @@ namespace dxvk {
+     // Try to copy query data to temporary structure
+     std::pair<VkQueryPool, uint32_t> handle = query->getQuery();
+ 
++    // Lavapipe reads the Gallium query through the same context used by
++    // queue submission. Concurrent submission can expose a query before
++    // its raster work has a fence, producing an available zero result.
++    // Serialize that driver access; hardware drivers do not need this.
++    const bool serialize = m_device->adapter()->matchesDriver(VK_DRIVER_ID_MESA_LLVMPIPE);
++    if (serialize)
++      m_device->lockSubmission();
++
+     VkResult result = vk->vkGetQueryPoolResults(
+       vk->device(), handle.first, handle.second, 1,
+       sizeof(DxvkQueryData), &tmpData,
+       sizeof(DxvkQueryData), VK_QUERY_RESULT_64_BIT);
+ 
++    if (serialize)
++      m_device->unlockSubmission();
++
+     if (result == VK_NOT_READY)
+       return DxvkGpuQueryStatus::Pending;
+     else if (result != VK_SUCCESS)
+diff --git a/src/dxvk/dxvk_gpu_query.h b/src/dxvk/dxvk_gpu_query.h
+index ec65c329b45096c4ae27fd97cee1ec60c30b3e49..e777c79c4987bab793eb636ca1701dcfe2701463 100644
+--- a/src/dxvk/dxvk_gpu_query.h
++++ b/src/dxvk/dxvk_gpu_query.h
+@@ -167,6 +167,8 @@ namespace dxvk {
+     
+     ~DxvkQuery();
+ 
++    bool snapshot(DxvkQueryData& accumulated, std::vector<Rc<DxvkGpuQuery>>& queries);
++
+     /**
+      * \brief Increments reference count
+      */
+diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
+index 02b91f1e0d1123ecf101d50fa395ed4c13835b21..f9f44002d4e225be15abb8dd73d9b8f79680f6de 100644
+--- a/src/dxvk/dxvk_graphics.cpp
++++ b/src/dxvk/dxvk_graphics.cpp
+@@ -17,7 +17,8 @@ namespace dxvk {
+ 
+       case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+       case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+-        if (shader == VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY)
++        if (shader == VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY
++         || shader == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY)
+           return VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
+         [[fallthrough]];
+ 
+@@ -27,7 +28,8 @@ namespace dxvk {
+ 
+       case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY:
+       case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
+-        if (shader == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY)
++        if (shader == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY
++         || shader == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY)
+           return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY;
+         [[fallthrough]];
+ 
+@@ -59,8 +61,15 @@ namespace dxvk {
+   VkPrimitiveTopology determinePipelineTopology(
+     const DxvkGraphicsPipelineShaders&      shaders,
+     const DxvkGraphicsPipelineStateInfo&    state) {
+-    if (shaders.gs)
++    if (shaders.gs) {
++      if (shaders.gs->metadata().flags.test(DxvkShaderFlag::PassthroughGeometry)) {
++        // Stream output discards adjacency and expands strips to lists.
++        return determineGsInputTopology(VK_PRIMITIVE_TOPOLOGY_MAX_ENUM,
++          determinePreGsTopology(shaders, state));
++      }
++
+       return shaders.gs->metadata().outputTopology;
++    }
+ 
+     return determinePreGsTopology(shaders, state);
+   }
+@@ -291,6 +300,7 @@ namespace dxvk {
+     cbInfo.logicOp        = state.om.logicOp();
+ 
+     feedbackLoop = state.om.feedbackLoop();
++    legacyDithering = state.om.legacyDithering();
+ 
+     for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+       rtColorFormats[i] = state.rt.getColorFormat(i);
+@@ -394,7 +404,8 @@ namespace dxvk {
+            && msSampleMask                    == other.msSampleMask
+            && cbUseDynamicBlendConstants      == other.cbUseDynamicBlendConstants
+            && cbUseDynamicAlphaToCoverage     == other.cbUseDynamicAlphaToCoverage
+-           && feedbackLoop                    == other.feedbackLoop;
++           && feedbackLoop                    == other.feedbackLoop
++           && legacyDithering                 == other.legacyDithering;
+ 
+     for (uint32_t i = 0; i < rtInfo.colorAttachmentCount && eq; i++)
+       eq = rtColorFormats[i] == other.rtColorFormats[i];
+@@ -435,6 +446,7 @@ namespace dxvk {
+     hash.add(uint32_t(cbUseDynamicBlendConstants));
+     hash.add(uint32_t(cbUseDynamicAlphaToCoverage));
+     hash.add(uint32_t(feedbackLoop));
++    hash.add(uint32_t(legacyDithering));
+ 
+     for (uint32_t i = 0; i < rtInfo.colorAttachmentCount; i++)
+       hash.add(uint32_t(rtColorFormats[i]));
+@@ -460,7 +472,7 @@ namespace dxvk {
+   DxvkGraphicsPipelineFragmentOutputLibrary::DxvkGraphicsPipelineFragmentOutputLibrary(
+           DxvkDevice*                               device,
+     const DxvkGraphicsPipelineFragmentOutputState&  state)
+-  : m_device(device) {
++  : m_device(device), m_legacyDithering(state.legacyDithering) {
+     auto vk = m_device->vkd();
+ 
+     small_vector<VkDynamicState, 8> dynamicStates = { };
+@@ -514,6 +526,9 @@ namespace dxvk {
+     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &state.rtInfo };
+     flags.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR;
+ 
++    if (state.legacyDithering)
++      flags.flags |= VK_PIPELINE_CREATE_2_ENABLE_LEGACY_DITHERING_BIT_EXT;
++
+     if (state.feedbackLoop & VK_IMAGE_ASPECT_COLOR_BIT)
+       flags.flags |= VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+ 
+@@ -910,7 +925,9 @@ namespace dxvk {
+     // Fix up input topology for geometry shaders as necessary
+     if (shaderMeta.stage == VK_SHADER_STAGE_GEOMETRY_BIT) {
+       VkPrimitiveTopology iaTopology = determinePreGsTopology(shaders, state);
+-      info.inputTopology = determineGsInputTopology(shaderMeta.inputTopology, iaTopology);
++      auto shaderTopology = shaderMeta.flags.test(DxvkShaderFlag::PassthroughGeometry)
++        ? iaTopology : shaderMeta.inputTopology;
++      info.inputTopology = determineGsInputTopology(shaderTopology, iaTopology);
+     }
+ 
+     return info;
+@@ -1366,6 +1383,9 @@ namespace dxvk {
+     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
+     flags.flags = vs.linkFlags | fs.linkFlags;
+ 
++    if (key.foLibrary->legacyDithering())
++      flags.flags |= VK_PIPELINE_CREATE_2_ENABLE_LEGACY_DITHERING_BIT_EXT;
++
+     if (m_device->canUseDescriptorHeap())
+       flags.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
+ 
+@@ -1435,6 +1455,9 @@ namespace dxvk {
+ 
+     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
+ 
++    if (key.foState.legacyDithering)
++      flags.flags |= VK_PIPELINE_CREATE_2_ENABLE_LEGACY_DITHERING_BIT_EXT;
++
+     if (key.foState.feedbackLoop & VK_IMAGE_ASPECT_COLOR_BIT)
+       flags.flags |= VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+ 
+diff --git a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
+index 98a3f1846ff87763b19353a916c6c75f184c1f31..7c708382bf98303c132e00ac0bedb65043341b84 100644
+--- a/src/dxvk/dxvk_graphics.h
++++ b/src/dxvk/dxvk_graphics.h
+@@ -120,6 +120,7 @@ namespace dxvk {
+     std::array<VkFormat,                            MaxNumRenderTargets> rtColorFormats = { };
+ 
+     VkImageAspectFlags                              feedbackLoop = 0u;
++    VkBool32                                        legacyDithering = VK_FALSE;
+ 
+     bool eq(const DxvkGraphicsPipelineFragmentOutputState& other) const;
+ 
+@@ -147,10 +148,13 @@ namespace dxvk {
+       return m_pipeline;
+     }
+ 
++    bool legacyDithering() const { return m_legacyDithering; }
++
+   private:
+ 
+     DxvkDevice* m_device;
+     VkPipeline  m_pipeline;
++    bool        m_legacyDithering;
+ 
+   };
+ 
+diff --git a/src/dxvk/dxvk_graphics_state.h b/src/dxvk/dxvk_graphics_state.h
+index b467e8d8c8d33f1b2cfe051608d6a948188cda0c..ed87328308d440aa80d95897a05263c2d4503b73 100644
+--- a/src/dxvk/dxvk_graphics_state.h
++++ b/src/dxvk/dxvk_graphics_state.h
+@@ -339,10 +339,12 @@ namespace dxvk {
+     DxvkOmInfo(
+             VkBool32           enableLogicOp,
+             VkLogicOp          logicOp,
+-            VkImageAspectFlags feedbackLoop)
++            VkImageAspectFlags feedbackLoop,
++            VkBool32           legacyDithering = VK_FALSE)
+     : m_enableLogicOp (uint16_t(enableLogicOp)),
+       m_logicOp       (uint16_t(logicOp)),
+       m_feedbackLoop  (uint16_t(feedbackLoop)),
++      m_legacyDithering(uint16_t(legacyDithering)),
+       m_reserved      (0) { }
+     
+     VkBool32 enableLogicOp() const {
+@@ -357,6 +359,10 @@ namespace dxvk {
+       return VkImageAspectFlags(m_feedbackLoop);
+     }
+ 
++    VkBool32 legacyDithering() const { return m_legacyDithering; }
++
++    void setLegacyDithering(VkBool32 enabled) { m_legacyDithering = uint16_t(enabled); }
++
+     void setFeedbackLoop(VkImageAspectFlags feedbackLoop) {
+       m_feedbackLoop = uint16_t(feedbackLoop);
+     }
+@@ -366,7 +372,8 @@ namespace dxvk {
+     uint16_t m_enableLogicOp          : 1;
+     uint16_t m_logicOp                : 4;
+     uint16_t m_feedbackLoop           : 2;
+-    uint16_t m_reserved               : 9;
++    uint16_t m_legacyDithering         : 1;
++    uint16_t m_reserved               : 8;
+ 
+   };
+ 
+diff --git a/src/dxvk/dxvk_image.cpp b/src/dxvk/dxvk_image.cpp
+index 7fd7de7194fd5ea92ce556e14f72cdbbd79def9b..ec50c2059000de4f115d9ee41edc3cf9e1984c1c 100644
+--- a/src/dxvk/dxvk_image.cpp
++++ b/src/dxvk/dxvk_image.cpp
+@@ -177,6 +177,7 @@ namespace dxvk {
+ 
+     m_globalLayout = (m_info.sharing.mode != DxvkSharedHandleMode::Import)
+       ? m_info.initialLayout : m_info.layout;
++    m_sharedInitialized = m_info.sharing.mode == DxvkSharedHandleMode::Import;
+ 
+     try {
+       assignStorage(allocateStorage());
+@@ -412,6 +413,7 @@ namespace dxvk {
+           throw DxvkError("DxvkImage: Failed to dup dmabuf fd");
+ 
+         sharedImportFd.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++        allocationInfo.importedFd = &sharedImportFd.fd;
+         sharedImportFd.pNext = std::exchange(sharedMemoryInfo, &sharedImportFd);
+       }
+ #endif
+@@ -434,6 +436,15 @@ namespace dxvk {
+       throw;
+     }
+ 
++    if (!allocation) {
++#ifndef _WIN32
++      if (sharedImportFd.fd >= 0)
++        close(sharedImportFd.fd);
++#endif
++      throw DxvkError(str::format("DxvkImage: Failed to allocate image storage: required flags ",
++        allocationInfo.properties, ", external memory type mask ", allocationInfo.memoryTypeBits));
++    }
++
+     // Reject imports whose backing memory does not cover the image
+     if (m_shared && isDmabufShared()
+      && m_info.sharing.mode == DxvkSharedHandleMode::Import
+@@ -760,12 +771,24 @@ namespace dxvk {
+ 
+ 
+   bool DxvkImage::canShareDmabufImage(DxvkDevice* device, const VkImageCreateInfo& createInfo, const DxvkSharedHandleInfo& sharingInfo) {
++    // EGL consumers need not use the Vulkan device's driver or device UUID.
++    if (!device->features().extQueueFamilyForeign) {
++      Logger::err("Failed to create dmabuf-shared resource: foreign queue ownership not supported");
++      return false;
++    }
++
+     if (!device->features().khrExternalMemoryFd
+      || !device->features().extExternalMemoryDmaBuf) {
+       Logger::err("Failed to create dmabuf-shared resource: external memory fd not supported");
+       return false;
+     }
+ 
++    if (m_dmabufUseModifiers && (createInfo.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)
++     && m_viewFormats.empty()) {
++      Logger::err("Failed to create dmabuf-shared resource: mutable modifier image has no view formats");
++      return false;
++    }
++
+     // Exports must also be importable on a peer device
+     VkExternalMemoryFeatureFlags requiredFeatures = VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+ 
+@@ -849,11 +872,25 @@ namespace dxvk {
+        && props.drmFormatModifier != 0u)
+         continue;
+ 
++      if (sharingInfo.mode == DxvkSharedHandleMode::Export
++       && sharingInfo.dmabufSinglePlane
++       && props.drmFormatModifierPlaneCount != 1u)
++        continue;
++
+       // Check whether images of this modifier support the parameters
+       VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifierInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT };
+       modifierInfo.drmFormatModifier = props.drmFormatModifier;
+       modifierInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+ 
++      // A mutable modifier query must describe the same view formats that
++      // allocateStorageWithUsage supplies when creating the actual image.
++      VkImageFormatListCreateInfo formatList = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO };
++      if (createInfo.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) {
++        formatList.viewFormatCount = m_viewFormats.size();
++        formatList.pViewFormats = m_viewFormats.data();
++        modifierInfo.pNext = &formatList;
++      }
++
+       VkPhysicalDeviceExternalImageFormatInfo externalInfo = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO, &modifierInfo };
+       externalInfo.handleType = sharingInfo.type;
+ 
+@@ -884,6 +921,19 @@ namespace dxvk {
+       m_dmabufModifiers.push_back({ props.drmFormatModifier, props.drmFormatModifierPlaneCount });
+     }
+ 
++    // Keep linear when it meets every requirement.  Passing it alongside
++    // tiled modifiers to Vulkan would let the driver choose either layout.
++    if (sharingInfo.mode == DxvkSharedHandleMode::Export
++     && sharingInfo.dmabufSinglePlane) {
++      for (const auto& modifier : m_dmabufModifiers) {
++        if (modifier.first == 0u) {
++          const auto linearModifier = modifier;
++          m_dmabufModifiers.assign(1u, linearModifier);
++          break;
++        }
++      }
++    }
++
+     if (m_dmabufModifiers.empty()) {
+       Logger::err(str::format("Failed to create dmabuf-shared resource: no usable modifier for format ",
+         createInfo.format));
+diff --git a/src/dxvk/dxvk_image.h b/src/dxvk/dxvk_image.h
+index 60594b3e8738ca20aacb18fa81cd2892d989ba88..93f73643c5136ef3aaf46f7286c1fd83b53e7d4e 100644
+--- a/src/dxvk/dxvk_image.h
++++ b/src/dxvk/dxvk_image.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <utility>
++
+ #include "dxvk_descriptor_pool.h"
+ #include "dxvk_fence.h"
+ #include "dxvk_format.h"
+@@ -672,6 +674,17 @@ namespace dxvk {
+      */
+     VkResult exportDmabufInfo(DxvkImageDmabufInfo* info) const;
+ 
++    bool isDmabufShared() const {
++      return m_info.sharing.mode != DxvkSharedHandleMode::None
++          && m_info.sharing.type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    }
++
++    // The first segment initializes a fresh export without an acquire.
++    // Imports and every later segment acquire the externally owned image.
++    bool needsForeignAcquire() {
++      return std::exchange(m_sharedInitialized, true);
++    }
++
+     /**
+      * \brief Retrives sparse page table
+      * \returns Page table
+@@ -881,6 +894,7 @@ namespace dxvk {
+ 
+     uint32_t                    m_version     = 0u;
+     bool                        m_shared      = false;
++    bool                        m_sharedInitialized = false;
+     bool                        m_stableAddress = false;
+ 
+     bool                        m_unifiedLayoutEnabled = false;
+@@ -920,11 +934,6 @@ namespace dxvk {
+             uint32_t              formatCount,
+       const VkFormat*             formats);
+ 
+-    bool isDmabufShared() const {
+-      return m_info.sharing.mode != DxvkSharedHandleMode::None
+-          && m_info.sharing.type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+-    }
+-
+     bool canShareImage(
+             DxvkDevice*           device,
+       const VkImageCreateInfo&    createInfo,
+diff --git a/src/dxvk/dxvk_memory.cpp b/src/dxvk/dxvk_memory.cpp
+index 50a2a39fa215784ff8b45077197c45a5c5c8e957..fb29b49ceb8d193b85d215d8376556e951f6ae70 100644
+--- a/src/dxvk/dxvk_memory.cpp
++++ b/src/dxvk/dxvk_memory.cpp
+@@ -920,11 +920,20 @@ namespace dxvk {
+ 
+     for (auto typeIndex : bit::BitMask(requirements.memoryTypeBits & getMemoryTypeMask(allocationInfo.properties))) {
+       auto& type = m_memTypes[typeIndex];
+-      memory = allocateDeviceMemory(type, requirements.size, next);
++      memory = allocateDeviceMemory(type, requirements.size, next, allocationInfo.importedFd);
+ 
+       if (likely(memory.memory != VK_NULL_HANDLE)) {
+-        mapDeviceMemory(memory, allocationInfo.properties);
+-        return createAllocation(type, memory, allocationInfo);
++        try {
++          // Shared memory can already contain another owner's pixels. Mapping
++          // must preserve them, including with the debug zeroing option enabled.
++          // Exported shared allocations also require GPU-only initialization.
++          mapDeviceMemory(memory, allocationInfo.properties,
++            allocationInfo.handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_FLAG_BITS_MAX_ENUM);
++          return createAllocation(type, memory, allocationInfo);
++        } catch (...) {
++          freeDeviceMemory(type, memory);
++          throw;
++        }
+       }
+     }
+ 
+@@ -1127,6 +1136,15 @@ namespace dxvk {
+         "\n  samples: ", createInfo.samples));
+     }
+ 
++    struct ImageGuard {
++      decltype(vk) functions;
++      VkImage image;
++      ~ImageGuard() {
++        if (image)
++          functions->vkDestroyImage(functions->device(), image, nullptr);
++      }
++    } imageGuard { vk, image };
++
+     // Check memory requirements, including whether or not we need a dedicated allocation
+     VkMemoryDedicatedRequirements dedicatedRequirements = { VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
+ 
+@@ -1140,7 +1158,6 @@ namespace dxvk {
+     requirements.memoryRequirements.memoryTypeBits &= allocationInfo.memoryTypeBits;
+ 
+     if (!requirements.memoryRequirements.memoryTypeBits) {
+-      vk->vkDestroyImage(vk->device(), image, nullptr);
+       throw DxvkError("Failed to create image: No compatible memory types");
+     }
+ 
+@@ -1232,8 +1249,6 @@ namespace dxvk {
+     }
+ 
+     if (!allocation) {
+-      vk->vkDestroyImage(vk->device(), image, nullptr);
+-
+       if (allocationInfo.mode.isClear()) {
+         logMemoryError(requirements.memoryRequirements);
+         logMemoryStats();
+@@ -1245,6 +1260,7 @@ namespace dxvk {
+     // Set up allocation object and bind memory
+     allocation->m_flags.set(DxvkAllocationFlag::OwnsImage);
+     allocation->m_image = image;
++    imageGuard.image = VK_NULL_HANDLE;
+ 
+     if (allocation->m_memory) {
+       vr = vk->vkBindImageMemory(vk->device(), image, allocation->m_memory,
+@@ -1341,7 +1357,8 @@ namespace dxvk {
+   DxvkDeviceMemory DxvkMemoryAllocator::allocateDeviceMemory(
+           DxvkMemoryType&       type,
+           VkDeviceSize          size,
+-    const void*                 next) {
++    const void*                 next,
++          int*                  importedFd) {
+     auto vk = m_device->vkd();
+ 
+     // If global buffers are enabled for this allocation, pad the allocation size
+@@ -1401,10 +1418,18 @@ namespace dxvk {
+     if (vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory)) {
+       freeEmptyChunksInHeap(*type.heap, VkDeviceSize(-1), high_resolution_clock::time_point());
+ 
+-      if (vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory))
++      VkResult vr = vk->vkAllocateMemory(vk->device(), &memoryInfo, nullptr, &result.memory);
++      if (vr != VK_SUCCESS) {
++        Logger::debug(str::format("Memory allocation rejected: result ", vr,
++          ", type ", type.index, ", flags ", type.properties.propertyFlags,
++          ", size ", size, ", import ", importedFd != nullptr));
+         return DxvkDeviceMemory();
++      }
+     }
+ 
++    if (importedFd)
++      *importedFd = -1;
++
+     // Technically redundant if EXT_memory_priority is also supported, but this shouldn't hurt
+     if (m_device->features().extPageableDeviceLocalMemory.pageableDeviceLocalMemory)
+       vk->vkSetDeviceMemoryPriorityEXT(vk->device(), result.memory, priorityInfo.priority);
+@@ -1602,9 +1627,8 @@ namespace dxvk {
+           DxvkMemoryType&       type,
+     const DxvkDeviceMemory&     memory,
+     const DxvkAllocationInfo&   allocationInfo) {
+-    type.stats.memoryUsed += memory.size;
+-
+     auto allocation = m_allocationPool.create(this, &type);
++    type.stats.memoryUsed += memory.size;
+     allocation->m_flags.set(DxvkAllocationFlag::OwnsMemory);
+ 
+     if (memory.buffer)
+@@ -1829,7 +1853,8 @@ namespace dxvk {
+ 
+   void DxvkMemoryAllocator::mapDeviceMemory(
+           DxvkDeviceMemory&     memory,
+-          VkMemoryPropertyFlags properties) {
++          VkMemoryPropertyFlags properties,
++          bool                  allowCpuInitialization) {
+     if (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+       if (memory.mapPtr)
+         return;
+@@ -1844,7 +1869,7 @@ namespace dxvk {
+           "\n  size: ", memory.size, " bytes"));
+       }
+ 
+-      if (m_device->config().zeroMappedMemory)
++      if (allowCpuInitialization && m_device->config().zeroMappedMemory)
+         bit::bclear(memory.mapPtr, memory.size);
+ 
+       Logger::debug(str::format("Mapped memory region 0x", std::hex,
+diff --git a/src/dxvk/dxvk_memory.h b/src/dxvk/dxvk_memory.h
+index 3ce6295d5021f392dc8e8e53643056e9efbb0ee6..6f45c4739831657c750758ce01d76dafa87791db 100644
+--- a/src/dxvk/dxvk_memory.h
++++ b/src/dxvk/dxvk_memory.h
+@@ -63,6 +63,9 @@ namespace dxvk {
+     // Export-only: force DRM_FORMAT_MOD_LINEAR instead of negotiating
+     // a modifier, for consumers without modifier plumbing (scanout).
+     VkBool32 dmabufForceLinear = VK_FALSE;
++    // Export-only: require one memory plane and prefer linear when
++    // supported, otherwise negotiate a supported tiled modifier.
++    VkBool32 dmabufSinglePlane = VK_FALSE;
+   };
+ 
+ 
+@@ -1029,6 +1032,8 @@ namespace dxvk {
+     /// Memory types the allocation is restricted to. Used for external
+     /// memory imports where the handle constrains the memory type.
+     uint32_t memoryTypeBits = ~0u;
++    /// Import fd ownership token; cleared when Vulkan consumes the fd.
++    int* importedFd = nullptr;
+   };
+ 
+ 
+@@ -1412,7 +1417,8 @@ namespace dxvk {
+     DxvkDeviceMemory allocateDeviceMemory(
+             DxvkMemoryType&       type,
+             VkDeviceSize          size,
+-      const void*                 next);
++      const void*                 next,
++            int*                  importedFd = nullptr);
+ 
+     void assignMemoryDebugName(
+       const DxvkDeviceMemory&     memory,
+@@ -1462,7 +1468,8 @@ namespace dxvk {
+ 
+     void mapDeviceMemory(
+             DxvkDeviceMemory&     memory,
+-            VkMemoryPropertyFlags properties);
++            VkMemoryPropertyFlags properties,
++            bool                  allowCpuInitialization = true);
+ 
+     DxvkResourceAllocation* createAllocation(
+             DxvkMemoryType&       type,
+diff --git a/src/dxvk/dxvk_meta_draw_auto.cpp b/src/dxvk/dxvk_meta_draw_auto.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4623b79a2f3a1f6507c7fe5d4c31d62ae5237e2
+--- /dev/null
++++ b/src/dxvk/dxvk_meta_draw_auto.cpp
+@@ -0,0 +1,20 @@
++#include "dxvk_device.h"
++#include "dxvk_meta_draw_auto.h"
++
++#include <dxvk_draw_auto.h>
++
++namespace dxvk {
++
++  DxvkMetaDrawAutoObjects::DxvkMetaDrawAutoObjects(DxvkDevice* device)
++  : m_device(device),
++    m_layout(device->createBuiltInPipelineLayout({}, VK_SHADER_STAGE_COMPUTE_BIT,
++      sizeof(DxvkDrawAutoArgs), 0, nullptr)),
++    m_pipeline(device->createBuiltInComputePipeline(m_layout,
++      util::DxvkBuiltInShaderStage(dxvk_draw_auto, nullptr))) { }
++
++  DxvkMetaDrawAutoObjects::~DxvkMetaDrawAutoObjects() {
++    auto vk = m_device->vkd();
++    vk->vkDestroyPipeline(vk->device(), m_pipeline, nullptr);
++  }
++
++}
+diff --git a/src/dxvk/dxvk_meta_draw_auto.h b/src/dxvk/dxvk_meta_draw_auto.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..cb20e8ba34c25c860783f84c2a98110fee333668
+--- /dev/null
++++ b/src/dxvk/dxvk_meta_draw_auto.h
+@@ -0,0 +1,27 @@
++#pragma once
++
++#include "dxvk_pipelayout.h"
++
++namespace dxvk {
++
++  struct DxvkDrawAutoArgs {
++    VkDeviceAddress source;
++    VkDeviceAddress destination;
++    uint32_t bias;
++  };
++
++  class DxvkMetaDrawAutoObjects {
++  public:
++    explicit DxvkMetaDrawAutoObjects(DxvkDevice* device);
++    ~DxvkMetaDrawAutoObjects();
++
++    const DxvkPipelineLayout* layout() const { return m_layout; }
++    VkPipeline pipeline() const { return m_pipeline; }
++
++  private:
++    DxvkDevice* m_device;
++    const DxvkPipelineLayout* m_layout;
++    VkPipeline m_pipeline;
++  };
++
++}
+diff --git a/src/dxvk/dxvk_meta_predicate.cpp b/src/dxvk/dxvk_meta_predicate.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..f05471724b3dbfdd500f631672cac97d45a7f6db
+--- /dev/null
++++ b/src/dxvk/dxvk_meta_predicate.cpp
+@@ -0,0 +1,17 @@
++#include "dxvk_device.h"
++#include "dxvk_meta_predicate.h"
++#include <dxvk_predicate_reduce.h>
++
++namespace dxvk {
++  DxvkMetaPredicateObjects::DxvkMetaPredicateObjects(DxvkDevice* device)
++  : m_device(device),
++    m_layout(device->createBuiltInPipelineLayout({}, VK_SHADER_STAGE_COMPUTE_BIT,
++      sizeof(DxvkPredicateArgs), 0, nullptr)),
++    m_pipeline(device->createBuiltInComputePipeline(m_layout,
++      util::DxvkBuiltInShaderStage(dxvk_predicate_reduce, nullptr))) { }
++
++  DxvkMetaPredicateObjects::~DxvkMetaPredicateObjects() {
++    auto vk = m_device->vkd();
++    vk->vkDestroyPipeline(vk->device(), m_pipeline, nullptr);
++  }
++}
+diff --git a/src/dxvk/dxvk_meta_predicate.h b/src/dxvk/dxvk_meta_predicate.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c26374725c072e51bf96823f3d9126846bd0a8e
+--- /dev/null
++++ b/src/dxvk/dxvk_meta_predicate.h
+@@ -0,0 +1,34 @@
++#pragma once
++#include "dxvk_buffer.h"
++#include "dxvk_gpu_query.h"
++#include "dxvk_pipelayout.h"
++#include <optional>
++
++namespace dxvk {
++  /* An immutable result for one issued predicate generation. Buffer ownership
++   * follows both bound contexts and submitted command lists. */
++  class DxvkPredicate : public RcObject {
++  public:
++    Rc<DxvkBuffer> buffer;
++    std::optional<bool> cpuValue;
++  };
++
++  struct DxvkPredicateArgs {
++    VkDeviceAddress source;
++    VkDeviceAddress destination;
++    uint32_t count;
++    uint32_t overflow;
++  };
++
++  class DxvkMetaPredicateObjects {
++  public:
++    explicit DxvkMetaPredicateObjects(DxvkDevice* device);
++    ~DxvkMetaPredicateObjects();
++    const DxvkPipelineLayout* layout() const { return m_layout; }
++    VkPipeline pipeline() const { return m_pipeline; }
++  private:
++    DxvkDevice* m_device;
++    const DxvkPipelineLayout* m_layout;
++    VkPipeline m_pipeline;
++  };
++}
+diff --git a/src/dxvk/dxvk_objects.h b/src/dxvk/dxvk_objects.h
+index 579593b560a88d66219cf499e0504d2660c5a549..56d78ff29ec7141cf85407e5195438979d2c87ea 100644
+--- a/src/dxvk/dxvk_objects.h
++++ b/src/dxvk/dxvk_objects.h
+@@ -7,7 +7,9 @@
+ #include "dxvk_meta_blit.h"
+ #include "dxvk_meta_clear.h"
+ #include "dxvk_meta_copy.h"
++#include "dxvk_meta_draw_auto.h"
+ #include "dxvk_meta_mipgen.h"
++#include "dxvk_meta_predicate.h"
+ #include "dxvk_meta_resolve.h"
+ #include "dxvk_pipemanager.h"
+ #include "dxvk_renderpass.h"
+@@ -78,6 +80,10 @@ namespace dxvk {
+       return m_metaCopy.get(m_device);
+     }
+ 
++    DxvkMetaPredicateObjects& metaPredicate() { return m_metaPredicate.get(m_device); }
++
++    DxvkMetaDrawAutoObjects& metaDrawAuto() { return m_metaDrawAuto.get(m_device); }
++
+     DxvkMetaResolveObjects& metaResolve() {
+       return m_metaResolve.get(m_device);
+     }
+@@ -101,7 +107,9 @@ namespace dxvk {
+     Lazy<DxvkMetaMipGenObjects>   m_metaMipGen;
+     Lazy<DxvkMetaClearObjects>    m_metaClear;
+     Lazy<DxvkMetaCopyObjects>     m_metaCopy;
++    Lazy<DxvkMetaDrawAutoObjects> m_metaDrawAuto;
+     Lazy<DxvkMetaResolveObjects>  m_metaResolve;
++    Lazy<DxvkMetaPredicateObjects> m_metaPredicate;
+ 
+   };
+ 
+diff --git a/src/dxvk/dxvk_shader.h b/src/dxvk/dxvk_shader.h
+index c0b3e7797bf46f2a2c18efe7ed90b1af72238431..c411f68c9ab343e0fbfffd3e8b7236020663e683 100644
+--- a/src/dxvk/dxvk_shader.h
++++ b/src/dxvk/dxvk_shader.h
+@@ -83,6 +83,8 @@ namespace dxvk {
+     LowerConstantArrays         = 11u,
+     /// Whether to enable semantic-based I/O interface matching
+     SemanticIo                  = 12u,
++    /// Generated stream-output shader whose primitive type follows the IA.
++    PassthroughGeometry         = 13u,
+   };
+ 
+   using DxvkShaderCompileFlags = Flags<DxvkShaderCompileFlag>;
+@@ -181,6 +183,7 @@ namespace dxvk {
+     UsesSparseResidency,
+     TessellationPoints,
+     SemanticIo,
++    PassthroughGeometry,
+   };
+ 
+   using DxvkShaderFlags = Flags<DxvkShaderFlag>;
+diff --git a/src/dxvk/dxvk_shader_ir.cpp b/src/dxvk/dxvk_shader_ir.cpp
+index 7279825ab0aa9391cc8e294f5c165fd07e3f2da5..fac1a900b13608f67b8753a6a7ffebf3347b1718 100644
+--- a/src/dxvk/dxvk_shader_ir.cpp
++++ b/src/dxvk/dxvk_shader_ir.cpp
+@@ -291,6 +291,9 @@ namespace dxvk {
+ 
+       if (m_info.options.flags.test(DxvkShaderCompileFlag::SemanticIo))
+         m_metadata.flags.set(DxvkShaderFlag::SemanticIo);
++
++      if (m_info.options.flags.test(DxvkShaderCompileFlag::PassthroughGeometry))
++        m_metadata.flags.set(DxvkShaderFlag::PassthroughGeometry);
+     }
+ 
+ 
+@@ -1688,8 +1691,15 @@ namespace dxvk {
+         if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsFlatShading && m_info.flatShadingInputs)
+           ioPass.enableFlatInterpolation(m_info.flatShadingInputs);
+ 
+-        if (m_metadata.stage == VK_SHADER_STAGE_GEOMETRY_BIT && linkage->inputTopology != m_metadata.inputTopology)
+-          ioPass.changeGsInputPrimitiveType(convertPrimitiveType(linkage->inputTopology));
++        if (m_metadata.stage == VK_SHADER_STAGE_GEOMETRY_BIT) {
++          auto primitive = convertPrimitiveType(linkage->inputTopology);
++
++          if (linkage->inputTopology != m_metadata.inputTopology)
++            ioPass.changeGsInputPrimitiveType(primitive);
++
++          if (m_metadata.flags.test(DxvkShaderFlag::PassthroughGeometry))
++            ioPass.changeGsPassthroughOutputPrimitiveType(primitive);
++        }
+ 
+         if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsDualSrcBlend) {
+           dxbc_spv::ir::IoMap io = { };
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index 40f4cc05c49a62ba0d12bb02c85477af7d6cc186..f2135752b844c94def54f0d4e6e3f2a6151fdd4f 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -3,8 +3,10 @@ dxvk_shaders = files([
+   'shaders/dxvk_cursor_frag.frag',
+ 
+   'shaders/dxvk_dummy_frag.frag',
++  'shaders/dxvk_draw_auto.comp',
+ 
+   'shaders/dxvk_mipgen.comp',
++  'shaders/dxvk_predicate_reduce.comp',
+ 
+   'shaders/dxvk_present_frag.frag',
+   'shaders/dxvk_present_frag_blit.frag',
+@@ -59,7 +61,9 @@ dxvk_src = [
+   'dxvk_meta_blit.cpp',
+   'dxvk_meta_clear.cpp',
+   'dxvk_meta_copy.cpp',
++  'dxvk_meta_draw_auto.cpp',
+   'dxvk_meta_mipgen.cpp',
++  'dxvk_meta_predicate.cpp',
+   'dxvk_meta_resolve.cpp',
+   'dxvk_options.cpp',
+   'dxvk_pipelayout.cpp',
+diff --git a/src/dxvk/shaders/dxvk_draw_auto.comp b/src/dxvk/shaders/dxvk_draw_auto.comp
+new file mode 100644
+index 0000000000000000000000000000000000000000..cff6afc32ef519124536c47d9d9e6b549d39ee31
+--- /dev/null
++++ b/src/dxvk/shaders/dxvk_draw_auto.comp
+@@ -0,0 +1,21 @@
++#version 460
++#extension GL_EXT_buffer_reference : require
++
++layout(local_size_x = 1) in;
++layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer SourceCounter {
++  uint value;
++};
++layout(buffer_reference, std430, buffer_reference_align = 4) writeonly buffer DrawCounter {
++  uint value;
++};
++layout(push_constant) uniform Arguments {
++  SourceCounter source;
++  DrawCounter destination;
++  uint bias;
++} args;
++
++void main() {
++  uint counter = args.source.value;
++  // Compare before subtracting: unsigned underflow would produce a huge draw.
++  args.destination.value = counter > args.bias ? counter - args.bias : 0u;
++}
+diff --git a/src/dxvk/shaders/dxvk_predicate_reduce.comp b/src/dxvk/shaders/dxvk_predicate_reduce.comp
+new file mode 100644
+index 0000000000000000000000000000000000000000..dcc413fb81f9934a9fcc4ca2d6df437dc36df879
+--- /dev/null
++++ b/src/dxvk/shaders/dxvk_predicate_reduce.comp
+@@ -0,0 +1,26 @@
++#version 460
++#extension GL_EXT_buffer_reference : require
++layout(local_size_x = 1) in;
++layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer QueryData {
++  uvec4 entries[];
++};
++layout(buffer_reference, std430, buffer_reference_align = 4) buffer PredicateData {
++  uint value;
++};
++layout(push_constant) uniform Arguments {
++  QueryData source;
++  PredicateData destination;
++  uint count;
++  uint overflow;
++} args;
++void main() {
++  uint result = 0;
++  for (uint i = 0; i < args.count; i++) {
++    uvec4 data = args.source.entries[i];
++    bool passed = args.overflow != 0
++      ? data.w > data.y || (data.w == data.y && data.z > data.x)
++      : (data.x | data.y) != 0;
++    result |= uint(passed);
++  }
++  args.destination.value = result;
++}
+diff --git a/src/vulkan/vulkan_util.h b/src/vulkan/vulkan_util.h
+index b3ff21f0186cb79dacc1ce044b7bfc19be49d163..fc53ab84dcddffd26bf417c5885ef6b8d48e52c8 100644
+--- a/src/vulkan/vulkan_util.h
++++ b/src/vulkan/vulkan_util.h
+@@ -23,7 +23,8 @@ namespace dxvk::vk {
+     | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+     | VK_ACCESS_TRANSFER_READ_BIT
+     | VK_ACCESS_MEMORY_READ_BIT
+-    | VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT;
++    | VK_ACCESS_TRANSFORM_FEEDBACK_COUNTER_READ_BIT_EXT
++    | VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT;
+     
+   constexpr static VkAccessFlags AccessWriteMask
+     = VK_ACCESS_SHADER_WRITE_BIT
+@@ -63,7 +64,8 @@ namespace dxvk::vk {
+     | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+     | VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT
+     | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT
+-    | VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT;
++    | VK_PIPELINE_STAGE_TRANSFORM_FEEDBACK_BIT_EXT
++    | VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT;
+ 
+   inline VkImageSubresourceRange makeSubresourceRange(
+     const VkImageSubresourceLayers& layers) {

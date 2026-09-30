@@ -1363,7 +1363,7 @@ public:
 
     ~CShaderAsm()
     {
-        if (m_dwFunc) { delete(m_dwFunc); };
+        if (m_dwFunc) { delete[] m_dwFunc; };
     };
 
     // Initializes the object with the initial buffer size in UINTs
@@ -1850,7 +1850,7 @@ protected:
                     return;
                 }
                 memcpy(pNewBuffer, m_dwFunc, sizeof(UINT)*m_Index);
-                delete(m_dwFunc);
+                delete[] m_dwFunc;
 
                 m_dwFunc = pNewBuffer;
                 m_BufferSize = NewSize;

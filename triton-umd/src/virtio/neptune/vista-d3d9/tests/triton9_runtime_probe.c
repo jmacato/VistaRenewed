@@ -44,10 +44,9 @@
     (PROBE_AERO_WINSAT_TIMEOUT_MS + \
      2u * PROBE_AERO_TRANSITION_TIMEOUT_MS + \
      PROBE_AERO_WINDOW_HOLD_MS + 60000u)
-/* Fixed geometry makes a passive QMP PNG an objective visual test.  The
- * backdrop's broad dark/bright stripes sit beneath the unpainted blur plate;
- * real glass preserves the alternating light signal after blurring, while
- * Aero Basic leaves the plate opaque. */
+/* Fixed geometry permits comparison of guest and host-window captures.
+ * The black-painted glass plate must soften the backdrop's stripe edges;
+ * transparency or successful DWM calls alone do not establish blur. */
 #define PROBE_AERO_BACKDROP_X 80
 #define PROBE_AERO_BACKDROP_Y 100
 #define PROBE_AERO_BACKDROP_WIDTH 640
@@ -65,6 +64,15 @@ typedef HRESULT (WINAPI *PFN_DWMEXTENDFRAMEINTOCLIENTAREA)(
     HWND window, const MARGINS *margins);
 typedef HRESULT (WINAPI *PFN_DWMENABLEBLURBEHINDWINDOW)(
     HWND window, const DWM_BLURBEHIND *blurBehind);
+typedef HRESULT (WINAPI *PFN_DWMGETCOLORIZATIONCOLOR)(DWORD *color, BOOL *opaque);
+typedef HRESULT (WINAPI *PFN_DWMGETWINDOWATTRIBUTE)(
+    HWND window, DWORD attribute, void *value, DWORD size);
+
+typedef struct ProbeAeroWindowState {
+    BOOL reapplyPending;
+    BOOL compositionChanged;
+    BOOL attributesChanged;
+} ProbeAeroWindowState;
 
 /* Keep these Vista KMT declarations local to the probe.  New SDK copies of
  * d3dkmthk.h select structures from the build machine's WDDM level, while
@@ -685,6 +693,27 @@ probeCreateWindow(HINSTANCE instance)
 static LRESULT CALLBACK
 probeAeroWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+    ProbeAeroWindowState *state =
+        (ProbeAeroWindowState *)GetWindowLongPtrA(window, GWLP_USERDATA);
+
+    if (message == WM_NCCREATE) {
+        const CREATESTRUCTA *create = (const CREATESTRUCTA *)lparam;
+
+        SetWindowLongPtrA(window, GWLP_USERDATA, (LONG_PTR)create->lpCreateParams);
+    } else if (message == WM_DWMCOMPOSITIONCHANGED && state) {
+        state->reapplyPending = TRUE;
+        state->compositionChanged = TRUE;
+        state->attributesChanged = TRUE;
+        probeLog("AERO composition-changed tick=%lu reapply=PENDING\r\n",
+                 (unsigned long)GetTickCount());
+    } else if ((message == WM_DWMCOLORIZATIONCOLORCHANGED ||
+                message == WM_DWMNCRENDERINGCHANGED) && state) {
+        state->attributesChanged = TRUE;
+        probeLog("AERO attributes-changed message=0x%04x tick=%lu\r\n",
+                 message, (unsigned long)GetTickCount());
+    } else if (message == WM_NCDESTROY) {
+        SetWindowLongPtrA(window, GWLP_USERDATA, 0);
+    }
     if (message == WM_ERASEBKGND)
         return 1;
     if (message == WM_PAINT) {
@@ -692,7 +721,7 @@ probeAeroWindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
         RECT label;
         HDC dc = BeginPaint(window, &paint);
 
-        /* Initialize the extended frame to transparent black as required
+        /* Initialize the glass plate to transparent black as required
          * by DWM. Leaving the client pixels unpainted does not establish
          * their alpha values. DWM alone supplies the backdrop and blur. */
         RECT client;
@@ -779,7 +808,7 @@ probeAeroBackdropProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 }
 
 static HWND
-probeCreateAeroWindow(HINSTANCE instance)
+probeCreateAeroWindow(HINSTANCE instance, ProbeAeroWindowState *state)
 {
     WNDCLASSEXA windowClass;
 
@@ -796,7 +825,7 @@ probeCreateAeroWindow(HINSTANCE instance)
                            "", WS_POPUP | WS_VISIBLE,
                            PROBE_AERO_GLASS_X, PROBE_AERO_GLASS_Y,
                            PROBE_AERO_GLASS_WIDTH, PROBE_AERO_GLASS_HEIGHT,
-                           NULL, NULL, instance, NULL);
+                           NULL, NULL, instance, state);
 }
 
 static void
@@ -993,6 +1022,40 @@ probeAeroEnableBlurWhenReady(PFN_DWMENABLEBLURBEHINDWINDOW enableBlurBehind,
     }
 }
 
+static HRESULT
+probeAeroLogState(HWND window, const char *event,
+                  PFN_DWMISCOMPOSITIONENABLED isCompositionEnabled,
+                  PFN_DWMGETCOLORIZATIONCOLOR getColorizationColor,
+                  PFN_DWMGETWINDOWATTRIBUTE getWindowAttribute,
+                  BOOL *enabled)
+{
+    DWORD color = 0;
+    BOOL opaque = TRUE;
+    BOOL ncEnabled = FALSE;
+    HRESULT compositionHr;
+    HRESULT colorHr;
+    HRESULT windowHr;
+
+    *enabled = FALSE;
+    compositionHr = isCompositionEnabled(enabled);
+    colorHr = getColorizationColor(&color, &opaque);
+    windowHr = getWindowAttribute(window, DWMWA_NCRENDERING_ENABLED,
+                                  &ncEnabled, sizeof(ncEnabled));
+    probeLog("AERO state event=%s tick=%lu composition=%lu hr=0x%08lx "
+             "color=0x%08lx opaque=%lu color-hr=0x%08lx nc=%lu nc-hr=0x%08lx\r\n",
+             event, (unsigned long)GetTickCount(), (unsigned long)*enabled,
+             (unsigned long)compositionHr, (unsigned long)color,
+             (unsigned long)opaque, (unsigned long)colorHr,
+             (unsigned long)ncEnabled, (unsigned long)windowHr);
+    if (FAILED(compositionHr))
+        return compositionHr;
+    if (*enabled && FAILED(colorHr))
+        return colorHr;
+    if (*enabled && FAILED(windowHr))
+        return windowHr;
+    return S_OK;
+}
+
 /* DwmEnableComposition is not a capability override.  It is the documented
  * request that asks the currently logged-in DWM to use its hardware
  * compositor.  A DWM_E_COMPOSITIONDISABLED result is the useful negative
@@ -1003,13 +1066,15 @@ probeAeroEnableBlurWhenReady(PFN_DWMENABLEBLURBEHINDWINDOW enableBlurBehind,
  * Aero Basic compositor accepts these calls too.  Real Aero requires a later
  * pixel-level check for translucent glass and background blur. */
 static int
-probeAeroRun(void)
+probeAeroRun(BOOL useBlurBehind)
 {
     HMODULE dwmapi = NULL;
     PFN_DWMISCOMPOSITIONENABLED isCompositionEnabled;
     PFN_DWMENABLECOMPOSITION enableComposition;
     PFN_DWMEXTENDFRAMEINTOCLIENTAREA extendFrame;
     PFN_DWMENABLEBLURBEHINDWINDOW enableBlurBehind;
+    PFN_DWMGETCOLORIZATIONCOLOR getColorizationColor;
+    PFN_DWMGETWINDOWATTRIBUTE getWindowAttribute;
     HINSTANCE instance = GetModuleHandleA(NULL);
     HWND backdrop = NULL;
     HWND window = NULL;
@@ -1022,6 +1087,9 @@ probeAeroRun(void)
     BOOL enabledAfter = FALSE;
     HRESULT hr;
     DWORD deadline;
+    DWORD nextStateLog;
+    DWORD nextReapply;
+    ProbeAeroWindowState windowState = {0};
     char resultLog[MAX_PATH];
     int result = 1;
 
@@ -1049,7 +1117,11 @@ probeAeroRun(void)
         !probeProc(dwmapi, "DwmExtendFrameIntoClientArea", &extendFrame,
                    sizeof(extendFrame)) ||
         !probeProc(dwmapi, "DwmEnableBlurBehindWindow", &enableBlurBehind,
-                   sizeof(enableBlurBehind))) {
+                   sizeof(enableBlurBehind)) ||
+        !probeProc(dwmapi, "DwmGetColorizationColor", &getColorizationColor,
+                   sizeof(getColorizationColor)) ||
+        !probeProc(dwmapi, "DwmGetWindowAttribute", &getWindowAttribute,
+                   sizeof(getWindowAttribute))) {
         probeLog("AERO resolve dwmapi exports error=%lu FAIL\r\n",
                  (unsigned long)GetLastError());
         goto cleanup;
@@ -1097,7 +1169,7 @@ probeAeroRun(void)
                  (unsigned long)GetLastError());
         goto cleanup;
     }
-    window = probeCreateAeroWindow(instance);
+    window = probeCreateAeroWindow(instance, &windowState);
     if (!window) {
         probeLog("AERO CreateWindow(Default) error=%lu FAIL\r\n",
                  (unsigned long)GetLastError());
@@ -1109,27 +1181,43 @@ probeAeroRun(void)
     margins.cxRightWidth = -1;
     margins.cyTopHeight = -1;
     margins.cyBottomHeight = -1;
-    hr = probeAeroExtendFrameWhenReady(extendFrame, window, &margins);
-    probeHr("AERO DwmExtendFrameIntoClientArea", hr);
-    if (FAILED(hr))
-        goto cleanup;
-    GetClientRect(window, &client);
-    region = CreateRectRgn(client.left, client.top, client.right, client.bottom);
-    if (!region) {
-        probeLog("AERO CreateRectRgn error=%lu FAIL\r\n",
-                 (unsigned long)GetLastError());
-        goto cleanup;
+    /* Use explicit client blur for this borderless plate. Keep frame
+     * extension as a separate diagnostic so their results are independent. */
+    probeLog("AERO mechanism=%s\r\n",
+             useBlurBehind ? "blur-behind" : "extended-frame");
+    if (useBlurBehind) {
+        GetClientRect(window, &client);
+        region = CreateRectRgn(client.left, client.top, client.right, client.bottom);
+        if (!region) {
+            probeLog("AERO CreateRectRgn error=%lu FAIL\r\n",
+                     (unsigned long)GetLastError());
+            goto cleanup;
+        }
+        ZeroMemory(&blurBehind, sizeof(blurBehind));
+        blurBehind.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
+        blurBehind.fEnable = TRUE;
+        blurBehind.hRgnBlur = region;
+        hr = probeAeroEnableBlurWhenReady(enableBlurBehind, window, &blurBehind);
+        probeHr("AERO DwmEnableBlurBehindWindow", hr);
+        if (FAILED(hr))
+            goto cleanup;
+    } else {
+        hr = probeAeroExtendFrameWhenReady(extendFrame, window, &margins);
+        probeHr("AERO DwmExtendFrameIntoClientArea", hr);
+        if (FAILED(hr))
+            goto cleanup;
     }
-    ZeroMemory(&blurBehind, sizeof(blurBehind));
-    blurBehind.dwFlags = DWM_BB_ENABLE | DWM_BB_BLURREGION;
-    blurBehind.fEnable = TRUE;
-    blurBehind.hRgnBlur = region;
-    hr = probeAeroEnableBlurWhenReady(enableBlurBehind, window, &blurBehind);
-    probeHr("AERO DwmEnableBlurBehindWindow", hr);
-    if (FAILED(hr))
-        goto cleanup;
     InvalidateRect(window, NULL, FALSE);
     UpdateWindow(window);
+    hr = probeAeroLogState(window, "initial", isCompositionEnabled,
+                           getColorizationColor, getWindowAttribute,
+                           &enabledAfter);
+    if (FAILED(hr) && hr != DWM_E_COMPOSITIONDISABLED) {
+        probeHr("AERO initial state", hr);
+        goto cleanup;
+    }
+    if (!enabledAfter || hr == DWM_E_COMPOSITIONDISABLED)
+        windowState.reapplyPending = TRUE;
     probeLog("TRITON9-AERO API-PATH proof-pattern backdrop=%dx%d+%d+%d glass=%dx%d+%d+%d stripe=%d hold-ms=%lu VISUAL-UNVERIFIED\r\n",
              PROBE_AERO_BACKDROP_WIDTH, PROBE_AERO_BACKDROP_HEIGHT,
              PROBE_AERO_BACKDROP_X, PROBE_AERO_BACKDROP_Y,
@@ -1140,14 +1228,85 @@ probeAeroRun(void)
     probeUpload();
 
     deadline = GetTickCount() + PROBE_AERO_WINDOW_HOLD_MS;
+    nextStateLog = GetTickCount() + 5000u;
+    nextReapply = GetTickCount();
     for (;;) {
+        DWORD now;
+
         while (PeekMessageA(&message, NULL, 0, 0, PM_REMOVE)) {
             TranslateMessage(&message);
             DispatchMessageA(&message);
         }
-        if ((LONG)(GetTickCount() - deadline) >= 0)
+        if (!IsWindow(window) || !IsWindow(backdrop)) {
+            probeLog("AERO proof window closed before hold completed FAIL\r\n");
+            goto cleanup;
+        }
+        now = GetTickCount();
+        if (windowState.compositionChanged) {
+            windowState.reapplyPending = TRUE;
+            nextReapply = now;
+            windowState.compositionChanged = FALSE;
+        }
+        if (windowState.attributesChanged ||
+            (LONG)(now - nextStateLog) >= 0) {
+            const char *event = windowState.attributesChanged
+                                    ? "changed" : "periodic";
+
+            windowState.attributesChanged = FALSE;
+            hr = probeAeroLogState(window, event, isCompositionEnabled,
+                                   getColorizationColor, getWindowAttribute,
+                                   &enabledAfter);
+            if (FAILED(hr) && hr != DWM_E_COMPOSITIONDISABLED) {
+                probeHr("AERO hold state", hr);
+                goto cleanup;
+            }
+            if (!enabledAfter || hr == DWM_E_COMPOSITIONDISABLED)
+                windowState.reapplyPending = TRUE;
+            nextStateLog = now + 5000u;
+        }
+        if (windowState.reapplyPending && (LONG)(now - nextReapply) >= 0) {
+            /* DWM calls may dispatch a newer composition notification. */
+            windowState.reapplyPending = FALSE;
+            hr = isCompositionEnabled(&enabledAfter);
+            if (SUCCEEDED(hr)) {
+                if (!enabledAfter)
+                    hr = DWM_E_COMPOSITIONDISABLED;
+                else if (useBlurBehind)
+                    hr = enableBlurBehind(window, &blurBehind);
+                else
+                    hr = extendFrame(window, &margins);
+            }
+            probeLog("AERO reapply mechanism=%s tick=%lu hr=0x%08lx %s\r\n",
+                     useBlurBehind ? "blur-behind" : "extended-frame",
+                     (unsigned long)now, (unsigned long)hr,
+                     SUCCEEDED(hr) ? "PASS" :
+                     hr == DWM_E_COMPOSITIONDISABLED ? "WAIT" : "FAIL");
+            if (SUCCEEDED(hr)) {
+                windowState.attributesChanged = TRUE;
+                InvalidateRect(window, NULL, FALSE);
+                UpdateWindow(window);
+            } else if (hr == DWM_E_COMPOSITIONDISABLED) {
+                windowState.reapplyPending = TRUE;
+            } else {
+                goto cleanup;
+            }
+            nextReapply = now + 1000u;
+        }
+        if ((LONG)(now - deadline) >= 0)
             break;
         Sleep(50);
+    }
+    hr = probeAeroLogState(window, "final", isCompositionEnabled,
+                           getColorizationColor, getWindowAttribute,
+                           &enabledAfter);
+    if (FAILED(hr) || !enabledAfter || windowState.reapplyPending ||
+        windowState.compositionChanged) {
+        probeLog("AERO hold ended without an active effect hr=0x%08lx "
+                 "composition=%lu reapply-pending=%lu composition-changed=%lu FAIL\r\n",
+                 (unsigned long)hr, (unsigned long)enabledAfter,
+                 (unsigned long)windowState.reapplyPending,
+                 (unsigned long)windowState.compositionChanged);
+        goto cleanup;
     }
     result = 0;
     probeLog("TRITON9-AERO API-PATH PASS VISUAL-UNVERIFIED\r\n");
@@ -3624,9 +3783,11 @@ main(int argc, char **argv)
         g_childMode = TRUE;
         return probeRun(argc, argv);
     }
-    if (argc > 1 && strcmp(argv[1], "--aero-probe") == 0) {
+    if (argc > 1 && (strcmp(argv[1], "--aero-probe") == 0 ||
+                     strcmp(argv[1], "--aero-blur-probe") == 0 ||
+                     strcmp(argv[1], "--aero-frame-probe") == 0)) {
         g_childMode = TRUE;
-        return probeAeroRun();
+        return probeAeroRun(strcmp(argv[1], "--aero-frame-probe") != 0);
     }
 
     if (StartServiceCtrlDispatcherA(serviceTable))

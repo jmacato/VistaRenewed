@@ -2,11 +2,9 @@
  * Copyright 2026 Turing Software LLC
  * SPDX-License-Identifier: MIT
  *
- * Shared aux types for override modules that own a host-written
- * feedback shmem slot (queries, fences).  npt_d3d11_feedback_aux is
- * the base; per-type aux structs embed it as their first member so
- * type-agnostic code can touch the slot bookkeeping.  The host poll
- * runs CPU-side since D3D11 has no GPU-injected QueryPoolResults.
+ * Shared aux types for asynchronous wrappers. Fences use host-written
+ * feedback slots; queries use ordered GetData commands. Per-type aux
+ * structs embed npt_d3d11_feedback_aux as their first member.
  */
 
 #ifndef NPT_OVERRIDES_D3D11_FEEDBACK_H
@@ -34,12 +32,11 @@ struct npt_d3d11_query_aux {
    /* Must be first so generic helpers can downcast. */
    struct npt_d3d11_feedback_aux base;
 
-   /* Bytes for the host to memcpy each successful poll. */
+   /* Result size from the creation descriptor, or zero if unknown. */
    uint32_t query_data_size;
 
-   /* Bumped at each Begin before the slot is cleared; host stamps
-    * the version so a GetData racing a stale write from the previous
-    * cycle sees a mismatch and returns S_FALSE. */
+   /* Reserved while query feedback is disabled. Repeated queries need
+    * generation changes ordered with their Begin/End commands. */
    _Atomic uint32_t local_version;
 };
 

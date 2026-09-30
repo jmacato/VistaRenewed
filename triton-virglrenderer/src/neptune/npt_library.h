@@ -60,6 +60,8 @@ struct npt_d3d_library {
    HRESULT (*pfn_clear_depth_stencil_rects)(
       void *context, void *dsv, uint32_t clear_flags, float depth,
       uint8_t stencil, uint32_t rect_count, const int32_t *rects);
+   /* Query-neutral raw color conversion, with no CPU pixel access. */
+   HRESULT (*pfn_copy_color)(void *context, void *dst_rtv, void *src_srv);
    enum npt_backend_kind backend;
 
    /* NPT_WA_* bits describing the workarounds the loaded backend needs, set in

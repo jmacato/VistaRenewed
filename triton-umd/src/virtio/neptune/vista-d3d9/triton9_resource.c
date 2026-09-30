@@ -11,6 +11,7 @@
 
 #include "triton9.h"
 #include "triton9_cpu_layout.h"
+#include "triton_trace_wire.h"
 
 /* Defined in triton9_ddi.c; kept deliberately tiny so early DDI failures
  * can be inspected after a QMP-only reboot into Safe Mode. */
@@ -20,6 +21,7 @@ extern void triton9Diag(const char *message);
 #include "npt_shared_texture.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #define TRITON9_HOST_DRAIN_TIMEOUT_MS 15000u
@@ -58,6 +60,15 @@ triton9SharedFormat(DXGI_FORMAT format, ULONG *virglFormat)
     case DXGI_FORMAT_B8G8R8X8_UNORM:
         value = 2; /* VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM */
         break;
+    case DXGI_FORMAT_R8G8B8A8_UNORM:
+        value = 67; /* VIRGL_FORMAT_R8G8B8A8_UNORM */
+        break;
+    case DXGI_FORMAT_R10G10B10A2_UNORM:
+        value = 8; /* VIRGL_FORMAT_R10G10B10A2_UNORM */
+        break;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:
+        value = 94; /* VIRGL_FORMAT_R16G16B16A16_FLOAT */
+        break;
     default:
         return FALSE;
     }
@@ -83,66 +94,49 @@ static HRESULT
 triton9CreateShadow(TRITON9_RESOURCE *resource,
                     const D3DDDI_SURFACEINFO *surface)
 {
-    TRITON9_CPU_BACKING backing;
-    TRITON9_CPU_LAYOUT layout;
-    SIZE_T sourcePitch;
-    BOOL systemMemory;
-
-    if (!resource || !resource->bytesPerPixel)
-        return E_INVALIDARG;
-    systemMemory = triton9ResourceIsSystemMemory(resource);
-    if (!triton9CpuBackingInit(&backing,
-                               surface ? (void *)(uintptr_t)surface->pSysMem : NULL,
-                               systemMemory))
-        return D3DDDIERR_INVALIDUSERBUFFER;
-
-    if (resource->isBuffer) {
-        if (!triton9CpuLayoutLinear(&layout, resource->width))
-            return E_OUTOFMEMORY;
-    } else {
-        if (systemMemory && !surface->SysMemPitch)
-            return D3DDDIERR_INVALIDUSERBUFFER;
-        if (!triton9CpuLayout2D(&layout, resource->width, resource->height,
-                                resource->bytesPerPixel,
-                                systemMemory ? surface->SysMemPitch : 0,
-                                systemMemory ? surface->SysMemSlicePitch : 0))
-            return systemMemory ? D3DDDIERR_INVALIDUSERBUFFER : E_OUTOFMEMORY;
-    }
-    if (layout.rowBytes > UINT_MAX || layout.rowPitch > UINT_MAX ||
-        layout.slicePitch > UINT_MAX)
-        return E_OUTOFMEMORY;
-
-    resource->rowBytes = (UINT)layout.rowBytes;
-    resource->pitch = (UINT)layout.rowPitch;
-    resource->slicePitch = (UINT)layout.slicePitch;
-    resource->shadowSize = layout.dataSize;
+    const TRITON9_FORMAT *format = triton9FormatLookup(resource->format);
+    UINT bw = format ? format->blockWidth : 1;
+    UINT bh = format ? format->blockHeight : 1;
+    UINT bytes = format ? format->bytesPerBlock : 1;
+    uint64_t row, rows, pitch, slice, size;
+    BOOL systemMemory = triton9ResourceIsSystemMemory(resource);
+    UINT z;
+    if (!resource->width || !resource->height || !resource->depth || !bw || !bh || !bytes)
+        return D3DDDIERR_INVALIDCALL;
+    resource->blockWidth = bw; resource->blockHeight = bh; resource->bytesPerBlock = bytes;
+    row = ((uint64_t)resource->width + bw - 1) / bw * bytes;
+    rows = ((uint64_t)resource->height + bh - 1) / bh;
+    pitch = systemMemory && surface && !resource->isBuffer ? surface->SysMemPitch : row;
+    slice = systemMemory && surface && surface->SysMemSlicePitch
+        ? surface->SysMemSlicePitch : pitch * rows;
+    size = slice * resource->depth;
+    if (row > UINT_MAX || pitch < row || pitch > UINT_MAX ||
+        slice < pitch * rows || slice > UINT_MAX ||
+        size > (SIZE_T)-1 || !size)
+        return systemMemory ? D3DDDIERR_INVALIDUSERBUFFER : E_OUTOFMEMORY;
+    resource->rowBytes = (UINT)row; resource->pitch = (UINT)pitch;
+    resource->slicePitch = (UINT)slice; resource->shadowSize = (SIZE_T)size;
     if (systemMemory) {
-        /* pSysMem is declared const because CreateResource receives initial
-         * contents.  Vista subsequently exposes this same allocation to the
-         * application for writes and sends NotifyOnly Lock/Unlock calls so the
-         * UMD can synchronize its host mirror. */
-        resource->shadow = backing.data;
-        resource->ownsShadow = backing.driverOwned;
+        if (!surface || !surface->pSysMem)
+            return D3DDDIERR_INVALIDUSERBUFFER;
+        resource->shadow = (BYTE *)(uintptr_t)surface->pSysMem;
+        resource->ownsShadow = FALSE;
         return S_OK;
     }
-
-    resource->shadow = (BYTE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
-                                         resource->shadowSize ? resource->shadowSize : 1);
-    if (!resource->shadow)
-        return E_OUTOFMEMORY;
-    resource->ownsShadow = backing.driverOwned;
-
-    if (!surface || !surface->pSysMem)
-        return S_OK;
-    if (resource->isBuffer) {
-        memcpy(resource->shadow, surface->pSysMem, resource->shadowSize);
-        return S_OK;
+    resource->shadow = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, resource->shadowSize);
+    if (!resource->shadow) return E_OUTOFMEMORY;
+    resource->ownsShadow = TRUE;
+    if (surface && surface->pSysMem) {
+        uint64_t srcPitch = surface->SysMemPitch ? surface->SysMemPitch : row;
+        uint64_t srcSlice = surface->SysMemSlicePitch ? surface->SysMemSlicePitch : srcPitch * rows;
+        if (srcPitch < row || srcSlice < srcPitch * rows ||
+            srcSlice > (SIZE_T)-1 / resource->depth)
+            return D3DDDIERR_INVALIDUSERBUFFER;
+        for (z = 0; z < resource->depth; ++z)
+            triton9CpuCopyRows(resource->shadow + (SIZE_T)z * resource->slicePitch,
+                resource->pitch, (const BYTE *)surface->pSysMem + (SIZE_T)z * srcSlice,
+                (SIZE_T)srcPitch, (SIZE_T)row, (UINT)rows);
     }
-    sourcePitch = surface->SysMemPitch ? surface->SysMemPitch : resource->rowBytes;
-    if (sourcePitch < resource->rowBytes)
-        return D3DDDIERR_INVALIDUSERBUFFER;
-    triton9CpuCopyRows(resource->shadow, resource->pitch, surface->pSysMem,
-                       sourcePitch, resource->rowBytes, resource->height);
     return S_OK;
 }
 
@@ -156,20 +150,147 @@ triton9DeallocateResource(TRITON9_DEVICE *device,
                           TRITON9_RESOURCE *resource);
 static HRESULT
 triton9UploadShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource);
-static HRESULT
-triton9UploadLockedShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource);
 static void
 triton9ReleaseResourceViews(TRITON9_RESOURCE *resource);
+
+/* The public A2R10G10B10 CPU layout stores red in bits 20..29. Host
+ * R10G10B10A2 storage is canonical RGBA, with red in bits 0..9. Convert only
+ * at CPU boundaries; shader channels, blending and MRT masks stay uniform.
+ * memcpy keeps unaligned runtime buffers valid and leaves row padding alone. */
+static void
+triton9SwapPacked10Rows(BYTE *destination, SIZE_T destinationPitch,
+                        const BYTE *source, SIZE_T sourcePitch,
+                        SIZE_T rowBytes, UINT rows)
+{
+    UINT y;
+    for (y = 0; y < rows; ++y) {
+        SIZE_T x;
+        for (x = 0; x < rowBytes; x += 4) {
+            UINT pixel;
+            memcpy(&pixel, source + x, sizeof(pixel));
+            pixel = (pixel & 0xc00ffc00u) | ((pixel & 0x3ffu) << 20) |
+                    ((pixel >> 20) & 0x3ffu);
+            memcpy(destination + x, &pixel, sizeof(pixel));
+        }
+        destination += destinationPitch;
+        source += sourcePitch;
+    }
+}
+
+HRESULT
+triton9UpdateHostTexture(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                         ID3D11DeviceContext *context, ID3D11Resource *destination,
+                         UINT subresource, const D3D11_BOX *box,
+                         const BYTE *source, UINT rowPitch, UINT slicePitch)
+{
+    BYTE *converted = NULL;
+    const BYTE *upload = source;
+    UINT uploadPitch = rowPitch, uploadSlice = slicePitch;
+    if (!triton9ResourceBelongsToDevice(device, resource) || !context ||
+        !destination || !source)
+        return E_INVALIDARG;
+    if (!resource->isBuffer && resource->format == D3DDDIFMT_A2R10G10B10) {
+        UINT width = box ? box->right - box->left : resource->width;
+        UINT height = box ? box->bottom - box->top : resource->height;
+        UINT depth = box ? box->back - box->front : resource->depth;
+        uint64_t pitch = (uint64_t)width * 4;
+        uint64_t slice = pitch * height;
+        uint64_t sourceSlice = slicePitch ? slicePitch : (uint64_t)rowPitch * height;
+        UINT z;
+        if (!width || !height || !depth || pitch > rowPitch || pitch > UINT_MAX ||
+            slice > UINT_MAX || slice > (SIZE_T)-1 / depth ||
+            sourceSlice < (uint64_t)rowPitch * height || sourceSlice > (SIZE_T)-1 / depth)
+            return E_INVALIDARG;
+        converted = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)slice * depth);
+        if (!converted) return E_OUTOFMEMORY;
+        for (z = 0; z < depth; ++z)
+            triton9SwapPacked10Rows(converted + (SIZE_T)z * slice, (SIZE_T)pitch,
+                source + (SIZE_T)z * sourceSlice, rowPitch, (SIZE_T)pitch, height);
+        upload = converted; uploadPitch = (UINT)pitch; uploadSlice = (UINT)slice;
+    }
+    ID3D11DeviceContext_UpdateSubresource(context, destination, subresource, box,
+                                          upload, uploadPitch, uploadSlice);
+    if (converted) HeapFree(GetProcessHeap(), 0, converted);
+    return S_OK;
+}
 
 static void
 triton9ClearLockRegion(TRITON9_RESOURCE *resource)
 {
-    if (!resource)
-        return;
     resource->lockRangeValid = FALSE;
     resource->lockAreaValid = FALSE;
+    resource->lockBoxValid = FALSE;
     ZeroMemory(&resource->lockRange, sizeof(resource->lockRange));
     ZeroMemory(&resource->lockArea, sizeof(resource->lockArea));
+    ZeroMemory(&resource->lockBox, sizeof(resource->lockBox));
+}
+
+static HRESULT
+triton9UploadShadowRegion(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                           const D3D11_BOX *box, const BYTE *source,
+                           UINT rowPitch, UINT slicePitch)
+{
+    BOOL track = resource->isBuffer && triton9ResourceIsSystemMemory(resource) &&
+        resource->systemMemorySnapshot &&
+        resource->systemMemorySnapshotSize == resource->width &&
+        (!box || (resource->systemMemorySnapshotHost == resource->hostResource &&
+                  resource->systemMemorySnapshotSerial == resource->contentSerial));
+    HRESULT hr;
+
+    if (resource->isBuffer && box &&
+        (box->left >= box->right || box->right > resource->width))
+        return D3DDDIERR_INVALIDCALL;
+    if (track) {
+        UINT first = box ? box->left : 0;
+        UINT end = box ? box->right : resource->width;
+        /* Preserve bytes outside a partial write as last submitted, even if
+         * Vista changed its canonical alias there without a notification. */
+        resource->systemMemorySnapshotHost = NULL;
+        memcpy(resource->systemMemorySnapshot + first, source, end - first);
+        source = resource->systemMemorySnapshot + first;
+    }
+    hr = triton9UpdateHostTexture(device, resource,
+        (ID3D11DeviceContext *)device->hostContext, resource->hostResource,
+        resource->subresourceIndex, box, source, rowPitch, slicePitch);
+    if (FAILED(hr)) return hr;
+    triton9ResourceWritten(resource);
+    hr = triton9CheckHostDevice(device);
+    if (track && SUCCEEDED(hr)) {
+        resource->systemMemorySnapshotHost = resource->hostResource;
+        resource->systemMemorySnapshotSerial = resource->contentSerial;
+    }
+    return hr;
+}
+
+static HRESULT
+triton9UploadLockedShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
+{
+    D3D11_BOX box;
+    const BYTE *source;
+    if (!triton9ResourceBelongsToDevice(device, resource) || !resource->hostResource || !resource->shadow)
+        return E_INVALIDARG;
+    if (!resource->lockRangeValid && !resource->lockAreaValid && !resource->lockBoxValid)
+        return triton9UploadShadow(device, resource);
+    box.left = 0; box.right = resource->width; box.top = 0; box.bottom = resource->height;
+    box.front = 0; box.back = resource->depth;
+    if (resource->isBuffer && resource->lockRangeValid) {
+        box.left = resource->lockRange.Offset;
+        box.right = box.left + resource->lockRange.Size;
+        source = resource->shadow + box.left;
+    } else {
+        if (resource->lockAreaValid) {
+            box.left = resource->lockArea.left; box.top = resource->lockArea.top;
+            box.right = resource->lockArea.right; box.bottom = resource->lockArea.bottom;
+        } else if (resource->lockBoxValid) {
+            box.left = resource->lockBox.Left; box.top = resource->lockBox.Top;
+            box.right = resource->lockBox.Right; box.bottom = resource->lockBox.Bottom;
+            box.front = resource->lockBox.Front; box.back = resource->lockBox.Back;
+        }
+        if (!triton9ResourceBoxValid(resource, &box)) return D3DDDIERR_INVALIDCALL;
+        source = resource->shadow + triton9ResourceByteOffset(resource, box.left, box.top, box.front);
+    }
+    return triton9UploadShadowRegion(device, resource, &box, source,
+        resource->pitch, resource->slicePitch);
 }
 
 static HRESULT
@@ -203,51 +324,98 @@ triton9CreateHostBuffer(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
 static HRESULT
 triton9CreateHostTexture(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
 {
-    D3D11_TEXTURE2D_DESC desc;
-    D3D11_SUBRESOURCE_DATA initial;
-    D3D11_SUBRESOURCE_DATA *initialPtr = NULL;
-    ID3D11Texture2D *texture = NULL;
+    const TRITON9_FORMAT *format = triton9FormatLookup(resource->format);
+    UINT bind = resource->isDepthStencil ? D3D11_BIND_DEPTH_STENCIL : D3D11_BIND_SHADER_RESOURCE;
+    UINT misc = resource->isCube ? D3D11_RESOURCE_MISC_TEXTURECUBE : 0;
+    HRESULT hr;
+    if (!format) return D3DDDIERR_INVALIDCALL;
+    if (!resource->isDepthStencil && (resource->wantsRenderTarget ||
+        resource->wantsAutogenMipmap || (!resource->isTexture &&
+        (format->operations & FORMATOP_OFFSCREENPLAIN))))
+        bind |= D3D11_BIND_RENDER_TARGET;
+    if (resource->wantsAutogenMipmap && resource->mipLevels > 1)
+        misc |= D3D11_RESOURCE_MISC_GENERATE_MIPS;
+    if (resource->isVolume) {
+        D3D11_TEXTURE3D_DESC desc;
+        ID3D11Texture3D *texture = NULL;
+        ZeroMemory(&desc, sizeof(desc));
+        desc.Width = resource->width; desc.Height = resource->height; desc.Depth = resource->depth;
+        desc.MipLevels = resource->mipLevels; desc.Format = format->resourceFormat;
+        desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = bind; desc.MiscFlags = misc;
+        hr = ID3D11Device1_CreateTexture3D(device->hostDevice, &desc, NULL, &texture);
+        resource->hostResource = (ID3D11Resource *)texture;
+    } else {
+        D3D11_TEXTURE2D_DESC desc;
+        ID3D11Texture2D *texture = NULL;
+        ZeroMemory(&desc, sizeof(desc));
+        desc.Width = resource->width; desc.Height = resource->height;
+        desc.MipLevels = resource->mipLevels; desc.ArraySize = resource->arraySize ? resource->arraySize : 1;
+        desc.Format = format->resourceFormat;
+        desc.SampleDesc.Count = resource->sampleCount ? resource->sampleCount : 1;
+        desc.SampleDesc.Quality = resource->sampleQuality;
+        desc.Usage = D3D11_USAGE_DEFAULT; desc.BindFlags = bind; desc.MiscFlags = misc;
+        if (desc.SampleDesc.Count > 1) {
+            UINT quality = 0;
+            hr = ID3D11Device1_CheckMultisampleQualityLevels(device->hostDevice,
+                resource->hostFormat, desc.SampleDesc.Count, &quality);
+            if (FAILED(hr) || !quality || desc.SampleDesc.Quality >= quality)
+                return D3DDDIERR_INVALIDCALL;
+            desc.BindFlags &= ~D3D11_BIND_SHADER_RESOURCE;
+        }
+        hr = ID3D11Device1_CreateTexture2D(device->hostDevice, &desc, NULL, &texture);
+        resource->hostResource = (ID3D11Resource *)texture;
+        bind = desc.BindFlags;
+    }
+    if (FAILED(hr) || !resource->hostResource)
+        return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
+    resource->hostBindFlags = bind;
+    return S_OK;
+}
+
+static HRESULT
+triton9OpenStandardPrimaryHost(TRITON9_DEVICE *device,
+                               TRITON9_RESOURCE *resource)
+{
+    VIOGPU_ESCAPE escape;
+    struct triton_shared_texture_desc desc;
     HRESULT hr;
 
+    if (!resource->hKMAllocation)
+        return E_INVALIDARG;
+    hr = triton9EnsureRuntimeContext(device);
+    if (FAILED(hr))
+        return hr;
+    ZeroMemory(&escape, sizeof(escape));
+    escape.Type = VIOGPU_RES_INFO;
+    escape.DataLength = sizeof(escape.ResourceInfo);
+    escape.ResourceInfo.ResHandle = resource->hKMAllocation;
+    hr = triton9Escape(device, &escape);
+    if (FAILED(hr) || !escape.ResourceInfo.IsCreated || !escape.ResourceInfo.Id)
+        return FAILED(hr) ? hr : E_FAIL;
+
+    /* Import handles own only the transport attachment.  Keep the runtime's
+     * original primary allocation handle and its ownership unchanged.
+     * Retain an attachment across failed opens; DestroyResource drains and
+     * releases it, and a retry must not overwrite its handles. */
+    if (!resource->hImportAllocation && !resource->hImportResource &&
+        !tritonSharedBridgeImportRes(device->hostDevice, escape.ResourceInfo.Id,
+                                     (uint64_t)resource->width * resource->height * 4,
+                                     &resource->hImportAllocation,
+                                     &resource->hImportResource))
+        return E_FAIL;
     ZeroMemory(&desc, sizeof(desc));
-    desc.Width = resource->width;
-    desc.Height = resource->height;
-    desc.MipLevels = resource->mipLevels;
-    desc.ArraySize = 1;
-    desc.Format = resource->hostFormat;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    if (resource->isDepthStencil)
-        desc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-    else {
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        /* OFFSCREENPLAIN is advertised for the two 32-bit colour formats.
-         * Their DEFAULT-pool textures must therefore support ColorFill even
-         * when the declaration did not include RenderTarget. */
-        if (resource->wantsRenderTarget || resource->isPrimary ||
-            resource->wantsAutogenMipmap ||
-            resource->hostFormat == DXGI_FORMAT_B8G8R8A8_UNORM ||
-            resource->hostFormat == DXGI_FORMAT_B8G8R8X8_UNORM)
-            desc.BindFlags |= D3D11_BIND_RENDER_TARGET;
-        if (resource->wantsAutogenMipmap)
-            desc.MiscFlags |= D3D11_RESOURCE_MISC_GENERATE_MIPS;
-    }
-    /* D3D11 requires data for every mip when it is supplied at creation.
-     * Auto-mipmap resources expose only mip zero to the Vista runtime, so
-     * upload that level after creation instead. */
-    if (resource->hasInitialData && resource->mipLevels == 1) {
-        ZeroMemory(&initial, sizeof(initial));
-        initial.pSysMem = resource->shadow;
-        initial.SysMemPitch = resource->pitch;
-        initial.SysMemSlicePitch = resource->slicePitch;
-        initialPtr = &initial;
-    }
-    hr = ID3D11Device1_CreateTexture2D(device->hostDevice, &desc, initialPtr,
-                                        &texture);
-    if (FAILED(hr) || !texture)
-        return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
-    resource->hostResource = (ID3D11Resource *)texture;
-    resource->hostBindFlags = desc.BindFlags;
+    if (!tritonSharedBridgeQueryRes(device->hostDevice, escape.ResourceInfo.Id,
+                                    &desc) ||
+        desc.width != resource->width || desc.height != resource->height)
+        return D3DDDIERR_NOTAVAILABLE;
+    resource->hostResource = (ID3D11Resource *)tritonSharedBridgeOpenRes(
+        device->hostDevice, escape.ResourceInfo.Id, &desc);
+    if (!resource->hostResource)
+        return E_FAIL;
+    /* GL can export logical BGRA as an RGBA image.  Views must use the real
+     * host format; the application-facing D3D9 format remains unchanged. */
+    resource->hostFormat = (DXGI_FORMAT)desc.format;
+    resource->hostBindFlags = desc.bind_flags;
     return S_OK;
 }
 
@@ -258,6 +426,12 @@ triton9EnsureResourceHost(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
 
     if (!triton9ResourceBelongsToDevice(device, resource))
         return E_INVALIDARG;
+    if (resource->textureOwner) {
+        TRITON9_RESOURCE *root = resource->textureOwner;
+        hr = triton9EnsureResourceHost(device, root);
+        if (FAILED(hr)) return hr;
+        return resource->hostReady && resource->hostResource ? S_OK : E_FAIL;
+    }
     if (resource->hostReady && resource->hostResource)
         return S_OK;
     /* A prior lazy-materialization attempt can leave a host object alive when
@@ -287,24 +461,29 @@ triton9EnsureResourceHost(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
             hr = triton9CreateFvfDeclaration(device, resource->fvf,
                                               &resource->fvfDeclaration);
     } else if (resource->isPrimary && !resource->needsPresentAllocation) {
-        /* The KMD standard primary is deliberately separate from this
-         * D3D11 texture.  Keep a local texture only so legacy D3D9 state
-         * setup can bind a primary; never export it or use it for scanout. */
-        hr = triton9CreateHostTexture(device, resource);
+        /* Render into the allocation Windows actually scans out. */
+        hr = triton9OpenStandardPrimaryHost(device, resource);
     } else if (resource->isShared || resource->needsPresentAllocation) {
-        resource->hostResource = (ID3D11Resource *)
-            npt_shared_texture_create_exportable(device->hostDevice,
-                                                 resource->width,
-                                                 resource->height,
-                                                 npt_shared_texture_host_format(
-                                                     resource->hostFormat));
-        if (!resource->hostResource) {
-            hr = E_FAIL;
-            goto fail;
+        ID3D11Resource *exported = (ID3D11Resource *)
+            npt_shared_texture_create_exportable(device->hostDevice, resource->width,
+                resource->height, npt_shared_texture_host_format(resource->hostFormat));
+        if (!exported) { hr = E_FAIL; goto fail; }
+        if (resource->sampleCount > 1) {
+            /* VidMm scans out a single-sample export. Rendering and depth
+             * testing retain the actual multisample allocation. */
+            resource->resolveResource = exported;
+            hr = triton9CreateHostTexture(device, resource);
+            if (SUCCEEDED(hr)) {
+                ID3D11Resource *multisampled = resource->hostResource;
+                resource->hostResource = exported;
+                hr = triton9RegisterSharedTexture(device, resource);
+                resource->hostResource = multisampled;
+            }
+        } else {
+            resource->hostResource = exported;
+            resource->hostBindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+            hr = triton9RegisterSharedTexture(device, resource);
         }
-        resource->hostBindFlags = D3D11_BIND_SHADER_RESOURCE |
-                                  D3D11_BIND_RENDER_TARGET;
-        hr = triton9RegisterSharedTexture(device, resource);
     } else {
         hr = triton9CreateHostTexture(device, resource);
     }
@@ -312,20 +491,42 @@ triton9EnsureResourceHost(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
         hr = triton9CheckHostDevice(device);
     if (FAILED(hr))
         goto fail;
-    if (resource->hasInitialData) {
+    {
+        UINT i, count = resource->textureSurfaces ? resource->surfaceCount : 1;
         EnterCriticalSection(&device->shaderLock);
-        hr = triton9UploadShadow(device, resource);
-        if (SUCCEEDED(hr))
-            hr = triton9CheckHostDevice(device);
+        for (i = 0; i < count; ++i) {
+            TRITON9_RESOURCE *surface = resource->textureSurfaces ? resource->textureSurfaces[i] : resource;
+            if (surface != resource) {
+                if (surface->hostResource) ID3D11Resource_Release(surface->hostResource);
+                surface->hostResource = resource->hostResource;
+                ID3D11Resource_AddRef(surface->hostResource);
+                surface->hostBindFlags = resource->hostBindFlags;
+            }
+            if (surface->hasInitialData && resource->sampleCount <= 1)
+                hr = triton9UploadShadow(device, surface);
+            if (FAILED(hr)) break;
+        }
+        if (SUCCEEDED(hr)) {
+            for (i = 0; i < count; ++i)
+                (resource->textureSurfaces ? resource->textureSurfaces[i] : resource)->hostReady = TRUE;
+        }
         LeaveCriticalSection(&device->shaderLock);
     }
-    if (FAILED(hr))
-        goto fail;
+    if (FAILED(hr)) goto fail;
     resource->hostReady = TRUE;
     return S_OK;
 
 fail:
     resource->hostReady = FALSE;
+    if (resource->textureSurfaces) {
+        UINT i;
+        for (i = 1; i < resource->surfaceCount; ++i) {
+            TRITON9_RESOURCE *surface = resource->textureSurfaces[i];
+            triton9ReleaseResourceViews(surface);
+            if (surface->hostResource) ID3D11Resource_Release(surface->hostResource);
+            surface->hostResource = NULL; surface->hostReady = FALSE;
+        }
+    }
     /* Do not release an exported host object until its KMD allocation is
      * retired.  A failed cleanup remains visible to the next retry. */
     if (resource->hostResource) {
@@ -344,52 +545,102 @@ fail:
             hr = cleanupHr;
         }
     }
+    if (!resource->hostResource) triton9ReleaseResourceViews(resource);
     return triton9MapDeviceFailure(device, hr);
+}
+
+static DXGI_FORMAT
+triton9SrgbViewFormat(DXGI_FORMAT format)
+{
+    switch (format) {
+    case DXGI_FORMAT_B8G8R8A8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    case DXGI_FORMAT_B8G8R8X8_UNORM: return DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+    case DXGI_FORMAT_R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    case DXGI_FORMAT_BC1_UNORM: return DXGI_FORMAT_BC1_UNORM_SRGB;
+    case DXGI_FORMAT_BC2_UNORM: return DXGI_FORMAT_BC2_UNORM_SRGB;
+    case DXGI_FORMAT_BC3_UNORM: return DXGI_FORMAT_BC3_UNORM_SRGB;
+    default: return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+HRESULT
+triton9GetRenderTargetViewEx(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                             BOOL srgb, ID3D11RenderTargetView **view)
+{
+    D3D11_RENDER_TARGET_VIEW_DESC desc;
+    ID3D11RenderTargetView **slot;
+    const TRITON9_FORMAT *format;
+    HRESULT hr;
+    if (!triton9ResourceBelongsToDevice(device, resource) || !view ||
+        resource->isBuffer || resource->isDepthStencil ||
+        triton9ResourceIsSystemMemory(resource)) return D3DDDIERR_INVALIDCALL;
+    hr = triton9EnsureResourceHost(device, resource);
+    if (FAILED(hr)) return hr;
+    if (!(resource->hostBindFlags & D3D11_BIND_RENDER_TARGET)) return D3DDDIERR_INVALIDCALL;
+    format = triton9FormatLookup(resource->format);
+    if (srgb && (!format || format->srgbFormat == DXGI_FORMAT_UNKNOWN))
+        return D3DDDIERR_INVALIDCALL;
+    slot = srgb ? &resource->srgbRenderTargetView : &resource->renderTargetView;
+    if (!*slot) {
+        ZeroMemory(&desc, sizeof(desc));
+        desc.Format = srgb ? triton9SrgbViewFormat(resource->hostFormat) : resource->hostFormat;
+        if (resource->isVolume) {
+            desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE3D;
+            desc.Texture3D.MipSlice = resource->mipLevel;
+            desc.Texture3D.WSize = resource->depth;
+        } else if (resource->sampleCount > 1) {
+            desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DMS;
+        } else if (resource->isCube) {
+            desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+            desc.Texture2DArray.MipSlice = resource->mipLevel;
+            desc.Texture2DArray.FirstArraySlice = resource->arraySlice;
+            desc.Texture2DArray.ArraySize = 1;
+        } else {
+            desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+            desc.Texture2D.MipSlice = resource->mipLevel;
+        }
+        hr = ID3D11Device1_CreateRenderTargetView(device->hostDevice,
+            resource->hostResource, &desc, slot);
+        if (FAILED(hr) || !*slot) return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
+    }
+    *view = *slot;
+    return S_OK;
 }
 
 HRESULT
 triton9GetRenderTargetView(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
                            ID3D11RenderTargetView **view)
 {
-    HRESULT hr;
-
-    if (!triton9ResourceBelongsToDevice(device, resource) || !view ||
-        !resource->hostReady || !resource->hostResource ||
-        resource->isBuffer || triton9ResourceIsSystemMemory(resource) ||
-        resource->format == D3DDDIFMT_D16 ||
-        resource->format == D3DDDIFMT_D24S8 ||
-        !(resource->hostBindFlags & D3D11_BIND_RENDER_TARGET))
-        return D3DDDIERR_NOTAVAILABLE;
-    if (!resource->renderTargetView) {
-        hr = ID3D11Device1_CreateRenderTargetView(device->hostDevice,
-                                                    resource->hostResource,
-                                                    NULL,
-                                                    &resource->renderTargetView);
-        if (FAILED(hr) || !resource->renderTargetView)
-            return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
-    }
-    *view = resource->renderTargetView;
-    return S_OK;
+    return triton9GetRenderTargetViewEx(device, resource, FALSE, view);
 }
 
 HRESULT
 triton9GetDepthStencilView(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
                            ID3D11DepthStencilView **view)
 {
+    D3D11_DEPTH_STENCIL_VIEW_DESC desc;
     HRESULT hr;
-
     if (!triton9ResourceBelongsToDevice(device, resource) || !view ||
-        !resource->hostReady || !resource->hostResource ||
-        resource->isBuffer || triton9ResourceIsSystemMemory(resource) ||
-        (resource->format != D3DDDIFMT_D16 &&
-        resource->format != D3DDDIFMT_D24S8) ||
-        !(resource->hostBindFlags & D3D11_BIND_DEPTH_STENCIL))
-        return D3DDDIERR_NOTAVAILABLE;
+        !resource->isDepthStencil || resource->isBuffer || resource->isVolume ||
+        triton9ResourceIsSystemMemory(resource)) return D3DDDIERR_INVALIDCALL;
+    hr = triton9EnsureResourceHost(device, resource);
+    if (FAILED(hr)) return hr;
+    if (!(resource->hostBindFlags & D3D11_BIND_DEPTH_STENCIL)) return D3DDDIERR_INVALIDCALL;
     if (!resource->depthStencilView) {
+        ZeroMemory(&desc, sizeof(desc));
+        desc.Format = resource->hostFormat;
+        if (resource->sampleCount > 1) desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DMS;
+        else if (resource->isCube) {
+            desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2DARRAY;
+            desc.Texture2DArray.MipSlice = resource->mipLevel;
+            desc.Texture2DArray.FirstArraySlice = resource->arraySlice;
+            desc.Texture2DArray.ArraySize = 1;
+        } else {
+            desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+            desc.Texture2D.MipSlice = resource->mipLevel;
+        }
         hr = ID3D11Device1_CreateDepthStencilView(device->hostDevice,
-                                                    resource->hostResource,
-                                                    NULL,
-                                                    &resource->depthStencilView);
+            resource->hostResource, &desc, &resource->depthStencilView);
         if (FAILED(hr) || !resource->depthStencilView)
             return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
     }
@@ -398,27 +649,58 @@ triton9GetDepthStencilView(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
 }
 
 HRESULT
+triton9GetShaderResourceViewEx(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                               BOOL srgb, ID3D11ShaderResourceView **view)
+{
+    D3D11_SHADER_RESOURCE_VIEW_DESC desc;
+    ID3D11ShaderResourceView **slot;
+    const TRITON9_FORMAT *format;
+    HRESULT hr;
+    resource = triton9ResourceRoot(resource);
+    if (!triton9ResourceBelongsToDevice(device, resource) || !view || resource->isBuffer ||
+        resource->isDepthStencil || resource->sampleCount > 1) return D3DDDIERR_INVALIDCALL;
+    hr = triton9PrepareResourceForHostRead(device, resource);
+    if (FAILED(hr)) return hr;
+    if (!(resource->hostBindFlags & D3D11_BIND_SHADER_RESOURCE)) return D3DDDIERR_INVALIDCALL;
+    format = triton9FormatLookup(resource->format);
+    if (srgb && (!format || format->srgbFormat == DXGI_FORMAT_UNKNOWN))
+        return D3DDDIERR_INVALIDCALL;
+    slot = srgb ? &resource->srgbShaderResourceView : &resource->shaderResourceView;
+    if (!*slot) {
+        ZeroMemory(&desc, sizeof(desc));
+        desc.Format = srgb ? triton9SrgbViewFormat(resource->hostFormat) : resource->hostFormat;
+        if (resource->isCube) {
+            desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+            desc.TextureCube.MipLevels = resource->mipLevels;
+        } else if (resource->isVolume) {
+            desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
+            desc.Texture3D.MipLevels = resource->mipLevels;
+        } else {
+            desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            desc.Texture2D.MipLevels = resource->mipLevels;
+        }
+        hr = ID3D11Device1_CreateShaderResourceView(device->hostDevice,
+            resource->hostResource, &desc, slot);
+        if (FAILED(hr) || !*slot) return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
+    }
+    if (resource->wantsAutogenMipmap && resource->mipLevels > 1 &&
+        resource->autogenDirty && !resource->autogenGenerating) {
+        D3DDDIARG_GENERATEMIPSUBLEVELS args;
+        ZeroMemory(&args, sizeof(args));
+        args.hResource = (HANDLE)resource;
+        args.Filter = resource->autogenFilter ? resource->autogenFilter : D3DDDITEXF_LINEAR;
+        hr = triton9GenerateMipSubLevels((HANDLE)device, &args);
+        if (FAILED(hr)) return hr;
+    }
+    *view = *slot;
+    return S_OK;
+}
+
+HRESULT
 triton9GetShaderResourceView(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
                              ID3D11ShaderResourceView **view)
 {
-    HRESULT hr;
-
-    if (!triton9ResourceBelongsToDevice(device, resource) || !view ||
-        !resource->hostReady || !resource->hostResource ||
-        resource->isBuffer || resource->format == D3DDDIFMT_D16 ||
-        resource->format == D3DDDIFMT_D24S8 ||
-        !(resource->hostBindFlags & D3D11_BIND_SHADER_RESOURCE))
-        return D3DDDIERR_NOTAVAILABLE;
-    if (!resource->shaderResourceView) {
-        hr = ID3D11Device1_CreateShaderResourceView(device->hostDevice,
-                                                      resource->hostResource,
-                                                      NULL,
-                                                      &resource->shaderResourceView);
-        if (FAILED(hr) || !resource->shaderResourceView)
-            return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
-    }
-    *view = resource->shaderResourceView;
-    return S_OK;
+    return triton9GetShaderResourceViewEx(device, resource, FALSE, view);
 }
 
 static HRESULT
@@ -436,7 +718,8 @@ triton9RegisterSharedTexture(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
     if (!triton9ResourceBelongsToDevice(device, resource) ||
         (resource->isPrimary && !resource->needsPresentAllocation) || !resource->hostResource ||
         !triton9SharedFormat(resource->hostFormat, &scanoutFormat) ||
-        !device->callbacks.pfnAllocateCb)
+        !device->callbacks.pfnAllocateCb || !device->callbacks.pfnDeallocateCb ||
+        resource->hKMAllocation || resource->pendingExportResource)
         return D3DDDIERR_NOTAVAILABLE;
     triton9Diag("TRITON9-SHARED-REGISTER enter\n");
     hr = triton9EnsureRuntimeContext(device);
@@ -447,6 +730,9 @@ triton9RegisterSharedTexture(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
         triton9Diag("TRITON9-SHARED-EXPORT fail\n");
         return E_FAIL;
     }
+    resource->pendingExportBlob = exported.blob_id;
+    resource->pendingExportResource = resource->hostResource;
+    ID3D11Resource_AddRef(resource->pendingExportResource);
     triton9DiagU32("TRITON9-SHARED-EXPORT-CTX", exported.create_ctx_id);
     /* Treat export metadata as untrusted transport input. In particular,
      * allocation.Size is later converted to SIZE_T by the KMD. Reject a
@@ -454,15 +740,22 @@ triton9RegisterSharedTexture(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
      * SIZE_T. */
     if (!exported.blob_id || exported.plane_count != 1 ||
         exported.texture_layout > 2 ||
+        exported.planes[1].offset || exported.planes[1].pitch ||
+        exported.planes[2].offset || exported.planes[2].pitch ||
+        exported.planes[3].offset || exported.planes[3].pitch ||
         !exported.allocation_size ||
-        exported.allocation_size > (uint64_t)((SIZE_T)-1) - 4095ull)
-        return E_FAIL;
+        exported.allocation_size > (uint64_t)((SIZE_T)-1) - 4095ull) {
+        hr = E_FAIL;
+        goto rollback;
+    }
     if (!triton9ValidateSharedPlane(exported.planes[0].offset,
                                     exported.planes[0].pitch,
                                     exported.allocation_size,
                                     resource->width, resource->height,
-                                    resource->bytesPerPixel))
-        return E_FAIL;
+                                    resource->bytesPerPixel)) {
+        hr = E_FAIL;
+        goto rollback;
+    }
 
     ZeroMemory(&allocation, sizeof(allocation));
     allocation.Type = VIOGPU_RESOURCE_TYPE_SHARED;
@@ -516,16 +809,30 @@ triton9RegisterSharedTexture(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
     callback.NumAllocations = 1;
     callback.pAllocationInfo = &allocationInfo;
     hr = device->callbacks.pfnAllocateCb(device->hRTDevice, &callback);
-    if (FAILED(hr) || !allocationInfo.hAllocation) {
-        triton9DiagU32("TRITON9-SHARED-ALLOCATE-FAIL",
-                       FAILED(hr) ? (DWORD)hr : (DWORD)E_FAIL);
-        return FAILED(hr) ? hr : E_FAIL;
-    }
+    /* A failed callback may still return a live allocation. Retain that
+     * handle before inspecting HRESULT, including on rollback failure. */
     resource->hKMAllocation = allocationInfo.hAllocation;
-    resource->ownsKMAllocation = TRUE;
+    resource->ownsKMAllocation = allocationInfo.hAllocation != 0;
     resource->kmResourceAssociated = callback.hResource != NULL;
+    if (FAILED(hr) || !allocationInfo.hAllocation) {
+        hr = FAILED(hr) ? hr : E_FAIL;
+        triton9DiagU32("TRITON9-SHARED-ALLOCATE-FAIL",
+                       (DWORD)hr);
+        goto rollback;
+    }
+    /* KMD consumed the export; release our extra wrapper reference. */
+    ID3D11Resource_Release(resource->pendingExportResource);
+    resource->pendingExportResource = NULL;
+    resource->pendingExportBlob = 0;
     triton9DiagU32("TRITON9-SHARED-ALLOC", allocationInfo.hAllocation);
     return S_OK;
+
+rollback:
+    if (FAILED(triton9DeallocateResource(device, resource))) {
+        device->deviceLost = TRUE;
+        return D3DDDIERR_DEVICEREMOVED;
+    }
+    return hr;
 }
 
 /* Vista's display Primary is not DWM's rendered image.  It is the legacy
@@ -585,13 +892,13 @@ triton9AllocateStandardPrimary(TRITON9_DEVICE *device,
     callback.NumAllocations = 1;
     callback.pAllocationInfo = &allocationInfo;
     hr = device->callbacks.pfnAllocateCb(device->hRTDevice, &callback);
+    resource->hKMAllocation = allocationInfo.hAllocation;
+    resource->ownsKMAllocation = allocationInfo.hAllocation != 0;
     if (FAILED(hr) || !allocationInfo.hAllocation) {
         triton9DiagU32("TRITON9-PRIMARY-ALLOCATE-FAIL",
                        FAILED(hr) ? (DWORD)hr : (DWORD)E_FAIL);
         return FAILED(hr) ? hr : E_FAIL;
     }
-    resource->hKMAllocation = allocationInfo.hAllocation;
-    resource->ownsKMAllocation = TRUE;
     triton9DiagU32("TRITON9-PRIMARY-ALLOC", allocationInfo.hAllocation);
     return S_OK;
 }
@@ -602,27 +909,95 @@ static HRESULT
 triton9DeallocateResource(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
 {
     D3DDDICB_DEALLOCATE deallocate;
-    HRESULT hr;
+    HRESULT hr = S_OK;
 
-    if (!triton9ResourceBelongsToDevice(device, resource) ||
-        !resource->ownsKMAllocation ||
-        !resource->hKMAllocation || !device->callbacks.pfnDeallocateCb)
-        return S_OK;
-    ZeroMemory(&deallocate, sizeof(deallocate));
-    if (resource->isShared || resource->kmResourceAssociated) {
-        deallocate.hResource = resource->hRTResource;
-    } else {
-        deallocate.NumAllocations = 1;
-        deallocate.HandleList = &resource->hKMAllocation;
+    if (!triton9ResourceBelongsToDevice(device, resource))
+        return E_INVALIDARG;
+    if (resource->ownsKMAllocation && resource->hKMAllocation) {
+        ZeroMemory(&deallocate, sizeof(deallocate));
+        if (resource->kmResourceAssociated) {
+            deallocate.hResource = resource->hRTResource;
+        } else {
+            deallocate.NumAllocations = 1;
+            deallocate.HandleList = &resource->hKMAllocation;
+        }
+        hr = device->callbacks.pfnDeallocateCb ?
+            device->callbacks.pfnDeallocateCb(device->hRTDevice, &deallocate) : E_FAIL;
+        if (SUCCEEDED(hr)) {
+            resource->hKMAllocation = 0;
+            resource->ownsKMAllocation = FALSE;
+            resource->kmResourceAssociated = FALSE;
+        }
     }
-    hr = triton9MapDeviceFailure(device,
-        device->callbacks.pfnDeallocateCb(device->hRTDevice, &deallocate));
-    if (SUCCEEDED(hr)) {
-        resource->hKMAllocation = 0;
-        resource->ownsKMAllocation = FALSE;
-        resource->kmResourceAssociated = FALSE;
+    /* Idempotent even if AllocateCb already consumed the pending blob. Keep
+     * its owning wrapper ref if transport cleanup cannot complete. */
+    if (resource->pendingExportResource) {
+        if (tritonSharedBridgeCancelExportBlob(resource->pendingExportResource,
+                                               resource->pendingExportBlob)) {
+            ID3D11Resource_Release(resource->pendingExportResource);
+            resource->pendingExportResource = NULL;
+            resource->pendingExportBlob = 0;
+        } else {
+            hr = E_FAIL;
+        }
     }
-    return hr;
+    if (FAILED(hr)) {
+        device->deviceLost = TRUE;
+        return D3DDDIERR_DEVICEREMOVED;
+    }
+    return S_OK;
+}
+
+static void
+triton9FreeUnpublishedResource(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
+{
+    triton9ReleaseResourceViews(resource);
+    if (resource->fvfDeclaration)
+        triton9DestroyFvfDeclaration(device, resource->fvfDeclaration);
+    if (resource->pendingExportResource)
+        ID3D11Resource_Release(resource->pendingExportResource);
+    if (resource->hostResource)
+        ID3D11Resource_Release(resource->hostResource);
+    if (resource->ownsShadow && resource->shadow)
+        HeapFree(GetProcessHeap(), 0, resource->shadow);
+    if (resource->systemMemorySnapshot)
+        HeapFree(GetProcessHeap(), 0, resource->systemMemorySnapshot);
+    HeapFree(GetProcessHeap(), 0, resource);
+}
+
+/* Failed creation has no public handle for a later DestroyResource. Retain
+ * unsuccessful rollback records until final device teardown can retry. */
+static HRESULT
+triton9DisposeFailedResource(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                              HRESULT originalFailure)
+{
+    HRESULT hr = triton9DeallocateResource(device, resource);
+    if (FAILED(hr)) {
+        resource->failedNext = device->failedResources;
+        device->failedResources = resource;
+        device->deviceLost = TRUE;
+        return D3DDDIERR_DEVICEREMOVED;
+    }
+    triton9FreeUnpublishedResource(device, resource);
+    return originalFailure;
+}
+
+HRESULT
+triton9DestroyFailedResources(TRITON9_DEVICE *device)
+{
+    HRESULT result = S_OK;
+    if (!device) return E_INVALIDARG;
+    while (device->failedResources) {
+        TRITON9_RESOURCE *resource = device->failedResources;
+        HRESULT hr = triton9DeallocateResource(device, resource);
+        if (FAILED(hr) && SUCCEEDED(result)) result = hr;
+        device->failedResources = resource->failedNext;
+        /* DestroyDevice is final: runtime/KMD device teardown owns any kernel
+         * handles that still could not be released. No borrowed callbacks or
+         * process-local COM/heap records may survive this boundary. */
+        triton9FreeUnpublishedResource(device, resource);
+    }
+    return result;
 }
 
 static HRESULT
@@ -700,6 +1075,17 @@ triton9ReleaseResourceViews(TRITON9_RESOURCE *resource)
 {
     if (!resource)
         return;
+    if (resource->srgbShaderResourceView)
+        ID3D11ShaderResourceView_Release(resource->srgbShaderResourceView);
+    if (resource->srgbRenderTargetView)
+        ID3D11RenderTargetView_Release(resource->srgbRenderTargetView);
+    if (resource->resolveResource) ID3D11Resource_Release(resource->resolveResource);
+    resource->srgbShaderResourceView = NULL;
+    resource->srgbRenderTargetView = NULL;
+    resource->resolveResource = NULL;
+    if (resource->readbackQuery) ID3D11Query_Release(resource->readbackQuery);
+    resource->readbackQuery = NULL;
+    resource->readbackPending = resource->readbackReady = FALSE;
     if (resource->shaderResourceView)
         ID3D11ShaderResourceView_Release(resource->shaderResourceView);
     if (resource->depthStencilView)
@@ -720,60 +1106,78 @@ triton9UploadShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
     if (!triton9ResourceBelongsToDevice(device, resource) ||
         !resource->hostResource || !resource->shadow)
         return E_INVALIDARG;
-    if (resource->isBuffer)
-        ID3D11DeviceContext1_UpdateSubresource(device->hostContext,
-                                                resource->hostResource, 0,
-                                                NULL, resource->shadow, 0, 0);
-    else
-        ID3D11DeviceContext1_UpdateSubresource(device->hostContext,
-                                                resource->hostResource, 0,
-                                                NULL, resource->shadow,
-                                                resource->pitch,
-                                                resource->slicePitch);
-    return triton9CheckHostDevice(device);
+    return triton9UploadShadowRegion(device, resource, NULL, resource->shadow,
+        resource->isBuffer ? 0 : resource->pitch, resource->isBuffer ? 0 : resource->slicePitch);
 }
 
-/* Upload only the bytes exposed by the active lock.  This preserves host
- * bytes outside a WriteOnly or NoOverwrite region without fabricating them
- * from a stale CPU shadow.  The caller owns shaderLock. */
+/* The caller holds shaderLock. Keep an exact copy of submitted bytes instead
+ * of treating Lock/Unlock notifications as ownership of Vista's alias. */
 static HRESULT
-triton9UploadLockedShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
+triton9RefreshSystemMemoryBuffer(TRITON9_DEVICE *device,
+                                 TRITON9_RESOURCE *resource,
+                                 UINT first, UINT end)
 {
+    BYTE *snapshot = resource->systemMemorySnapshot;
+    BOOL valid;
     D3D11_BOX box;
-    const BYTE *source;
+    HRESULT hr;
 
-    if (!triton9ResourceBelongsToDevice(device, resource) ||
-        !resource->hostResource || !resource->shadow)
-        return E_INVALIDARG;
-    if (!resource->lockRangeValid && !resource->lockAreaValid)
-        return triton9UploadShadow(device, resource);
-
-    ZeroMemory(&box, sizeof(box));
-    box.front = 0;
-    box.back = 1;
-    if (resource->isBuffer && resource->lockRangeValid) {
-        box.left = resource->lockRange.Offset;
-        box.right = resource->lockRange.Offset + resource->lockRange.Size;
-        box.top = 0;
-        box.bottom = 1;
-        source = resource->shadow + resource->lockRange.Offset;
-        ID3D11DeviceContext1_UpdateSubresource(device->hostContext,
-            resource->hostResource, 0, &box, source, 0, 0);
-    } else if (!resource->isBuffer && resource->lockAreaValid) {
-        box.left = (UINT)resource->lockArea.left;
-        box.right = (UINT)resource->lockArea.right;
-        box.top = (UINT)resource->lockArea.top;
-        box.bottom = (UINT)resource->lockArea.bottom;
-        source = resource->shadow +
-                 (SIZE_T)resource->lockArea.top * resource->pitch +
-                 (SIZE_T)resource->lockArea.left * resource->bytesPerPixel;
-        ID3D11DeviceContext1_UpdateSubresource(device->hostContext,
-            resource->hostResource, 0, &box, source, resource->pitch,
-            resource->slicePitch);
-    } else {
+    if (!resource->width || resource->shadowSize < resource->width)
+        return D3DDDIERR_INVALIDUSERBUFFER;
+    if (first >= end || end > resource->width)
         return D3DDDIERR_INVALIDCALL;
+    valid = snapshot && resource->systemMemorySnapshotSize == resource->width &&
+        resource->systemMemorySnapshotHost == resource->hostResource &&
+        resource->systemMemorySnapshotSerial == resource->contentSerial;
+    if (!valid) {
+        /* Establish the entire submitted baseline before publishing a valid
+         * cache. Later draws may read any other range of this same buffer. */
+        first = 0;
+        end = resource->width;
     }
-    return triton9CheckHostDevice(device);
+    if (!snapshot || resource->systemMemorySnapshotSize != resource->width) {
+        BYTE *replacement = HeapAlloc(GetProcessHeap(), 0, resource->width);
+        resource->systemMemorySnapshotHost = NULL;
+        if (!replacement)
+            return triton9UploadShadow(device, resource);
+        if (snapshot) HeapFree(GetProcessHeap(), 0, snapshot);
+        resource->systemMemorySnapshot = snapshot = replacement;
+        resource->systemMemorySnapshotSize = resource->width;
+    }
+    if (valid) {
+        /* Compare large equal spans with the CRT, then locate exact byte
+         * boundaries without reading beyond either allocation. */
+        while (end - first >= 4096 &&
+               !memcmp(snapshot + first, resource->shadow + first, 4096))
+            first += 4096;
+        while (first < end && snapshot[first] == resource->shadow[first])
+            ++first;
+        if (first == end) {
+            hr = triton9CheckHostDevice(device);
+            if (FAILED(hr)) resource->systemMemorySnapshotHost = NULL;
+            return hr;
+        }
+        while (end - first >= 4096 &&
+               !memcmp(snapshot + end - 4096, resource->shadow + end - 4096, 4096))
+            end -= 4096;
+        while (end > first && snapshot[end - 1] == resource->shadow[end - 1])
+            --end;
+    }
+    resource->systemMemorySnapshotHost = NULL;
+    memcpy(snapshot + first, resource->shadow + first, end - first);
+    box.left = first; box.right = end;
+    box.top = box.front = 0; box.bottom = box.back = 1;
+    hr = triton9UpdateHostTexture(device, resource,
+        (ID3D11DeviceContext *)device->hostContext, resource->hostResource, 0,
+        first || end != resource->width ? &box : NULL, snapshot + first, 0, 0);
+    if (FAILED(hr)) return hr;
+    triton9ResourceWritten(resource);
+    hr = triton9CheckHostDevice(device);
+    if (SUCCEEDED(hr)) {
+        resource->systemMemorySnapshotHost = resource->hostResource;
+        resource->systemMemorySnapshotSerial = resource->contentSerial;
+    }
+    return hr;
 }
 
 /* SYSTEMMEM's Vista-owned buffer is canonical.  Before a persistent D3D11
@@ -793,7 +1197,36 @@ triton9PrepareResourceForHostRead(TRITON9_DEVICE *device,
     if (!resource->hostResource || !resource->shadow)
         return D3DDDIERR_INVALIDUSERBUFFER;
     EnterCriticalSection(&device->shaderLock);
-    hr = triton9UploadShadow(device, resource);
+    if (resource->textureSurfaces) {
+        UINT i;
+        for (i = 0; i < resource->surfaceCount && SUCCEEDED(hr); ++i)
+            hr = triton9UploadShadow(device, resource->textureSurfaces[i]);
+    } else if (resource->isBuffer)
+        hr = triton9RefreshSystemMemoryBuffer(device, resource, 0, resource->width);
+    else hr = triton9UploadShadow(device, resource);
+    LeaveCriticalSection(&device->shaderLock);
+    return triton9MapDeviceFailure(device, hr);
+}
+
+/* Vertex/index bindings do not consume data. Refresh their validated byte
+ * range at each draw, including alias writes made since an earlier draw. */
+HRESULT
+triton9PrepareBufferRangeForHostRead(TRITON9_DEVICE *device,
+                                     TRITON9_RESOURCE *resource,
+                                     UINT first, UINT end)
+{
+    HRESULT hr;
+
+    if (!triton9ResourceBelongsToDevice(device, resource) || !resource->isBuffer ||
+        first >= end || end > resource->width)
+        return D3DDDIERR_INVALIDCALL;
+    hr = triton9EnsureResourceHost(device, resource);
+    if (FAILED(hr) || !triton9ResourceIsSystemMemory(resource))
+        return hr;
+    if (!resource->hostResource || !resource->shadow)
+        return D3DDDIERR_INVALIDUSERBUFFER;
+    EnterCriticalSection(&device->shaderLock);
+    hr = triton9RefreshSystemMemoryBuffer(device, resource, first, end);
     LeaveCriticalSection(&device->shaderLock);
     return triton9MapDeviceFailure(device, hr);
 }
@@ -881,6 +1314,16 @@ triton9EnsureStagingResource(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
         if (FAILED(hr) || !buffer)
             return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
         resource->stagingResource = (ID3D11Resource *)buffer;
+    } else if (resource->isVolume) {
+        D3D11_TEXTURE3D_DESC desc;
+        ID3D11Texture3D *texture = NULL;
+        ZeroMemory(&desc, sizeof(desc));
+        desc.Width = resource->width; desc.Height = resource->height; desc.Depth = resource->depth;
+        desc.MipLevels = 1; desc.Format = resource->hostFormat;
+        desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        hr = ID3D11Device1_CreateTexture3D(device->hostDevice, &desc, NULL, &texture);
+        if (FAILED(hr) || !texture) return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
+        resource->stagingResource = (ID3D11Resource *)texture;
     } else {
         D3D11_TEXTURE2D_DESC desc;
         ID3D11Texture2D *texture = NULL;
@@ -916,11 +1359,13 @@ triton9MapStagingForRead(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
     /* The Neptune D3D11 wrapper returns from Clear/Copy after queuing host
      * work.  A staging Map is not a completion fence for that transport, so
      * explicitly retire an ordered marker before reading CPU-visible bytes. */
-    ID3D11DeviceContext1_Flush(device->hostContext);
-    if (!tritonSharedBridgeDrain(device->hostContext,
-                                 TRITON9_HOST_DRAIN_TIMEOUT_MS)) {
-        device->deviceLost = TRUE;
-        return D3DDDIERR_DEVICEREMOVED;
+    if (!resource->readbackReady) {
+        ID3D11DeviceContext1_Flush(device->hostContext);
+        if (!tritonSharedBridgeDrain(device->hostContext,
+                                     TRITON9_HOST_DRAIN_TIMEOUT_MS)) {
+            device->deviceLost = TRUE;
+            return D3DDDIERR_DEVICEREMOVED;
+        }
     }
     /* The Vista runtime-DDI renderer cannot call D3DKMTGetDeviceState with
      * the runtime's opaque device handle.  Query the host device immediately
@@ -931,7 +1376,9 @@ triton9MapStagingForRead(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
         return hr;
     ZeroMemory(mapped, sizeof(*mapped));
     hr = ID3D11DeviceContext1_Map(device->hostContext, resource->stagingResource,
-                                  0, D3D11_MAP_READ, 0, mapped);
+                                  0, D3D11_MAP_READ,
+                                  resource->readbackReady ? D3D11_MAP_FLAG_DO_NOT_WAIT : 0, mapped);
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) return D3DDDIERR_WASSTILLDRAWING;
     if (FAILED(hr))
         return triton9MapDeviceFailure(device, hr);
     if (!mapped->pData) {
@@ -945,59 +1392,54 @@ triton9MapStagingForRead(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
 /* The caller holds shaderLock.  Blt must complete video-memory to SYSTEMMEM
  * copies into Vista's pSysMem allocation before returning. */
 HRESULT
-triton9CopyStagingSurfaceToShadow(TRITON9_DEVICE *device,
-                                  TRITON9_RESOURCE *resource,
+triton9CopyStagingBoxToShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                              const D3D11_BOX *box)
+{
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    UINT bw = resource->blockWidth ? resource->blockWidth : 1;
+    UINT bh = resource->blockHeight ? resource->blockHeight : 1;
+    UINT bytes = resource->bytesPerBlock ? resource->bytesPerBlock : resource->bytesPerPixel;
+    UINT firstRow, rows, z;
+    SIZE_T xBytes, copyBytes, depthPitch;
+    HRESULT hr;
+    if (!triton9ResourceBelongsToDevice(device, resource) || resource->isBuffer ||
+        !triton9ResourceBoxValid(resource, box)) return E_INVALIDARG;
+    firstRow = box->top / bh;
+    rows = (box->bottom + bh - 1) / bh - firstRow;
+    xBytes = (SIZE_T)(box->left / bw) * bytes;
+    copyBytes = (SIZE_T)((box->right + bw - 1) / bw - box->left / bw) * bytes;
+    hr = triton9MapStagingForRead(device, resource, &mapped);
+    if (FAILED(hr)) return hr;
+    depthPitch = resource->isVolume ? mapped.DepthPitch : (SIZE_T)mapped.RowPitch * ((resource->height + bh - 1) / bh);
+    if (mapped.RowPitch < resource->rowBytes ||
+        depthPitch < (SIZE_T)mapped.RowPitch * ((resource->height + bh - 1) / bh)) {
+        hr = E_FAIL;
+    } else {
+        for (z = box->front; z < box->back; ++z) {
+            BYTE *destination = resource->shadow + (SIZE_T)z * resource->slicePitch +
+                (SIZE_T)firstRow * resource->pitch + xBytes;
+            const BYTE *source = (const BYTE *)mapped.pData + (SIZE_T)z * depthPitch +
+                (SIZE_T)firstRow * mapped.RowPitch + xBytes;
+            if (resource->format == D3DDDIFMT_A2R10G10B10)
+                triton9SwapPacked10Rows(destination, resource->pitch, source,
+                    mapped.RowPitch, copyBytes, rows);
+            else triton9CpuCopyRows(destination, resource->pitch, source,
+                    mapped.RowPitch, copyBytes, rows);
+        }
+    }
+    ID3D11DeviceContext1_Unmap(device->hostContext, resource->stagingResource, 0);
+    return FAILED(hr) ? hr : triton9CheckHostDevice(device);
+}
+
+HRESULT
+triton9CopyStagingSurfaceToShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
                                   const RECT *region)
 {
-    TRITON9_CPU_LAYOUT destinationLayout;
-    TRITON9_CPU_LAYOUT sourceLayout;
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    SIZE_T xBytes;
-    SIZE_T copyBytes;
-    UINT rows;
-    HRESULT hr;
-
-    if (!triton9ResourceBelongsToDevice(device, resource) || !region ||
-        resource->isBuffer ||
-        region->left < 0 || region->top < 0 ||
-        region->right <= region->left || region->bottom <= region->top ||
-        (UINT)region->right > resource->width ||
-        (UINT)region->bottom > resource->height)
-        return E_INVALIDARG;
-    xBytes = (SIZE_T)region->left * resource->bytesPerPixel;
-    copyBytes = (SIZE_T)(region->right - region->left) *
-                resource->bytesPerPixel;
-    rows = (UINT)(region->bottom - region->top);
-    destinationLayout.rowBytes = resource->rowBytes;
-    destinationLayout.rowPitch = resource->pitch;
-    destinationLayout.rowCount = resource->height;
-    destinationLayout.slicePitch = resource->slicePitch;
-    destinationLayout.dataSize = resource->shadowSize;
-    if (!triton9CpuRegionFits(&destinationLayout, xBytes, region->top,
-                              copyBytes, rows))
-        return D3DDDIERR_INVALIDUSERBUFFER;
-
-    hr = triton9MapStagingForRead(device, resource, &mapped);
-    if (FAILED(hr))
-        return hr;
-    if (!triton9CpuLayout2D(&sourceLayout, resource->width, resource->height,
-                            resource->bytesPerPixel, mapped.RowPitch,
-                            mapped.DepthPitch) ||
-        !triton9CpuRegionFits(&sourceLayout, xBytes, region->top,
-                              copyBytes, rows)) {
-        ID3D11DeviceContext1_Unmap(device->hostContext,
-                                    resource->stagingResource, 0);
-        return E_FAIL;
-    }
-    triton9CpuCopyRows(resource->shadow + (SIZE_T)region->top * resource->pitch +
-                           xBytes,
-                       resource->pitch,
-                       (const BYTE *)mapped.pData +
-                           (SIZE_T)region->top * mapped.RowPitch + xBytes,
-                       mapped.RowPitch, copyBytes, rows);
-    ID3D11DeviceContext1_Unmap(device->hostContext, resource->stagingResource,
-                                0);
-    return triton9CheckHostDevice(device);
+    D3D11_BOX box;
+    if (!region || region->left < 0 || region->top < 0) return E_INVALIDARG;
+    box.left = region->left; box.top = region->top; box.right = region->right;
+    box.bottom = region->bottom; box.front = 0; box.back = 1;
+    return triton9CopyStagingBoxToShadow(device, resource, &box);
 }
 
 /* The caller holds shaderLock. */
@@ -1025,28 +1467,97 @@ triton9CopyStagingBufferToShadow(TRITON9_DEVICE *device,
 /* The caller holds shaderLock.  A CPU shadow is authoritative for CPU
  * writes, but GPU rendering can make it stale.  Refresh it before a lock that
  * promises current bytes to the D3D9 runtime. */
+HRESULT
+triton9ResolveResource(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                       ID3D11Resource **host, UINT *subresource)
+{
+    HRESULT hr;
+    if (!triton9ResourceBelongsToDevice(device, resource) || !host || !subresource)
+        return E_INVALIDARG;
+    hr = triton9EnsureResourceHost(device, resource);
+    if (FAILED(hr)) return hr;
+    *host = resource->hostResource; *subresource = resource->subresourceIndex;
+    if (resource->sampleCount <= 1) return S_OK;
+    if (resource->isDepthStencil) return D3DDDIERR_INVALIDCALL;
+    if (!resource->resolveResource) {
+        D3D11_TEXTURE2D_DESC desc;
+        ID3D11Texture2D *texture = NULL;
+        ZeroMemory(&desc, sizeof(desc));
+        desc.Width = resource->width; desc.Height = resource->height;
+        desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
+        desc.Format = resource->hostFormat; desc.Usage = D3D11_USAGE_DEFAULT;
+        hr = ID3D11Device1_CreateTexture2D(device->hostDevice, &desc, NULL, &texture);
+        if (FAILED(hr) || !texture) return FAILED(hr) ? triton9MapDeviceFailure(device, hr) : E_FAIL;
+        resource->resolveResource = (ID3D11Resource *)texture;
+    }
+    ID3D11DeviceContext1_ResolveSubresource(device->hostContext, resource->resolveResource,
+        0, resource->hostResource, resource->subresourceIndex, resource->hostFormat);
+    *host = resource->resolveResource; *subresource = 0;
+    return triton9CheckHostDevice(device);
+}
+
 static HRESULT
 triton9ReadbackShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
 {
+    ID3D11Resource *host;
+    UINT subresource;
     HRESULT hr;
-
-    if (!triton9ResourceBelongsToDevice(device, resource) ||
-        !resource->hostResource)
+    if (!triton9ResourceBelongsToDevice(device, resource) || !resource->hostResource)
         return E_INVALIDARG;
     hr = triton9EnsureStagingResource(device, resource);
-    if (FAILED(hr))
-        return hr;
+    if (FAILED(hr)) return hr;
+    hr = triton9ResolveResource(device, resource, &host, &subresource);
+    if (FAILED(hr)) return hr;
     ID3D11DeviceContext1_CopySubresourceRegion(device->hostContext,
-                                                resource->stagingResource, 0,
-                                                0, 0, 0, resource->hostResource,
-                                                0, NULL);
+        resource->stagingResource, 0, 0, 0, 0, host, subresource, NULL);
     if (resource->isBuffer)
-        return triton9CopyStagingBufferToShadow(device, resource, 0,
-                                                (UINT)resource->shadowSize);
+        return triton9CopyStagingBufferToShadow(device, resource, 0, (UINT)resource->shadowSize);
     {
-        RECT full = { 0, 0, (LONG)resource->width, (LONG)resource->height };
-        return triton9CopyStagingSurfaceToShadow(device, resource, &full);
+        D3D11_BOX full = { 0, 0, 0, resource->width, resource->height, resource->depth };
+        return triton9CopyStagingBoxToShadow(device, resource, &full);
     }
+}
+
+/* An event fences the copy, so a later DONOTWAIT attempt can map without
+ * draining the transport or waiting for GPU work. A write since the earlier
+ * attempt invalidates that snapshot, even if it used another mip/face alias. */
+static HRESULT
+triton9ReadbackShadowAsync(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource)
+{
+    TRITON9_RESOURCE *root = triton9ResourceRoot(resource);
+    HRESULT hr;
+    BOOL complete = FALSE;
+    if (!resource->readbackQuery) {
+        D3D11_QUERY_DESC desc = { D3D11_QUERY_EVENT, 0 };
+        hr = ID3D11Device1_CreateQuery(device->hostDevice, &desc, &resource->readbackQuery);
+        if (FAILED(hr) || !resource->readbackQuery) return FAILED(hr) ? hr : E_FAIL;
+    }
+    hr = triton9EnsureStagingResource(device, resource);
+    if (FAILED(hr)) return hr;
+    if (!resource->readbackPending || resource->readbackSerial != root->contentSerial) {
+        ID3D11DeviceContext1_CopySubresourceRegion(device->hostContext,
+            resource->stagingResource, 0, 0, 0, 0,
+            resource->hostResource, resource->subresourceIndex, NULL);
+        ID3D11DeviceContext1_End(device->hostContext, (ID3D11Asynchronous *)resource->readbackQuery);
+        ID3D11DeviceContext1_Flush(device->hostContext);
+        resource->readbackPending = TRUE;
+        resource->readbackSerial = root->contentSerial;
+        return D3DDDIERR_WASSTILLDRAWING;
+    }
+    hr = ID3D11DeviceContext1_GetData(device->hostContext,
+        (ID3D11Asynchronous *)resource->readbackQuery, &complete, sizeof(complete), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+    if (hr == S_FALSE || (SUCCEEDED(hr) && !complete)) return D3DDDIERR_WASSTILLDRAWING;
+    if (FAILED(hr)) return hr;
+    resource->readbackReady = TRUE;
+    if (resource->isBuffer) {
+        hr = triton9CopyStagingBufferToShadow(device, resource, 0, (UINT)resource->shadowSize);
+    } else {
+        D3D11_BOX box = { 0, 0, 0, resource->width, resource->height, resource->depth };
+        hr = triton9CopyStagingBoxToShadow(device, resource, &box);
+    }
+    resource->readbackReady = FALSE;
+    if (SUCCEEDED(hr)) resource->readbackPending = FALSE;
+    return hr;
 }
 
 static HRESULT
@@ -1079,12 +1590,21 @@ triton9CreateSingleResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args,
     if (args->Pool < D3DDDIPOOL_SYSTEMMEM ||
         args->Pool > D3DDDIPOOL_NONLOCALVIDMEM)
         return E_INVALIDARG;
-    if (args->MultisampleType != D3DDDIMULTISAMPLE_NONE ||
-        args->MultisampleQuality)
-        return D3DDDIERR_NOTAVAILABLE;
+    if ((args->Flags.RenderTarget || args->Flags.ZBuffer) &&
+        ((args->MultisampleType == D3DDDIMULTISAMPLE_NONMASKABLE &&
+          args->MultisampleQuality >= triton9FormatMultisampleQuality(args->Format, D3DDDIMULTISAMPLE_NONMASKABLE)) ||
+         args->MultisampleType > D3DDDIMULTISAMPLE_16_SAMPLES ||
+         (args->MultisampleType == D3DDDIMULTISAMPLE_NONE && args->MultisampleQuality)))
+        return D3DDDIERR_INVALIDCALL;
     if (args->Rotation && args->Rotation != D3DDDI_ROTATION_IDENTITY)
-        return D3DDDIERR_NOTAVAILABLE;
-    if (args->Flags.Video || args->Flags.Overlay || args->Flags.Volume ||
+        return D3DDDIERR_INVALIDCALL;
+    /* Video is a content hint on an ordinary render target (including RGB
+     * swap chains created with D3DPRESENTFLAG_VIDEO). It does not
+     * request DXVA decoding, video processing, or protected allocation.
+     * Validate its format and render-target usage through the normal path. */
+    if (args->Flags.Video && (!args->Flags.RenderTarget || args->Flags.ZBuffer))
+        return D3DDDIERR_INVALIDCALL;
+    if (args->Flags.Overlay || args->Flags.Volume ||
         args->Flags.CubeMap || args->Flags.DecodeRenderTarget ||
         args->Flags.DecodeCompressedBuffer || args->Flags.VideoProcessRenderTarget ||
         args->Flags.DMap || args->Flags.Points || args->Flags.RtPatches ||
@@ -1092,13 +1612,13 @@ triton9CreateSingleResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args,
         args->Flags.InterlacedRefresh ||
         args->Flags.TextApi || args->Flags.RestrictedContent ||
         args->Flags.RestrictSharedAccess)
-        return D3DDDIERR_NOTAVAILABLE;
+        return D3DDDIERR_INVALIDCALL;
     /* Explicit multi-mip resources expose every subresource to the DDI. They
      * remain unsupported until lock, copy, and views cover each level. Auto
      * mipmaps are different: Vista exposes only mip zero and lets the driver
      * create the hidden chain. */
-    if (args->SurfCount != 1 || (args->MipLevels && args->MipLevels != 1))
-        return D3DDDIERR_NOTAVAILABLE;
+    if (args->SurfCount != 1 || ((args->Flags.Texture || args->Flags.CubeMap || args->Flags.Volume) && args->MipLevels > 1))
+        return D3DDDIERR_INVALIDCALL;
 
     resource = (TRITON9_RESOURCE *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
                                               sizeof(*resource));
@@ -1108,21 +1628,37 @@ triton9CreateSingleResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args,
     resource->hRTResource = args->hResource;
     resource->independentAllocation = independentAllocation;
     resource->format = args->Format;
-    resource->fvf = args->Fvf;
+    resource->fvf = args->Flags.VertexBuffer ? args->Fvf : 0;
+    resource->isTexture = args->Flags.Texture;
+    resource->arraySize = 1; resource->exposedMipLevels = 1;
+    resource->sampleCount = (args->Flags.RenderTarget || args->Flags.ZBuffer) && args->MultisampleType
+        ? (UINT)args->MultisampleType : 1;
+    resource->sampleQuality = resource->sampleCount > 1 ? args->MultisampleQuality : 0;
+    if ((args->Flags.RenderTarget || args->Flags.ZBuffer) &&
+        args->MultisampleType == D3DDDIMULTISAMPLE_NONMASKABLE) {
+        /* Public quality indexes select the two guaranteed sample counts;
+         * they are not native DXGI sample-pattern quality indexes. */
+        resource->nonMaskable = TRUE;
+        resource->sampleCount = args->MultisampleQuality ? 4 : 2;
+        resource->sampleQuality = 0;
+    }
+    resource->dynamic = args->Flags.Dynamic;
     resource->mipLevels = 1;
     resource->surfaceCount = 1;
     resource->vidPnSourceId = args->VidPnSourceId;
     resource->isPrimary = args->Flags.Primary;
-    /* DWM flip-chain primaries and ordinary colour back buffers both need
-     * exported present allocations. The standalone standard primary keeps
-     * its existing non-blob destination allocation. */
+    /* Every UMD-created colour render surface may become a Present source,
+     * including a single MatchGdiPrimary render target. Its KMD allocation
+     * must describe the texture we actually render into. KMD-created desktop
+     * primaries are handled separately by OpenResource. */
     resource->isShared = args->Flags.SharedResource;
     resource->pool = args->Pool;
     resource->isDepthStencil = args->Flags.ZBuffer;
     resource->wantsRenderTarget = args->Flags.RenderTarget;
     resource->needsPresentAllocation =
-        (!resource->isPrimary || independentAllocation) && !args->Flags.Texture &&
-        resource->wantsRenderTarget && !resource->isDepthStencil;
+        !args->Flags.Texture && resource->wantsRenderTarget &&
+        !resource->isDepthStencil && (args->Format == D3DDDIFMT_A8R8G8B8 ||
+                                     args->Format == D3DDDIFMT_X8R8G8B8);
     resource->wantsAutogenMipmap = args->Flags.AutogenMipmap;
     resource->hasInitialData = args->pSurfList[0].pSysMem != NULL;
     resource->notLockable = args->Flags.NotLockable;
@@ -1148,20 +1684,27 @@ triton9CreateSingleResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args,
             (vertexBuffer && args->Format != D3DDDIFMT_VERTEXDATA) ||
             (indexBuffer && args->Format != D3DDDIFMT_INDEX16 &&
              args->Format != D3DDDIFMT_INDEX32) || (indexBuffer && resource->fvf)) {
-            hr = D3DDDIERR_NOTAVAILABLE;
+            hr = D3DDDIERR_INVALIDCALL;
             goto fail;
         }
         hr = triton9CreateShadow(resource, &args->pSurfList[0]);
         if (FAILED(hr))
             goto fail;
-    } else if (resource->fvf) {
-        hr = D3DDDIERR_INVALIDCALL;
-        goto fail;
     } else {
         format = triton9FormatLookup(args->Format);
         if (!format) {
-            hr = D3DDDIERR_NOTAVAILABLE;
+            hr = D3DDDIERR_INVALIDCALL;
             goto fail;
+        }
+        if (resource->isShared && (resource->sampleCount != 1 || args->Flags.AutogenMipmap)) {
+            hr = D3DDDIERR_INVALIDCALL; goto fail;
+        }
+        if ((resource->wantsRenderTarget && !(format->operations & FORMATOP_OFFSCREEN_RENDERTARGET)) ||
+            (!resource->isTexture && !resource->isDepthStencil && !resource->wantsRenderTarget &&
+             !(format->operations & FORMATOP_OFFSCREENPLAIN)) ||
+            (resource->sampleCount > 1 &&
+             resource->sampleQuality >= triton9FormatMultisampleQuality(resource->format, resource->sampleCount))) {
+            hr = D3DDDIERR_INVALIDCALL; goto fail;
         }
         resource->hostFormat = format->hostFormat;
         resource->bytesPerPixel = format->bytesPerPixel;
@@ -1173,19 +1716,24 @@ triton9CreateSingleResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args,
             (format->depthStencil != (args->Flags.ZBuffer != 0)) ||
             (format->depthStencil && (args->Flags.RenderTarget ||
                                       resource->isPrimary || resource->isShared))) {
-            hr = D3DDDIERR_NOTAVAILABLE;
+            hr = D3DDDIERR_INVALIDCALL;
             goto fail;
         }
         if ((resource->isPrimary || resource->isShared ||
              resource->needsPresentAllocation) &&
             !triton9SharedFormat(resource->hostFormat, NULL)) {
-            hr = D3DDDIERR_NOTAVAILABLE;
+            hr = D3DDDIERR_INVALIDCALL;
+            goto fail;
+        }
+        if (resource->isPrimary && resource->hostFormat != DXGI_FORMAT_B8G8R8A8_UNORM &&
+            resource->hostFormat != DXGI_FORMAT_B8G8R8X8_UNORM) {
+            hr = D3DDDIERR_INVALIDCALL;
             goto fail;
         }
         if (args->Flags.AutogenMipmap) {
             if (format->depthStencil || resource->isPrimary || resource->isShared ||
                 resource->needsPresentAllocation) {
-                hr = D3DDDIERR_NOTAVAILABLE;
+                hr = D3DDDIERR_INVALIDCALL;
                 goto fail;
             }
             resource->mipLevels = triton9FullMipCount(resource->width,
@@ -1196,7 +1744,7 @@ triton9CreateSingleResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args,
             goto fail;
         if ((resource->isPrimary || resource->isShared ||
              resource->needsPresentAllocation) && format->depthStencil) {
-            hr = D3DDDIERR_NOTAVAILABLE;
+            hr = D3DDDIERR_INVALIDCALL;
             goto fail;
         }
     }
@@ -1209,9 +1757,12 @@ triton9CreateSingleResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args,
         if (FAILED(hr))
             goto fail;
     }
-    if (resource->needsPresentAllocation) {
-        /* Fullscreen setup can query the allocation before the first draw
-         * or Present, so delaying this until resource use leaves it absent. */
+    if (resource->needsPresentAllocation || resource->isShared) {
+        /* Fullscreen setup and shared-handle publication query the allocation
+         * before the first draw or Present. A shared texture must already
+         * have its runtime-associated KMD allocation when CreateResource
+         * returns, or CreateTexture succeeds with a null shared handle and
+         * DWM's window-surface handshake cannot finish. */
         EnterCriticalSection(&device->shaderLock);
         hr = triton9EnsureResourceHost(device, resource);
         LeaveCriticalSection(&device->shaderLock);
@@ -1237,26 +1788,105 @@ fail:
                 device->renderTarget ? &device->renderTarget->renderTargetView : NULL,
                 NULL);
             device->depthStencil = NULL;
+            device->depthStencilStateDirty = TRUE;
         }
         LeaveCriticalSection(&device->shaderLock);
     }
-    (void)triton9DeallocateResource(device, resource);
-    if (resource->shaderResourceView)
-        ID3D11ShaderResourceView_Release(resource->shaderResourceView);
-    if (resource->depthStencilView)
-        ID3D11DepthStencilView_Release(resource->depthStencilView);
-    if (resource->renderTargetView)
-        ID3D11RenderTargetView_Release(resource->renderTargetView);
-    if (resource->stagingResource)
-        ID3D11Resource_Release(resource->stagingResource);
-    if (resource->fvfDeclaration)
-        triton9DestroyFvfDeclaration(device, resource->fvfDeclaration);
-    if (resource->hostResource)
-        ID3D11Resource_Release(resource->hostResource);
-    if (resource->ownsShadow && resource->shadow)
-        HeapFree(GetProcessHeap(), 0, resource->shadow);
-    HeapFree(GetProcessHeap(), 0, resource);
-    return hr;
+    return triton9DisposeFailedResource(device, resource, hr);
+}
+
+/* Texture handles own one allocation and one CPU/lock/view record per DDI
+ * surface. A volume mip contains all Z slices; a cube has six mip chains. */
+static HRESULT
+triton9CreateTextureResource(TRITON9_DEVICE *device, D3DDDIARG_CREATERESOURCE *args)
+{
+    const TRITON9_FORMAT *format;
+    TRITON9_RESOURCE *root = NULL;
+    TRITON9_RESOURCE **surfaces = NULL;
+    UINT faces, exposed, levels, largest, i;
+    HRESULT hr = D3DDDIERR_INVALIDCALL;
+    SIZE_T total = 0;
+    if (!device || !args || !args->pSurfList || !args->SurfCount) return E_INVALIDARG;
+    if (device->deviceLost) return D3DDDIERR_DEVICEREMOVED;
+    format = triton9FormatLookup(args->Format);
+    if (!format || args->Pool < D3DDDIPOOL_SYSTEMMEM || args->Pool > D3DDDIPOOL_NONLOCALVIDMEM ||
+        (args->Flags.CubeMap && args->Flags.Volume) || args->Flags.Primary ||
+        args->Flags.VertexBuffer || args->Flags.IndexBuffer || args->Flags.Overlay ||
+        args->Flags.DecodeRenderTarget || args->Flags.DecodeCompressedBuffer ||
+        args->Flags.VideoProcessRenderTarget || args->Flags.DMap || args->Flags.RestrictedContent ||
+        args->Flags.RestrictSharedAccess || args->Flags.CaptureBuffer || args->Flags.TextApi ||
+        args->Flags.SharedResource || (args->Flags.Volume && args->Flags.RenderTarget))
+        return D3DDDIERR_INVALIDCALL;
+    if ((args->Flags.CubeMap && !(format->operations & FORMATOP_CUBETEXTURE)) ||
+        (args->Flags.Volume && !(format->operations & FORMATOP_VOLUMETEXTURE)) ||
+        (!args->Flags.CubeMap && !args->Flags.Volume && !(format->operations & FORMATOP_TEXTURE)) ||
+        (args->Flags.RenderTarget && !(format->operations & FORMATOP_OFFSCREEN_RENDERTARGET)) ||
+        (format->depthStencil != (args->Flags.ZBuffer != 0)))
+        return D3DDDIERR_INVALIDCALL;
+    faces = args->Flags.CubeMap ? 6 : 1;
+    if (args->SurfCount % faces) return D3DDDIERR_INVALIDCALL;
+    exposed = args->SurfCount / faces;
+    largest = args->pSurfList[0].Width;
+    if (args->pSurfList[0].Height > largest) largest = args->pSurfList[0].Height;
+    if (args->Flags.Volume && args->pSurfList[0].Depth > largest) largest = args->pSurfList[0].Depth;
+    levels = triton9FullMipCount(largest, 1);
+    if (!largest || exposed > levels || (args->MipLevels && args->MipLevels != exposed) ||
+        (args->Flags.AutogenMipmap && (args->Flags.Volume || args->Pool == D3DDDIPOOL_SYSTEMMEM ||
+         exposed != 1)))
+        return D3DDDIERR_INVALIDCALL;
+    if (!args->Flags.AutogenMipmap || !(format->operations & FORMATOP_AUTOGENMIPMAP)) levels = exposed;
+    if (args->Flags.RenderTarget && (args->MultisampleType != D3DDDIMULTISAMPLE_NONE || args->MultisampleQuality))
+        return D3DDDIERR_INVALIDCALL;
+    surfaces = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, args->SurfCount * sizeof(*surfaces));
+    if (!surfaces) return E_OUTOFMEMORY;
+    for (i = 0; i < args->SurfCount; ++i) {
+        const D3DDDI_SURFACEINFO *info = &args->pSurfList[i];
+        UINT mip = i % exposed, w = args->pSurfList[0].Width >> mip;
+        UINT h = args->pSurfList[0].Height >> mip;
+        UINT d = args->Flags.Volume ? args->pSurfList[0].Depth >> mip : 1;
+        TRITON9_RESOURCE *r;
+        if (!w) w = 1;
+        if (!h) h = 1;
+        if (!d) d = 1;
+        if (info->Width != w || info->Height != h ||
+            (args->Flags.Volume ? info->Depth != d : info->Depth > 1) ||
+            w > 4096 || h > 4096 || d > 2048 || (args->Flags.CubeMap && w != h)) goto fail;
+        r = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*r));
+        if (!r) { hr = E_OUTOFMEMORY; goto fail; }
+        surfaces[i] = r;
+        if (!root) root = r;
+        r->hOwnerDevice = (HANDLE)device; r->hRTResource = args->hResource;
+        r->textureOwner = i ? root : NULL;
+        r->format = args->Format; r->hostFormat = format->hostFormat;
+        r->width = w; r->height = h; r->depth = d;
+        r->mipLevels = levels; r->exposedMipLevels = exposed;
+        r->mipLevel = mip; r->arraySlice = i / exposed;
+        r->subresourceIndex = r->arraySlice * levels + mip;
+        r->arraySize = faces; r->surfaceCount = 1;
+        r->sampleCount = 1;
+        r->isTexture = TRUE; r->isCube = args->Flags.CubeMap; r->isVolume = args->Flags.Volume;
+        r->bytesPerPixel = format->bytesPerPixel;
+        r->pool = args->Pool; r->isDepthStencil = args->Flags.ZBuffer;
+        r->wantsRenderTarget = args->Flags.RenderTarget; r->wantsAutogenMipmap = args->Flags.AutogenMipmap && (format->operations & FORMATOP_AUTOGENMIPMAP);
+        r->notLockable = args->Flags.NotLockable; r->writeOnly = args->Flags.WriteOnly;
+        r->dynamic = args->Flags.Dynamic; r->hasInitialData = info->pSysMem != NULL;
+        hr = triton9CreateShadow(r, info);
+        if (FAILED(hr)) goto fail;
+        if (r->shadowSize > (SIZE_T)-1 - total) { hr = E_OUTOFMEMORY; goto fail; }
+        total += r->shadowSize;
+    }
+    root->textureSurfaces = surfaces; root->surfaceCount = args->SurfCount;
+    args->hResource = (HANDLE)root;
+    return S_OK;
+fail:
+    for (i = 0; i < args->SurfCount; ++i) {
+        if (surfaces[i]) {
+            if (surfaces[i]->ownsShadow) HeapFree(GetProcessHeap(), 0, surfaces[i]->shadow);
+            HeapFree(GetProcessHeap(), 0, surfaces[i]);
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, surfaces);
+    return FAILED(hr) ? hr : D3DDDIERR_INVALIDCALL;
 }
 
 HRESULT APIENTRY
@@ -1267,13 +1897,23 @@ triton9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args)
     HRESULT hr;
     UINT i;
 
+    if (args) {
+        triton9DiagU32("TRITON9-CREATE-COUNT", args->SurfCount);
+        triton9DiagU32("TRITON9-CREATE-FLAGS", args->Flags.Value);
+        triton9DiagU32("TRITON9-CREATE-FORMAT", args->Format);
+        triton9DiagU32("TRITON9-CREATE-MIPS", args->MipLevels);
+    }
+
+    if (args && (args->Flags.Texture || args->Flags.CubeMap || args->Flags.Volume) &&
+        !args->Flags.SharedResource)
+        return triton9CreateTextureResource((TRITON9_DEVICE *)hDevice, args);
     if (!args || args->SurfCount <= 1)
         return triton9CreateSingleResource(hDevice, args, FALSE);
-    /* Only equal-sized primary flip chains are multi-surface resources here.
-     * Texture mip/array resources still require their own implementation. */
+    /* Flip chains are independent allocations, unlike the texture aliases
+     * handled above. Preserve the standard primary sharing contract. */
     if (!args->pSurfList || args->SurfCount > 4 || !args->Flags.Primary ||
         !args->Flags.RenderTarget || args->Flags.Texture || args->Flags.SharedResource ||
-        args->Flags.ZBuffer || args->MipLevels > 1)
+        args->Flags.ZBuffer)
         return D3DDDIERR_NOTAVAILABLE;
     for (i = 1; i < args->SurfCount; ++i) {
         if (args->pSurfList[i].Width != args->pSurfList[0].Width ||
@@ -1292,8 +1932,11 @@ triton9CreateResource(HANDLE hDevice, D3DDDIARG_CREATERESOURCE *args)
          * Preserve Primary on every independently exported allocation. */
         hr = triton9CreateSingleResource(hDevice, &single, TRUE);
         if (FAILED(hr)) {
-            while (i)
-                triton9DestroyResource(hDevice, (HANDLE)surfaces[--i]);
+            while (i) {
+                HRESULT cleanupHr = triton9DisposeFailedResource(
+                    (TRITON9_DEVICE *)hDevice, surfaces[--i], hr);
+                if (FAILED(cleanupHr)) hr = cleanupHr;
+            }
             HeapFree(GetProcessHeap(), 0, surfaces);
             return hr;
         }
@@ -1321,6 +1964,17 @@ triton9DestroyResource(HANDLE hDevice, HANDLE hResource)
 
     if (!triton9ResourceBelongsToDevice(device, resource))
         return E_INVALIDARG;
+    if (resource->textureSurfaces) {
+        UINT i;
+        for (i = 1; i < resource->surfaceCount; ++i) {
+            if (!resource->textureSurfaces[i]) continue;
+            result = triton9DestroyResource(hDevice, (HANDLE)resource->textureSurfaces[i]);
+            if (FAILED(result)) return result;
+            resource->textureSurfaces[i] = NULL;
+        }
+        HeapFree(GetProcessHeap(), 0, resource->textureSurfaces);
+        resource->textureSurfaces = NULL; resource->surfaceCount = 1;
+    }
     if (resource->chainSurfaces) {
         UINT i;
         for (i = 1; i < resource->surfaceCount; ++i) {
@@ -1337,20 +1991,17 @@ triton9DestroyResource(HANDLE hDevice, HANDLE hResource)
     }
     if (device->shaderLockInitialized) {
         EnterCriticalSection(&device->shaderLock);
-        if (device->renderTarget == resource) {
-            device->renderTarget = NULL;
-            rebindOutputs = TRUE;
+        if (device->renderTarget == resource) { device->renderTarget = NULL; rebindOutputs = TRUE; }
+        for (UINT rt = 0; rt < TRITON9_MAX_RENDER_TARGETS; ++rt) {
+            if (device->renderTargets[rt] == resource) { device->renderTargets[rt] = NULL; rebindOutputs = TRUE; }
         }
         if (device->depthStencil == resource) {
             device->depthStencil = NULL;
+            device->depthStencilStateDirty = TRUE;
             rebindOutputs = TRUE;
         }
-        if (rebindOutputs) {
-            ID3D11DeviceContext1_OMSetRenderTargets(
-                device->hostContext, device->renderTarget ? 1 : 0,
-                device->renderTarget ? &device->renderTarget->renderTargetView : NULL,
-                device->depthStencil ? device->depthStencil->depthStencilView : NULL);
-        }
+        if (rebindOutputs && device->hostContext)
+            (void)triton9BindOutputs(device);
         for (stream = 0; stream < TRITON9_MAX_VERTEX_STREAMS; ++stream) {
             if (device->streamResources[stream] == resource) {
                 ID3D11DeviceContext1_IASetVertexBuffers(device->hostContext, stream, 1,
@@ -1368,9 +2019,11 @@ triton9DestroyResource(HANDLE hDevice, HANDLE hResource)
         }
         for (texture = 0; texture < TRITON9_MAX_TEXTURE_STAGES; ++texture) {
             if (device->textures[texture] == resource) {
-                ID3D11DeviceContext1_PSSetShaderResources(device->hostContext,
-                                                           texture, 1,
-                                                           &nullShaderResource);
+                if (texture < TRITON9_MAX_PIXEL_SAMPLERS)
+                    ID3D11DeviceContext1_PSSetShaderResources(device->hostContext, texture, 1, &nullShaderResource);
+                else if (texture >= TRITON9_VERTEX_SAMPLER_BASE)
+                    ID3D11DeviceContext1_VSSetShaderResources(device->hostContext,
+                        texture - TRITON9_VERTEX_SAMPLER_BASE, 1, &nullShaderResource);
                 device->textures[texture] = NULL;
             }
         }
@@ -1387,6 +2040,13 @@ triton9DestroyResource(HANDLE hDevice, HANDLE hResource)
         triton9DestroyFvfDeclaration(device, resource->fvfDeclaration);
         resource->fvfDeclaration = NULL;
     }
+    if (resource->srgbShaderResourceView) ID3D11ShaderResourceView_Release(resource->srgbShaderResourceView);
+    if (resource->srgbRenderTargetView) ID3D11RenderTargetView_Release(resource->srgbRenderTargetView);
+    if (resource->resolveResource) ID3D11Resource_Release(resource->resolveResource);
+    resource->srgbShaderResourceView = NULL; resource->srgbRenderTargetView = NULL;
+    resource->resolveResource = NULL;
+    if (resource->readbackQuery) ID3D11Query_Release(resource->readbackQuery);
+    resource->readbackQuery = NULL;
     if (resource->shaderResourceView) {
         ID3D11ShaderResourceView_Release(resource->shaderResourceView);
         resource->shaderResourceView = NULL;
@@ -1437,6 +2097,8 @@ triton9DestroyResource(HANDLE hDevice, HANDLE hResource)
     }
     if (resource->ownsShadow && resource->shadow)
         HeapFree(GetProcessHeap(), 0, resource->shadow);
+    if (resource->systemMemorySnapshot)
+        HeapFree(GetProcessHeap(), 0, resource->systemMemorySnapshot);
     if (resource->pendingRename)
         HeapFree(GetProcessHeap(), 0, resource->pendingRename);
     HeapFree(GetProcessHeap(), 0, resource);
@@ -1474,9 +2136,23 @@ triton9Lock(HANDLE hDevice, D3DDDIARG_LOCK *args)
     if (device->deviceLost)
         return D3DDDIERR_DEVICEREMOVED;
     if (args->SubResourceIndex || resource->locked || resource->pendingRename ||
-        !resource->shadow || resource->notLockable)
+        !resource->shadow || resource->notLockable || resource->sampleCount > 1)
         return D3DDDIERR_INVALIDCALL;
+    {
+        TRITON9_RESOURCE *root = triton9ResourceRoot(resource);
+        if (root->textureSurfaces)
+            for (UINT i = 0; i < root->surfaceCount; ++i)
+                if (root->textureSurfaces[i]->pendingRename)
+                    return D3DDDIERR_INVALIDCALL;
+    }
     systemMemory = triton9ResourceIsSystemMemory(resource);
+    if (systemMemory && resource->width == 1280 && resource->height == 720) {
+        static LONG readbackLockTraceCount;
+        if (InterlockedIncrement(&readbackLockTraceCount) <= 12) {
+            triton9DiagU32("TRITON9-READBACK-LOCK-TICK", GetTickCount());
+            triton9DiagU32("TRITON9-READBACK-LOCK-FLAGS", args->Flags.Value);
+        }
+    }
     if (args->Flags.Value & ~0x3ffu ||
         (args->Flags.ReadOnly && args->Flags.WriteOnly) ||
         (args->Flags.Discard && (args->Flags.ReadOnly || args->Flags.NoOverwrite)) ||
@@ -1503,10 +2179,17 @@ triton9Lock(HANDLE hDevice, D3DDDIARG_LOCK *args)
             area->bottom <= area->top || (UINT)area->right > resource->width ||
             (UINT)area->bottom > resource->height)
             return D3DDDIERR_INVALIDCALL;
-        offset = (SIZE_T)area->top * resource->pitch +
-                 (SIZE_T)area->left * resource->bytesPerPixel;
+        D3D11_BOX box = { (UINT)area->left, (UINT)area->top, 0,
+            (UINT)area->right, (UINT)area->bottom, 1 };
+        if (resource->isVolume || !triton9ResourceBoxValid(resource, &box))
+            return D3DDDIERR_INVALIDCALL;
+        offset = triton9ResourceByteOffset(resource, box.left, box.top, 0);
     } else if (args->Flags.BoxValid) {
-        return D3DDDIERR_NOTAVAILABLE;
+        D3D11_BOX box = { args->Box.Left, args->Box.Top, args->Box.Front,
+            args->Box.Right, args->Box.Bottom, args->Box.Back };
+        if (!resource->isVolume || !triton9ResourceBoxValid(resource, &box))
+            return D3DDDIERR_INVALIDCALL;
+        offset = triton9ResourceByteOffset(resource, box.left, box.top, box.front);
     }
     if (args->Flags.NoOverwrite &&
         (!resource->isBuffer || args->Flags.ReadOnly))
@@ -1534,11 +2217,10 @@ triton9Lock(HANDLE hDevice, D3DDDIARG_LOCK *args)
      * stale shadow bytes outside that region never overwrite real host data. */
     needsReadback = !systemMemory && !args->Flags.Discard &&
                     !args->Flags.WriteOnly && !args->Flags.NoOverwrite;
-    if (needsReadback && args->Flags.DoNotWait)
-        return D3DDDIERR_WASSTILLDRAWING;
     if (needsReadback) {
         EnterCriticalSection(&device->shaderLock);
-        hr = triton9ReadbackShadow(device, resource);
+        hr = args->Flags.DoNotWait ? triton9ReadbackShadowAsync(device, resource)
+                                  : triton9ReadbackShadow(device, resource);
         LeaveCriticalSection(&device->shaderLock);
         if (FAILED(hr))
             return triton9MapDeviceFailure(device, hr);
@@ -1546,6 +2228,8 @@ triton9Lock(HANDLE hDevice, D3DDDIARG_LOCK *args)
     resource->locked = TRUE;
     resource->lockRangeValid = args->Flags.RangeValid;
     resource->lockAreaValid = args->Flags.AreaValid;
+    resource->lockBoxValid = args->Flags.BoxValid;
+    if (resource->lockBoxValid) resource->lockBox = args->Box;
     if (resource->lockRangeValid)
         resource->lockRange = args->Range;
     if (resource->lockAreaValid)
@@ -1642,16 +2326,25 @@ triton9LockAsync(HANDLE hDevice, D3DDDIARG_LOCKASYNC *args)
     if ((args->Flags.Value & ~0x7fu) ||
         (args->Flags.Discard && args->Flags.NoOverwrite) ||
         (!triton9ResourceIsSystemMemory(resource) &&
-         !args->Flags.Discard && !args->Flags.NoOverwrite) ||
-        (triton9ResourceIsSystemMemory(resource) &&
-         (args->Flags.Discard || args->Flags.NoOverwrite)))
+         !args->Flags.Discard && !args->Flags.NoOverwrite))
         return D3DDDIERR_INVALIDCALL;
+    /* The runtime owns SYSTEMMEM storage. An asynchronous DISCARD needs a
+     * separate snapshot until queued worker references have been consumed;
+     * uploading that storage at UnlockAsync would overwrite those references.
+     * Let the runtime fall back to synchronized Lock for this case. */
+    if (args->Flags.Discard && triton9ResourceIsSystemMemory(resource))
+        return E_NOTIMPL;
     if (args->Flags.Discard) {
         if (args->Flags.NotifyOnly || resource->isPrimary || resource->isShared ||
             resource->needsPresentAllocation ||
-            resource->mipLevels != 1 ||
             !resource->shadow || resource->pendingRename)
             return D3DDDIERR_NOTAVAILABLE;
+        TRITON9_RESOURCE *root = triton9ResourceRoot(resource);
+        if (root->textureSurfaces) {
+            for (UINT i = 0; i < root->surfaceCount; ++i)
+                if (root->textureSurfaces[i]->locked || root->textureSurfaces[i]->pendingRename)
+                    return D3DDDIERR_INVALIDCALL;
+        }
         cookie = (TRITON9_RENAME_COOKIE *)HeapAlloc(GetProcessHeap(),
                                                      HEAP_ZERO_MEMORY,
                                                      sizeof(*cookie));
@@ -1662,7 +2355,9 @@ triton9LockAsync(HANDLE hDevice, D3DDDIARG_LOCKASYNC *args)
     ZeroMemory(&lock, sizeof(lock));
     lock.hResource = args->hResource;
     lock.SubResourceIndex = args->SubResourceIndex;
-    lock.Range = args->Range;
+    if (args->Flags.BoxValid) lock.Box = args->Box;
+    else if (args->Flags.AreaValid) lock.Area = args->Area;
+    else lock.Range = args->Range;
     lock.Flags.NoOverwrite = args->Flags.NoOverwrite;
     lock.Flags.Discard = args->Flags.Discard;
     lock.Flags.RangeValid = args->Flags.RangeValid;
@@ -1724,6 +2419,81 @@ triton9UnlockAsync(HANDLE hDevice, const D3DDDIARG_UNLOCKASYNC *args)
     return hr;
 }
 
+/* Discard changes one canonical texture allocation. Build every alias and view
+ * before publishing any pointer; each published alias owns its COM reference. */
+static HRESULT
+triton9RenameTexture(TRITON9_DEVICE *device, TRITON9_RESOURCE *selected,
+                     TRITON9_RENAME_COOKIE *cookie)
+{
+    TRITON9_RESOURCE *root = triton9ResourceRoot(selected);
+    TRITON9_RESOURCE *copies = NULL, **table = NULL;
+    UINT i, count = root->surfaceCount;
+    HRESULT hr = E_OUTOFMEMORY;
+    copies = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, count * sizeof(*copies));
+    table = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, count * sizeof(*table));
+    if (!copies || !table) goto done;
+    for (i = 0; i < count; ++i) {
+        copies[i] = *root->textureSurfaces[i]; table[i] = &copies[i];
+        copies[i].systemMemorySnapshot = NULL;
+        copies[i].systemMemorySnapshotSize = 0;
+        copies[i].systemMemorySnapshotHost = NULL;
+        copies[i].hostResource = NULL; copies[i].stagingResource = NULL;
+        copies[i].resolveResource = NULL; copies[i].renderTargetView = NULL;
+        copies[i].readbackQuery = NULL; copies[i].readbackPending = copies[i].readbackReady = FALSE;
+        copies[i].srgbRenderTargetView = NULL; copies[i].depthStencilView = NULL;
+        copies[i].shaderResourceView = NULL; copies[i].srgbShaderResourceView = NULL;
+        copies[i].textureOwner = i ? &copies[0] : NULL;
+        copies[i].textureSurfaces = i ? NULL : table;
+        copies[i].hostReady = TRUE; copies[i].autogenGenerating = TRUE;
+    }
+    hr = triton9CreateHostTexture(device, &copies[0]);
+    if (FAILED(hr)) goto done;
+    for (i = 1; i < count; ++i) {
+        copies[i].hostResource = copies[0].hostResource;
+        ID3D11Resource_AddRef(copies[i].hostResource);
+        copies[i].hostBindFlags = copies[0].hostBindFlags;
+    }
+    for (i = 0; i < count; ++i) {
+        TRITON9_RESOURCE *old = root->textureSurfaces[i], *copy = &copies[i];
+        ID3D11RenderTargetView *rtv;
+        ID3D11DepthStencilView *dsv;
+        ID3D11ShaderResourceView *srv;
+        if (old == selected) hr = triton9UploadLockedShadow(device, copy);
+        if (SUCCEEDED(hr) && old->renderTargetView) hr = triton9GetRenderTargetViewEx(device, copy, FALSE, &rtv);
+        if (SUCCEEDED(hr) && old->srgbRenderTargetView) hr = triton9GetRenderTargetViewEx(device, copy, TRUE, &rtv);
+        if (SUCCEEDED(hr) && old->depthStencilView) hr = triton9GetDepthStencilView(device, copy, &dsv);
+        if (SUCCEEDED(hr) && old->shaderResourceView) hr = triton9GetShaderResourceViewEx(device, copy, FALSE, &srv);
+        if (SUCCEEDED(hr) && old->srgbShaderResourceView) hr = triton9GetShaderResourceViewEx(device, copy, TRUE, &srv);
+        if (FAILED(hr)) goto done;
+    }
+    for (i = 0; i < count; ++i) {
+        TRITON9_RESOURCE *old = root->textureSurfaces[i], *copy = &copies[i];
+        triton9ReleaseResourceViews(old);
+        if (old->hostResource) ID3D11Resource_Release(old->hostResource);
+        old->hostResource = copy->hostResource; copy->hostResource = NULL;
+        old->hostBindFlags = copy->hostBindFlags; old->hostReady = TRUE;
+        old->renderTargetView = copy->renderTargetView; copy->renderTargetView = NULL;
+        old->srgbRenderTargetView = copy->srgbRenderTargetView; copy->srgbRenderTargetView = NULL;
+        old->depthStencilView = copy->depthStencilView; copy->depthStencilView = NULL;
+        old->shaderResourceView = copy->shaderResourceView; copy->shaderResourceView = NULL;
+        old->srgbShaderResourceView = copy->srgbShaderResourceView; copy->srgbShaderResourceView = NULL;
+    }
+    triton9ResourceWritten(root);
+    /* All draw-time shader bindings are rebuilt from device->textures. */
+    hr = triton9BindOutputs(device);
+done:
+    if (copies) for (i = 0; i < count; ++i) {
+        triton9ReleaseResourceViews(&copies[i]);
+        if (copies[i].hostResource) ID3D11Resource_Release(copies[i].hostResource);
+    }
+    if (copies) HeapFree(GetProcessHeap(), 0, copies);
+    if (table) HeapFree(GetProcessHeap(), 0, table);
+    selected->pendingRename = NULL;
+    triton9ClearLockRegion(selected);
+    HeapFree(GetProcessHeap(), 0, cookie);
+    return hr;
+}
+
 HRESULT APIENTRY
 triton9Rename(HANDLE hDevice, const D3DDDIARG_RENAME *args)
 {
@@ -1759,17 +2529,31 @@ triton9Rename(HANDLE hDevice, const D3DDDIARG_RENAME *args)
         cookie->resource != resource || resource->locked)
         return D3DDDIERR_INVALIDCALL;
 
+    if (triton9ResourceRoot(resource)->textureSurfaces) {
+        EnterCriticalSection(&device->shaderLock);
+        hr = triton9RenameTexture(device, resource, cookie);
+        LeaveCriticalSection(&device->shaderLock);
+        return triton9MapDeviceFailure(device, hr);
+    }
     ZeroMemory(&replacement, sizeof(replacement));
     EnterCriticalSection(&device->shaderLock);
     hr = triton9CloneHostResource(device, resource, &newHost);
     if (FAILED(hr))
         goto done;
     replacement = *resource;
+    replacement.systemMemorySnapshot = NULL;
+    replacement.systemMemorySnapshotSize = 0;
+    replacement.systemMemorySnapshotHost = NULL;
     replacement.hostResource = newHost;
     replacement.stagingResource = NULL;
     replacement.renderTargetView = NULL;
     replacement.depthStencilView = NULL;
     replacement.shaderResourceView = NULL;
+    replacement.srgbShaderResourceView = NULL;
+    replacement.srgbRenderTargetView = NULL;
+    replacement.resolveResource = NULL;
+    replacement.readbackQuery = NULL;
+    replacement.readbackPending = replacement.readbackReady = FALSE;
     hr = triton9UploadLockedShadow(device, &replacement);
     if (FAILED(hr))
         goto done;
@@ -1810,11 +2594,23 @@ triton9Rename(HANDLE hDevice, const D3DDDIARG_RENAME *args)
     }
 
     retired = *resource;
+    retired.systemMemorySnapshot = NULL;
+    retired.systemMemorySnapshotSize = 0;
+    retired.systemMemorySnapshotHost = NULL;
     resource->hostResource = replacement.hostResource;
     resource->stagingResource = replacement.stagingResource;
     resource->renderTargetView = replacement.renderTargetView;
     resource->depthStencilView = replacement.depthStencilView;
     resource->shaderResourceView = replacement.shaderResourceView;
+    resource->srgbShaderResourceView = replacement.srgbShaderResourceView;
+    resource->srgbRenderTargetView = replacement.srgbRenderTargetView;
+    resource->resolveResource = replacement.resolveResource;
+    resource->readbackQuery = NULL;
+    resource->readbackPending = resource->readbackReady = FALSE;
+    triton9ResourceWritten(resource);
+    replacement.srgbShaderResourceView = NULL;
+    replacement.srgbRenderTargetView = NULL;
+    replacement.resolveResource = NULL;
     replacement.hostResource = NULL;
     replacement.stagingResource = NULL;
     replacement.renderTargetView = NULL;
@@ -1848,8 +2644,11 @@ triton9Rename(HANDLE hDevice, const D3DDDIARG_RENAME *args)
     }
     for (texture = 0; texture < TRITON9_MAX_TEXTURE_STAGES; ++texture) {
         if (device->textures[texture] == resource) {
-            ID3D11DeviceContext1_PSSetShaderResources(device->hostContext, texture, 1,
-                                                       &resource->shaderResourceView);
+            if (texture < TRITON9_MAX_PIXEL_SAMPLERS)
+                ID3D11DeviceContext1_PSSetShaderResources(device->hostContext, texture, 1, &resource->shaderResourceView);
+            else if (texture >= TRITON9_VERTEX_SAMPLER_BASE)
+                ID3D11DeviceContext1_VSSetShaderResources(device->hostContext,
+                    texture - TRITON9_VERTEX_SAMPLER_BASE, 1, &resource->shaderResourceView);
         }
     }
     triton9ReleaseResourceViews(&retired);
@@ -1963,7 +2762,7 @@ triton9WaitForPresentGpuCompletion(TRITON9_DEVICE *device)
             return D3DDDIERR_DEVICEREMOVED;
         }
         if (completed >= target) {
-            hr = triton9CheckHostDevice(device);
+            hr = triton9PollHostDevice(device);
             if (SUCCEEDED(hr) && target == 1)
                 triton9Diag("TRITON9-PRESENT-TIMELINE-COMPLETE\n");
             return triton9MapDeviceFailure(device, hr);
@@ -1974,6 +2773,36 @@ triton9WaitForPresentGpuCompletion(TRITON9_DEVICE *device)
         }
         Sleep(1);
     }
+}
+
+HRESULT
+triton9CompleteRedirectedPresent(TRITON9_DEVICE *device)
+{
+    HRESULT hr;
+
+    if (!device || !device->hostDevice || !device->hostContext)
+        return E_INVALIDARG;
+    if (device->deviceLost)
+        return D3DDDIERR_DEVICEREMOVED;
+
+    EnterCriticalSection(&device->shaderLock);
+    hr = triton9WaitForPresentGpuCompletion(device);
+    if (SUCCEEDED(hr)) {
+        /* Vista supplies the present-history token only while calling the
+         * final redirected Blt and its following Flush. A busy Neptune ring
+         * consumes proxy calls without entering RenderCb, so flushing that
+         * ring alone can lose the token. Submit an explicit runtime marker
+         * inside this callback, after the copied pixels are complete. */
+        if (!tritonSharedBridgeDrain(device->hostContext,
+                                    TRITON9_HOST_DRAIN_TIMEOUT_MS)) {
+            device->deviceLost = TRUE;
+            hr = D3DDDIERR_DEVICEREMOVED;
+        } else {
+            hr = triton9CheckHostDevice(device);
+        }
+    }
+    LeaveCriticalSection(&device->shaderLock);
+    return hr;
 }
 
 /* Caller holds shaderLock. This marker uses the same scheduler context as
@@ -1989,7 +2818,11 @@ triton9WaitForPresentConsumption(TRITON9_DEVICE *device)
     HRESULT hr;
     const UINT packetSize = sizeof(header) + sizeof(signal);
 
-    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (device->deviceLost)
+        return D3DDDIERR_DEVICEREMOVED;
+    if (!device->presentConsumptionEvent)
+        device->presentConsumptionEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    event = device->presentConsumptionEvent;
     if (!event) {
         device->deviceLost = TRUE;
         return E_FAIL;
@@ -2027,7 +2860,6 @@ triton9WaitForPresentConsumption(TRITON9_DEVICE *device)
     device->kmPatchLocationListSize = render.NewPatchLocationListSize;
     LeaveCriticalSection(&device->kmContextLock);
     wait = WaitForSingleObject(event, TRITON9_HOST_DRAIN_TIMEOUT_MS);
-    CloseHandle(event);
     if (wait != WAIT_OBJECT_0) {
         device->deviceLost = TRUE;
         return D3DDDIERR_DEVICEREMOVED;
@@ -2047,8 +2879,42 @@ fail:
     device->kmPatchLocationListSize = 0;
     device->deviceLost = TRUE;
     LeaveCriticalSection(&device->kmContextLock);
-    CloseHandle(event);
     return triton9MapDeviceFailure(device, hr);
+}
+
+static BOOL triton9PresentProfileEnabled(TRITON9_DEVICE *device)
+{
+    if (!device->presentProfileState) {
+        char value[2] = {0};
+        DWORD length = GetEnvironmentVariableA("TRITON9_PRESENT_PROFILE", value, sizeof(value));
+        device->presentProfileState = length == 1 && value[0] == '1' ? 2 : 1;
+    }
+    return device->presentProfileState == 2;
+}
+
+static void triton9PresentProfileRecord(TRITON9_DEVICE *device, LARGE_INTEGER *ticks)
+{
+    char line[256];
+    LARGE_INTEGER frequency;
+    UINT i;
+    for (i = 0; i < 4; ++i) {
+        UINT64 elapsed = ticks[i + 1].QuadPart - ticks[i].QuadPart;
+        device->presentProfileTicks[i] += elapsed;
+        if (elapsed > device->presentProfileMaxTicks[i])
+            device->presentProfileMaxTicks[i] = elapsed;
+    }
+    if (++device->presentProfileFrames != 120)
+        return;
+    QueryPerformanceFrequency(&frequency);
+    for (i = 0; i < 4; ++i) {
+        snprintf(line, sizeof(line), "TRITON9-PERF pid=%lu stage=%u frames=120 mean_us=%.3f max_us=%.3f\n",
+            (unsigned long)GetCurrentProcessId(), i,
+            device->presentProfileTicks[i] * 1000000.0 / frequency.QuadPart / 120,
+            device->presentProfileMaxTicks[i] * 1000000.0 / frequency.QuadPart);
+        triton9Diag(line);
+        device->presentProfileTicks[i] = device->presentProfileMaxTicks[i] = 0;
+    }
+    device->presentProfileFrames = 0;
 }
 
 HRESULT APIENTRY
@@ -2059,11 +2925,15 @@ triton9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *args)
     TRITON9_RESOURCE *dst;
     D3DDDICB_PRESENT callback;
     HRESULT hr;
+    LARGE_INTEGER ticks[5];
+    BOOL profile;
+    LARGE_INTEGER entryTicks = {0};
 
     triton9Diag("TRITON9-PRESENT enter\n");
     if (!device || !args || !(src = (TRITON9_RESOURCE *)args->hSrcResource) ||
         !triton9ResourceBelongsToDevice(device, src))
         return E_INVALIDARG;
+    if (triton9TraceEnabled(device)) QueryPerformanceCounter(&entryTicks);
     dst = (TRITON9_RESOURCE *)args->hDstResource;
     if (dst && !triton9ResourceBelongsToDevice(device, dst))
         return D3DDDIERR_INVALIDCALL;
@@ -2104,26 +2974,44 @@ triton9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *args)
         return D3DDDIERR_INVALIDCALL;
     }
     EnterCriticalSection(&device->shaderLock);
+    if (src->sampleCount > 1) {
+        ID3D11Resource *resolved; UINT index;
+        hr = triton9ResolveResource(device, src, &resolved, &index);
+        if (FAILED(hr)) { LeaveCriticalSection(&device->shaderLock); return hr; }
+    }
+    if (entryTicks.QuadPart) triton9TraceBegin(device, entryTicks.QuadPart, args->Flags.Value, TT_PRESENT_BEGIN);
+    else device->traceFrame = 0;
+    profile = triton9PresentProfileEnabled(device);
+    if (profile) QueryPerformanceCounter(&ticks[0]);
+    triton9TraceGpuFinish(device);
+    triton9TraceEvent(device, TT_GPU_WAIT_BEGIN, 0, 0, 0);
     hr = triton9WaitForPresentGpuCompletion(device);
+    triton9TraceEvent(device, TT_GPU_WAIT_END, (UINT)hr, device->presentFenceValue, 0);
+    if (profile) QueryPerformanceCounter(&ticks[1]);
     if (FAILED(hr)) {
+        triton9TraceEvent(device, TT_PRESENT_END, (UINT)hr, 0, 0);
         LeaveCriticalSection(&device->shaderLock);
         return hr;
     }
     /* Keep this post-completion drain for the existing KMD/transport ordering
      * contract.  It does not provide the GPU completion guarantee above. */
+    triton9TraceEvent(device, TT_DRAIN_BEGIN, 0, 0, 0);
     if (!tritonSharedBridgeDrain(device->hostContext,
                                  TRITON9_HOST_DRAIN_TIMEOUT_MS)) {
         device->deviceLost = TRUE;
+        triton9TraceEvent(device, TT_PRESENT_END, D3DDDIERR_DEVICEREMOVED, 0, 0);
         LeaveCriticalSection(&device->shaderLock);
         return D3DDDIERR_DEVICEREMOVED;
     }
     hr = triton9CheckHostDevice(device);
     if (FAILED(hr)) {
+        triton9TraceEvent(device, TT_PRESENT_END, (UINT)hr, 0, 0);
         LeaveCriticalSection(&device->shaderLock);
         return hr;
     }
     hr = triton9EnsureKernelContext(device);
     if (FAILED(hr)) {
+        triton9TraceEvent(device, TT_PRESENT_END, (UINT)hr, 0, 0);
         LeaveCriticalSection(&device->shaderLock);
         return hr;
     }
@@ -2131,10 +3019,29 @@ triton9Present(HANDLE hDevice, const D3DDDIARG_PRESENT *args)
     callback.hSrcAllocation = src->hKMAllocation;
     callback.hDstAllocation = dst ? dst->hKMAllocation : 0;
     callback.hContext = device->hKMContext;
+    triton9TraceEvent(device, TT_DRAIN_END, 0, 0, 0);
+    if (profile) QueryPerformanceCounter(&ticks[2]);
+    triton9DiagU32("TRITON9-PRESENT-FLAGS", args->Flags.Value);
+    triton9DiagU32("TRITON9-PRESENT-SRC", callback.hSrcAllocation);
+    triton9DiagU32("TRITON9-PRESENT-SRC-STANDARD", src->isStandardPrimary);
+    triton9DiagU32("TRITON9-PRESENT-DST", callback.hDstAllocation);
+    triton9TraceEvent(device, TT_CALLBACK_BEGIN, callback.hSrcAllocation, callback.hDstAllocation, 0);
     hr = triton9MapDeviceFailure(device,
         device->callbacks.pfnPresentCb(device->hRTDevice, &callback));
-    if (SUCCEEDED(hr))
+    triton9TraceEvent(device, TT_CALLBACK_END, (UINT)hr, 0, 0);
+    if (profile) QueryPerformanceCounter(&ticks[3]);
+    if (SUCCEEDED(hr)) {
+        triton9TraceEvent(device, TT_CONSUME_BEGIN, 0, 0, 0);
         hr = triton9WaitForPresentConsumption(device);
+        triton9TraceEvent(device, TT_CONSUME_END, (UINT)hr, 0, 0);
+    }
+    if (profile && SUCCEEDED(hr)) {
+        QueryPerformanceCounter(&ticks[4]);
+        triton9PresentProfileRecord(device, ticks);
+    }
+    if (SUCCEEDED(hr)) triton9TraceGpuResolve(device);
+    triton9TraceEvent(device, TT_PRESENT_END, (UINT)hr, 0, 0);
+    if (SUCCEEDED(hr)) triton9TraceGpuStart(device);
     LeaveCriticalSection(&device->shaderLock);
     triton9Diag(SUCCEEDED(hr) ? "TRITON9-PRESENT success\n" :
                                 "TRITON9-PRESENT fail\n");
@@ -2225,6 +3132,9 @@ triton9OpenResource(HANDLE hDevice, D3DDDIARG_OPENRESOURCE *args)
         resource->height = primary->height;
         resource->depth = 1;
         resource->mipLevels = 1;
+        resource->sampleCount = resource->arraySize = resource->exposedMipLevels = 1;
+        resource->blockWidth = resource->blockHeight = 1;
+        resource->bytesPerBlock = format->bytesPerBlock;
         resource->surfaceCount = 1;
         resource->pool = D3DDDIPOOL_VIDEOMEMORY;
         resource->bytesPerPixel = format->bytesPerPixel;
@@ -2300,6 +3210,8 @@ triton9OpenResource(HANDLE hDevice, D3DDDIARG_OPENRESOURCE *args)
         !triton9SharedFormat((DXGI_FORMAT)options->format, &scanoutFormat) ||
         !options->allocation_size ||
         options->primary > 1 ||
+        (options->primary && options->format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+         options->format != DXGI_FORMAT_B8G8R8X8_UNORM) ||
         options->allocation_size > allocation->Size ||
         options->allocation_size > (uint64_t)((SIZE_T)-1) - 4095ull ||
         options->mip_levels != 1 || options->array_size != 1 ||
@@ -2346,6 +3258,9 @@ triton9OpenResource(HANDLE hDevice, D3DDDIARG_OPENRESOURCE *args)
     resource->height = options->height;
     resource->depth = 1;
     resource->mipLevels = options->mip_levels ? options->mip_levels : 1;
+    resource->sampleCount = resource->arraySize = resource->exposedMipLevels = 1;
+    resource->blockWidth = resource->blockHeight = 1;
+    resource->bytesPerBlock = format->bytesPerBlock;
     resource->surfaceCount = 1;
     resource->pool = D3DDDIPOOL_VIDEOMEMORY;
     resource->bytesPerPixel = format->bytesPerPixel;

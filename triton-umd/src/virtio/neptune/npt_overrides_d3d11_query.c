@@ -2,17 +2,14 @@
  * Copyright 2026 Turing Software LLC
  * SPDX-License-Identifier: MIT
  *
- * Query / Predicate / Counter feedback slot lifecycle plus the
- * Create* overrides that finalize registration.
+ * Query / Predicate / Counter wrapper metadata and lifecycle.
  */
 
 #include "npt_com.h"
 #include "npt_overrides_d3d11_feedback.h"
 #include "npt_device.h"
 #include "npt_dispatch.h"
-#include "npt_env.h"
 #include "npt_overrides.h"
-#include "npt_ring.h"
 
 #include "neptune-protocol/npt_protocol_client_id3d11asynchronous.h"
 #include "neptune-protocol/npt_protocol_client_id3d11counter.h"
@@ -21,7 +18,7 @@
 #include "neptune-protocol/npt_protocol_client_id3d11query.h"
 #include "neptune-protocol/npt_protocol_defs.h"
 
-/* 0 = unknown type; caller falls back to the sync GetData path. */
+/* Zero denotes a query type whose result size is unknown. */
 static uint32_t
 npt_query_data_size_for_type(D3D11_QUERY type)
 {
@@ -66,8 +63,7 @@ query_aux_init(struct npt_com_base *com,
    aux->query_data_size = 0;
    atomic_store_explicit(&aux->local_version, 0, memory_order_relaxed);
    com->aux_destroy = query_aux_destroy;
-   /* aux_init runs before we know D3D11_QUERY_DESC::Query, which
-    * determines result size -- finalize_create handles registration. */
+   /* The creation descriptor supplies the result size after aux_init. */
    (void)dev; (void)host_id;
 }
 
@@ -104,53 +100,19 @@ npt_d3d11_query_aux_cast(void *async)
    return ((struct npt_com_base *)async)->aux;
 }
 
-/* Default-on; NPT_PERF=no_query_feedback is the regression killswitch. */
+/* Query results use ordered GetData commands. A shared slot cannot safely
+ * distinguish repeated Begin/End cycles without a generation in that same
+ * command stream, including queries which are issued with End alone. */
 static void
 npt_d3d11_query_finalize_create(struct npt_device *dev, void *wrapper,
                                 D3D11_QUERY type)
 {
-   if (NPT_PERF(NO_QUERY_FEEDBACK))
-      return;
    if (!dev || !wrapper)
       return;
    struct npt_com_base *com = wrapper;
    struct npt_d3d11_query_aux *aux = com->aux;
-   if (!aux)
-      return;
-
-   const uint32_t data_size = npt_query_data_size_for_type(type);
-   if (!data_size || data_size > NPT_QUERY_FEEDBACK_SLOT_RESULT)
-      return;
-
-   /* Idempotent: CreateQuery1 may hit the same wrapper. */
-   if (aux->base.registered)
-      return;
-
-   uint32_t fb_offset = 0;
-   bool fresh = false;
-   struct npt_renderer_shmem *shmem =
-      npt_device_alloc_feedback_slot(dev, NPT_QUERY_FEEDBACK_SLOT_SIZE,
-                                     &fb_offset, &fresh);
-   if (!shmem)
-      return;
-
-   aux->base.fb_shmem = shmem;
-   aux->base.fb_offset = fb_offset;
-   aux->query_data_size = data_size;
-
-   /* Fresh shmem requires a roundtrip so REGISTER_QUERY_FEEDBACK's
-    * res_id is registered when the host ring thread reads it. */
-   if (fresh && !npt_ring_force_roundtrip(dev->ring)) {
-      npt_renderer_shmem_unref(dev->renderer, shmem);
-      aux->base.fb_shmem = NULL;
-      aux->base.fb_offset = 0;
-      aux->query_data_size = 0;
-      return;
-   }
-
-   if (npt_dispatch_feedback_register_query(dev->ring, com->base.id,
-                                            shmem->res_id, fb_offset, data_size))
-      aux->base.registered = true;
+   if (aux)
+      aux->query_data_size = npt_query_data_size_for_type(type);
 }
 
 static HRESULT NPT_STDMETHODCALLTYPE
@@ -201,7 +163,7 @@ dev3_CreateQuery1_override(void *self, const D3D11_QUERY_DESC1 *pQueryDesc1,
       self, pQueryDesc1, ppQuery1);
    if (NPT_SUCCEEDED(hr) && pQueryDesc1 && ppQuery1 && *ppQuery1) {
       /* DESC1::Query is the same D3D11_QUERY enum; ContextType
-       * doesn't affect feedback sizing. */
+       * doesn't affect result sizing. */
       npt_d3d11_query_finalize_create(npt_com_self_device(self),
                                       *ppQuery1, pQueryDesc1->Query);
    }

@@ -10,8 +10,11 @@
 
 #include "triton9.h"
 #include "triton9_cpu_layout.h"
+#include "../triton/tritonSharedBridge.h"
 
 #include <cstring>
+#include <cmath>
+#include <climits>
 
 namespace {
 
@@ -38,6 +41,18 @@ static bool
 triton9FiniteFloatBits(UINT value)
 {
     return (value & 0x7f800000u) != 0x7f800000u;
+}
+
+static UINT
+triton9SamplerIndex(UINT stage)
+{
+    /* The DDI keeps the public 256/257..260 displacement/vertex indices. */
+    if (stage == D3DDMAPSAMPLER)
+        return TRITON9_MAX_PIXEL_SAMPLERS;
+    if (stage >= D3DVERTEXTEXTURESAMPLER0 &&
+        stage < D3DVERTEXTEXTURESAMPLER0 + TRITON9_MAX_VERTEX_SAMPLERS)
+        return TRITON9_VERTEX_SAMPLER_BASE + stage - D3DVERTEXTEXTURESAMPLER0;
+    return stage < TRITON9_MAX_PIXEL_SAMPLERS ? stage : UINT_MAX;
 }
 
 static bool
@@ -167,7 +182,8 @@ triton9MapAddress(UINT value, D3D11_TEXTURE_ADDRESS_MODE *result)
 static bool
 triton9ValidMinMagFilter(UINT value)
 {
-    return value == D3DTEXF_POINT || value == D3DTEXF_LINEAR;
+    return value == D3DTEXF_POINT || value == D3DTEXF_LINEAR ||
+           value == D3DTEXF_ANISOTROPIC;
 }
 
 static bool
@@ -180,14 +196,13 @@ triton9ValidMipFilter(UINT value)
 static bool
 triton9ValidFixedOperation(UINT value)
 {
-    return value == D3DTOP_DISABLE || value == D3DTOP_SELECTARG1 ||
-           value == D3DTOP_SELECTARG2 || value == D3DTOP_MODULATE;
+    return value >= D3DTOP_DISABLE && value <= D3DTOP_LERP;
 }
 
 static bool
 triton9ValidFixedArgument(UINT value)
 {
-    if (value & ~D3DTA_SELECTMASK)
+    if (value & ~(D3DTA_SELECTMASK | D3DTA_COMPLEMENT | D3DTA_ALPHAREPLICATE))
         return false;
     switch (value & D3DTA_SELECTMASK) {
     case D3DTA_DIFFUSE:
@@ -195,6 +210,8 @@ triton9ValidFixedArgument(UINT value)
     case D3DTA_CURRENT:
     case D3DTA_TEXTURE:
     case D3DTA_TFACTOR:
+    case D3DTA_TEMP:
+    case D3DTA_CONSTANT:
         return true;
     default:
         return false;
@@ -253,6 +270,11 @@ triton9TransformSlot(TRITON9_DEVICE *device, D3DTRANSFORMSTATETYPE type)
         return nullptr;
     if ((UINT)type == (UINT)D3DTS_WORLD)
         return &device->worldTransform;
+    if ((UINT)type > (UINT)D3DTS_WORLD && (UINT)type < (UINT)D3DTS_WORLD + 256)
+        return &device->worldTransforms[(UINT)type - (UINT)D3DTS_WORLD];
+    if ((UINT)type >= (UINT)D3DTS_TEXTURE0 &&
+        (UINT)type < (UINT)D3DTS_TEXTURE0 + TRITON9_FIXED_TEXTURE_STAGES)
+        return &device->textureTransforms[(UINT)type - (UINT)D3DTS_TEXTURE0];
     switch (type) {
     case D3DTS_VIEW:
         return &device->viewTransform;
@@ -292,6 +314,36 @@ triton9AlphaBlendFactor(D3D11_BLEND factor)
     }
 }
 
+/* X formats have logical destination alpha one even when the host storage
+ * contains writable alpha bits. Substitute factors independently for each RT. */
+static D3D11_BLEND
+triton9OpaqueDestinationBlend(D3D11_BLEND factor)
+{
+    switch (factor) {
+    case D3D11_BLEND_DEST_ALPHA: return D3D11_BLEND_ONE;
+    case D3D11_BLEND_INV_DEST_ALPHA:
+    case D3D11_BLEND_SRC_ALPHA_SAT: return D3D11_BLEND_ZERO;
+    default: return factor;
+    }
+}
+
+static bool
+triton9OpaqueRenderTarget(const TRITON9_RESOURCE *resource)
+{
+    if (!resource)
+        return false;
+    switch (UINT(resource->format)) {
+    case D3DFMT_X8R8G8B8:
+    case D3DFMT_X8B8G8R8:
+    case D3DFMT_X1R5G5B5:
+    case D3DFMT_X4R4G4B4:
+    case D3DFMT_R5G6B5:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static HRESULT
 triton9CreateBlendState(TRITON9_DEVICE *device)
 {
@@ -306,9 +358,20 @@ triton9CreateBlendState(TRITON9_DEVICE *device)
         return E_INVALIDARG;
     if (!device->blendStateDirty && device->blendState)
         return S_OK;
-    if (!triton9MapBlend(device->renderStates[D3DDDIRS_SRCBLEND], &srcColor) ||
-        !triton9MapBlend(device->renderStates[D3DDDIRS_DESTBLEND], &dstColor) ||
-        !triton9MapBlendOp(device->renderStates[D3DDDIRS_BLENDOP], &colorOp))
+    const UINT sourceBlend = device->renderStates[D3DDDIRS_SRCBLEND];
+    if (sourceBlend == D3DBLEND_BOTHSRCALPHA ||
+        sourceBlend == D3DBLEND_BOTHINVSRCALPHA) {
+        /* Legacy source modes override the destination color factor. */
+        srcColor = sourceBlend == D3DBLEND_BOTHSRCALPHA
+            ? D3D11_BLEND_SRC_ALPHA : D3D11_BLEND_INV_SRC_ALPHA;
+        dstColor = sourceBlend == D3DBLEND_BOTHSRCALPHA
+            ? D3D11_BLEND_INV_SRC_ALPHA : D3D11_BLEND_SRC_ALPHA;
+    } else if (!triton9MapBlend(sourceBlend, &srcColor) ||
+               !triton9MapBlend(device->renderStates[D3DDDIRS_DESTBLEND],
+                                &dstColor)) {
+        return D3DDDIERR_NOTAVAILABLE;
+    }
+    if (!triton9MapBlendOp(device->renderStates[D3DDDIRS_BLENDOP], &colorOp))
         return D3DDDIERR_NOTAVAILABLE;
     if (device->renderStates[D3DDDIRS_SEPARATEALPHABLENDENABLE]) {
         if (!triton9MapBlend(device->renderStates[D3DDDIRS_SRCBLENDALPHA],
@@ -335,6 +398,22 @@ triton9CreateBlendState(TRITON9_DEVICE *device)
     target->BlendOpAlpha = alphaOp;
     target->RenderTargetWriteMask = (UINT8)(
         device->renderStates[D3DDDIRS_COLORWRITEENABLE] & kDefaultColorWriteMask);
+    desc.IndependentBlendEnable = TRUE;
+    for (UINT index = 1; index < 4; ++index) {
+        desc.RenderTarget[index] = *target;
+        desc.RenderTarget[index].RenderTargetWriteMask = (UINT8)(
+            device->renderStates[D3DDDIRS_COLORWRITEENABLE1 + index - 1] &
+            kDefaultColorWriteMask);
+    }
+    for (UINT index = 0; index < 4; ++index) {
+        if (!triton9OpaqueRenderTarget(device->renderTargets[index]))
+            continue;
+        auto &output = desc.RenderTarget[index];
+        output.SrcBlend = triton9OpaqueDestinationBlend(output.SrcBlend);
+        output.DestBlend = triton9OpaqueDestinationBlend(output.DestBlend);
+        output.SrcBlendAlpha = triton9OpaqueDestinationBlend(output.SrcBlendAlpha);
+        output.DestBlendAlpha = triton9OpaqueDestinationBlend(output.DestBlendAlpha);
+    }
     hr = device->hostDevice->CreateBlendState(&desc, &newState);
     if (FAILED(hr) || !newState) {
         if (newState)
@@ -380,7 +459,10 @@ triton9CreateDepthStencilState(TRITON9_DEVICE *device)
     desc.DepthWriteMask = device->renderStates[D3DDDIRS_ZWRITEENABLE]
         ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
     desc.DepthFunc = comparison;
-    desc.StencilEnable = device->renderStates[D3DDDIRS_STENCILENABLE] != 0;
+    /* D24X8 shares a host D24S8 image, but its padding is not stencil.
+     * Binding a different logical depth format invalidates this state. */
+    desc.StencilEnable = device->renderStates[D3DDDIRS_STENCILENABLE] != 0 &&
+        device->depthStencil && device->depthStencil->format == D3DDDIFMT_D24S8;
     desc.StencilReadMask = (UINT8)device->renderStates[D3DDDIRS_STENCILMASK];
     desc.StencilWriteMask =
         (UINT8)device->renderStates[D3DDDIRS_STENCILWRITEMASK];
@@ -431,16 +513,15 @@ triton9CreateRasterizerState(TRITON9_DEVICE *device)
         return S_OK;
     fillMode = device->renderStates[D3DDDIRS_FILLMODE];
     cullMode = device->renderStates[D3DDDIRS_CULLMODE];
-    if (fillMode != D3DFILL_SOLID && fillMode != D3DFILL_WIREFRAME)
+    if (fillMode != D3DFILL_POINT && fillMode != D3DFILL_SOLID &&
+        fillMode != D3DFILL_WIREFRAME)
         return D3DDDIERR_NOTAVAILABLE;
     if (cullMode != D3DCULL_NONE && cullMode != D3DCULL_CW &&
         cullMode != D3DCULL_CCW)
         return D3DDDIERR_NOTAVAILABLE;
-    if (device->renderStates[D3DDDIRS_DEPTHBIAS] ||
-        device->renderStates[D3DDDIRS_SLOPESCALEDEPTHBIAS])
-        return D3DDDIERR_NOTAVAILABLE;
     ZeroMemory(&desc, sizeof(desc));
-    desc.FillMode = fillMode == D3DFILL_SOLID ? D3D11_FILL_SOLID : D3D11_FILL_WIREFRAME;
+    desc.FillMode = fillMode == D3DFILL_WIREFRAME
+        ? D3D11_FILL_WIREFRAME : D3D11_FILL_SOLID;
     if (cullMode == D3DCULL_NONE) {
         desc.CullMode = D3D11_CULL_NONE;
     } else if (cullMode == D3DCULL_CW) {
@@ -452,10 +533,19 @@ triton9CreateRasterizerState(TRITON9_DEVICE *device)
      * identity stable when culling changes, so CCW stencil state always maps
      * to D3D11 BackFace. */
     desc.FrontCounterClockwise = FALSE;
-    desc.DepthClipEnable = TRUE;
+    desc.DepthClipEnable = device->renderStates[D3DDDIRS_CLIPPING] != 0;
+    const UINT depthBits = device->depthStencil &&
+        (device->depthStencil->format == D3DDDIFMT_D16 ||
+         device->depthStencil->format == D3DDDIFMT_D16_LOCKABLE) ? 16 : 24;
+    const double bias = std::ldexp(static_cast<double>(triton9FloatFromBits(
+        device->renderStates[D3DDDIRS_DEPTHBIAS])), depthBits);
+    desc.DepthBias = bias >= INT_MAX ? INT_MAX : bias <= INT_MIN ? INT_MIN :
+        static_cast<INT>(std::round(bias));
+    desc.SlopeScaledDepthBias = triton9FloatFromBits(
+        device->renderStates[D3DDDIRS_SLOPESCALEDEPTHBIAS]);
     desc.ScissorEnable = device->renderStates[D3DDDIRS_SCISSORTESTENABLE] != 0;
-    desc.MultisampleEnable = FALSE;
-    desc.AntialiasedLineEnable = FALSE;
+    desc.MultisampleEnable = device->renderStates[D3DDDIRS_MULTISAMPLEANTIALIAS] != 0;
+    desc.AntialiasedLineEnable = device->renderStates[D3DDDIRS_ANTIALIASEDLINEENABLE] != 0;
     hr = device->hostDevice->CreateRasterizerState(&desc, &newState);
     if (FAILED(hr) || !newState) {
         if (newState)
@@ -486,7 +576,8 @@ triton9CreateSamplerState(TRITON9_DEVICE *device, UINT stage)
         !triton9ValidMinMagFilter(states[D3DDDITSS_MAGFILTER]) ||
         !triton9ValidMipFilter(states[D3DDDITSS_MIPFILTER]) ||
         !triton9FiniteFloatBits(states[D3DDDITSS_MIPMAPLODBIAS]) ||
-        states[D3DDDITSS_MAXANISOTROPY] != 1)
+        !states[D3DDDITSS_MAXANISOTROPY] ||
+        states[D3DDDITSS_MAXANISOTROPY] > 16)
         return D3DDDIERR_NOTAVAILABLE;
     ZeroMemory(&desc, sizeof(desc));
     if (!triton9MapAddress(states[D3DDDITSS_ADDRESSU], &desc.AddressU) ||
@@ -559,18 +650,6 @@ triton9ValidateViewport(const TRITON9_DEVICE *device, D3D11_VIEWPORT *viewport,
     return S_OK;
 }
 
-static enum triton9_cpu_color_layout
-triton9RenderTargetColorLayout(const TRITON9_RESOURCE *resource)
-{
-    if (!resource)
-        return TRITON9_CPU_COLOR_LAYOUT_OTHER;
-    if (resource->hostFormat == DXGI_FORMAT_B8G8R8A8_UNORM)
-        return TRITON9_CPU_COLOR_LAYOUT_BGRA8;
-    if (resource->hostFormat == DXGI_FORMAT_B8G8R8X8_UNORM)
-        return TRITON9_CPU_COLOR_LAYOUT_BGRX8;
-    return TRITON9_CPU_COLOR_LAYOUT_OTHER;
-}
-
 static HRESULT
 triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
 {
@@ -589,10 +668,12 @@ triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
         return args->Value == D3DZB_FALSE || args->Value == D3DZB_TRUE
             ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_FILLMODE:
-        return args->Value == D3DFILL_SOLID || args->Value == D3DFILL_WIREFRAME
+        return args->Value == D3DFILL_POINT || args->Value == D3DFILL_SOLID ||
+               args->Value == D3DFILL_WIREFRAME
             ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_SHADEMODE:
-        return args->Value == D3DSHADE_GOURAUD ? S_OK : D3DDDIERR_NOTAVAILABLE;
+        return args->Value == D3DSHADE_GOURAUD || args->Value == D3DSHADE_FLAT
+            ? S_OK : D3DDDIERR_NOTAVAILABLE;
     /*
      * Vista sends the complete legacy D3D9 state block while it constructs
      * a HAL device, including several D3D7-era controls that a D3D11-backed
@@ -646,7 +727,6 @@ triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
     case D3DDDIRS_PATCHSEGMENTS:
     case D3DDDIRS_DEBUGMONITORTOKEN:
     case D3DDDIRS_DELETERTPATCH:
-    case D3DDDIRS_TWEENFACTOR:
     case D3DDDIRS_POSITIONDEGREE:
     case D3DDDIRS_NORMALDEGREE:
     case D3DDDIRS_MINTESSELLATIONLEVEL:
@@ -661,8 +741,15 @@ triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
     case D3DDDIRS_ALPHABLENDENABLE:
     case D3DDDIRS_SEPARATEALPHABLENDENABLE:
     case D3DDDIRS_SCISSORTESTENABLE:
+    case D3DDDIRS_SRGBWRITEENABLE:
+    case D3DDDIRS_ANTIALIASEDLINEENABLE:
+    case D3DDDIRS_CLIPPING:
         return args->Value <= 1 ? S_OK : D3DDDIERR_INVALIDCALL;
     case D3DDDIRS_SRCBLEND:
+        if (args->Value == D3DBLEND_BOTHSRCALPHA ||
+            args->Value == D3DBLEND_BOTHINVSRCALPHA)
+            return S_OK;
+        /* fall through */
     case D3DDDIRS_DESTBLEND:
     case D3DDDIRS_SRCBLENDALPHA:
     case D3DDDIRS_DESTBLENDALPHA: {
@@ -707,15 +794,11 @@ triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
          * draw time.  No D3D11 rasterizer object represents vertex fog. */
         return args->Value <= 1 ? S_OK : D3DDDIERR_INVALIDCALL;
     case D3DDDIRS_DITHERENABLE:
-        /* Triton exposes only 32-bit A8R8G8B8/X8R8G8B8 color targets.  Those
-         * targets do not quantize to a lower bit depth, so both legal values
-         * have identical output.  Preserve the value without a backend flag. */
+        /* Preserve the logical state; draw-time application checks the
+         * backend's native dithering support. */
         return args->Value <= 1 ? S_OK : D3DDDIERR_INVALIDCALL;
-    case D3DDDIRS_SRGBWRITEENABLE:
     case D3DDDIRS_COLORKEYENABLE:
     case D3DDDIRS_COLORKEYBLENDENABLE:
-    case D3DDDIRS_POINTSPRITEENABLE:
-    case D3DDDIRS_POINTSCALEENABLE:
         return args->Value == 0 ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_STENCILENABLE:
         return args->Value <= 1 ? S_OK : D3DDDIERR_INVALIDCALL;
@@ -727,14 +810,14 @@ triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
          * rasterization.  Triton's composition path does not draw lines, so
          * both legal D3D9 values are state-only and must be accepted. */
         return args->Value <= 1 ? S_OK : D3DDDIERR_INVALIDCALL;
-    case D3DDDIRS_CLIPPING:
-        return args->Value == TRUE ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_SPECULARENABLE:
     case D3DDDIRS_RANGEFOGENABLE:
-    case D3DDDIRS_EDGEANTIALIAS:
     case D3DDDIRS_NORMALIZENORMALS:
     case D3DDDIRS_INDEXEDVERTEXBLENDENABLE:
-    case D3DDDIRS_ANTIALIASEDLINEENABLE:
+    case D3DDDIRS_POINTSPRITEENABLE:
+    case D3DDDIRS_POINTSCALEENABLE:
+        return args->Value <= 1 ? S_OK : D3DDDIERR_INVALIDCALL;
+    case D3DDDIRS_EDGEANTIALIAS:
         return args->Value == FALSE ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_LIGHTING:
     case D3DDDIRS_COLORVERTEX:
@@ -743,7 +826,6 @@ triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
     case D3DDDIRS_MULTISAMPLEANTIALIAS:
         return args->Value <= 1 ? S_OK : D3DDDIERR_INVALIDCALL;
     case D3DDDIRS_FOGTABLEMODE:
-        return args->Value == D3DFOG_NONE ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_FOGVERTEXMODE:
         return triton9ValidFogMode(args->Value) ? S_OK
                                                 : D3DDDIERR_NOTAVAILABLE;
@@ -787,43 +869,32 @@ triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
     case D3DDDIRS_COLORWRITEENABLE1:
     case D3DDDIRS_COLORWRITEENABLE2:
     case D3DDDIRS_COLORWRITEENABLE3:
-        /* Triton exposes one render target.  Preserve Vista's legal default
-         * writes for the unused MRT slots without advertising MRT output. */
         return (args->Value & ~kDefaultColorWriteMask) == 0 ? S_OK
                                                              : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_DIFFUSEMATERIALSOURCE:
     case D3DDDIRS_SPECULARMATERIALSOURCE:
     case D3DDDIRS_EMISSIVEMATERIALSOURCE:
-        /* The compositor selects COLOR1 for both fields while lighting is
-         * disabled.  Preserve that legal state for the unlit fixed path. */
-        return args->Value == D3DMCS_MATERIAL || args->Value == D3DMCS_COLOR1
-            ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_AMBIENTMATERIALSOURCE:
-        return args->Value == D3DMCS_MATERIAL ? S_OK : D3DDDIERR_NOTAVAILABLE;
+        return args->Value <= D3DMCS_COLOR2 ? S_OK : D3DDDIERR_INVALIDCALL;
     case D3DDDIRS_AMBIENT:
-        /* D3DCOLOR is retained for the future lighting path.  It has no
-         * raster effect while D3DRS_LIGHTING is FALSE. */
         return S_OK;
     case D3DDDIRS_CLIPPLANEENABLE:
-        return args->Value == 0 ? S_OK : D3DDDIERR_NOTAVAILABLE;
+        return (args->Value & ~63u) == 0 ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_VERTEXBLEND:
-        return args->Value == D3DVBF_DISABLE ? S_OK : D3DDDIERR_NOTAVAILABLE;
+        return args->Value <= D3DVBF_3WEIGHTS ||
+               args->Value == D3DVBF_0WEIGHTS || args->Value == D3DVBF_TWEENING
+            ? S_OK : D3DDDIERR_NOTAVAILABLE;
     case D3DDDIRS_POINTSIZE:
     case D3DDDIRS_POINTSIZE_MIN:
     case D3DDDIRS_POINTSIZE_MAX:
-        /* Point primitives are not exposed by the raster path, but the
-         * Vista runtime seeds all three point-size controls while it builds
-         * a HAL state block.  In particular, POINTSIZE_MAX is supplied as
-         * 0 (the runtime's "use device limit" sentinel), not 1.0.  These
-         * values are therefore preserved-only while POINTSPRITEENABLE stays
-         * false; accept every finite IEEE-754 value rather than rejecting a
-         * legal initialization sentinel. */
-        return triton9FiniteFloatBits(args->Value) ? S_OK : D3DDDIERR_INVALIDCALL;
+        /* Zero remains valid for Vista's device-limit initialization sentinel. */
+        return triton9FiniteFloatBits(args->Value) &&
+               triton9FloatFromBits(args->Value) >= 0.0f
+            ? S_OK : D3DDDIERR_INVALIDCALL;
     case D3DDDIRS_POINTSCALE_A:
     case D3DDDIRS_POINTSCALE_B:
     case D3DDDIRS_POINTSCALE_C:
-        /* Point scaling is disabled, but these float defaults are part of
-         * the runtime's full initialization block. */
+    case D3DDDIRS_TWEENFACTOR:
         return triton9FiniteFloatBits(args->Value) ? S_OK : D3DDDIERR_INVALIDCALL;
     case D3DDDIRS_WRAP0:
     case D3DDDIRS_WRAP1:
@@ -841,12 +912,12 @@ triton9ValidateRenderState(const D3DDDIARG_RENDERSTATE *args)
     case D3DDDIRS_WRAP13:
     case D3DDDIRS_WRAP14:
     case D3DDDIRS_WRAP15:
-        return args->Value == 0 ? S_OK : D3DDDIERR_NOTAVAILABLE;
+        return (args->Value & ~15u) == 0 ? S_OK : D3DDDIERR_INVALIDCALL;
     case D3DDDIRS_DEPTHBIAS:
     case D3DDDIRS_SLOPESCALEDEPTHBIAS:
-        return args->Value == 0 ? S_OK : D3DDDIERR_NOTAVAILABLE;
+        return triton9FiniteFloatBits(args->Value) ? S_OK : D3DDDIERR_INVALIDCALL;
     case D3DDDIRS_MULTISAMPLEMASK:
-        return args->Value == 0xffffffffu ? S_OK : D3DDDIERR_NOTAVAILABLE;
+        return S_OK;
     default:
         return D3DDDIERR_NOTAVAILABLE;
     }
@@ -901,6 +972,10 @@ triton9InitializePipelineState(TRITON9_DEVICE *device)
     device->renderStates[D3DDDIRS_CCW_STENCILFUNC] = D3DCMP_ALWAYS;
     device->renderStates[D3DDDIRS_ALPHAFUNC] = D3DCMP_ALWAYS;
     device->renderStates[D3DDDIRS_COLORWRITEENABLE] = kDefaultColorWriteMask;
+    device->renderStates[D3DDDIRS_COLORWRITEENABLE1] = kDefaultColorWriteMask;
+    device->renderStates[D3DDDIRS_COLORWRITEENABLE2] = kDefaultColorWriteMask;
+    device->renderStates[D3DDDIRS_COLORWRITEENABLE3] = kDefaultColorWriteMask;
+    device->renderStates[D3DDDIRS_MULTISAMPLEANTIALIAS] = TRUE;
     device->renderStates[D3DDDIRS_BLENDOP] = D3DBLENDOP_ADD;
     device->renderStates[D3DDDIRS_MULTISAMPLEMASK] = 0xffffffffu;
     device->renderStates[D3DDDIRS_SRCBLENDALPHA] = D3DBLEND_ONE;
@@ -924,13 +999,20 @@ triton9InitializePipelineState(TRITON9_DEVICE *device)
     device->renderStates[D3DDDIRS_LOCALVIEWER] = TRUE;
     device->renderStates[D3DDDIRS_POINTSIZE] = 0x3f800000u;
     device->renderStates[D3DDDIRS_POINTSIZE_MIN] = 0x3f800000u;
-    device->renderStates[D3DDDIRS_POINTSIZE_MAX] = 0x3f800000u;
+    device->renderStates[D3DDDIRS_POINTSIZE_MAX] = 0x42800000u; /* 64 */
+    device->renderStates[D3DDDIRS_POINTSCALE_A] = 0x3f800000u;
+    device->renderStates[D3DDDIRS_DIFFUSEMATERIALSOURCE] = D3DMCS_COLOR1;
+    device->renderStates[D3DDDIRS_SPECULARMATERIALSOURCE] = D3DMCS_COLOR2;
     device->blendStateDirty = TRUE;
     device->depthStencilStateDirty = TRUE;
     device->rasterizerStateDirty = TRUE;
     triton9IdentityMatrix(&device->worldTransform);
+    for (UINT index = 0; index < 256; ++index)
+        triton9IdentityMatrix(&device->worldTransforms[index]);
     triton9IdentityMatrix(&device->viewTransform);
     triton9IdentityMatrix(&device->projectionTransform);
+    for (stage = 0; stage < TRITON9_FIXED_TEXTURE_STAGES; ++stage)
+        triton9IdentityMatrix(&device->textureTransforms[stage]);
     for (stage = 0; stage < TRITON9_MAX_TEXTURE_STAGES; ++stage) {
         UINT *states = device->textureStageStates[stage];
         states[D3DDDITSS_COLOROP] = stage == 0 ? D3DTOP_MODULATE
@@ -1007,6 +1089,9 @@ triton9SetRenderState(HANDLE hDevice, const D3DDDIARG_RENDERSTATE *args)
     case D3DDDIRS_DESTBLEND:
     case D3DDDIRS_ALPHABLENDENABLE:
     case D3DDDIRS_COLORWRITEENABLE:
+    case D3DDDIRS_COLORWRITEENABLE1:
+    case D3DDDIRS_COLORWRITEENABLE2:
+    case D3DDDIRS_COLORWRITEENABLE3:
     case D3DDDIRS_BLENDOP:
     case D3DDDIRS_SEPARATEALPHABLENDENABLE:
     case D3DDDIRS_SRCBLENDALPHA:
@@ -1037,6 +1122,9 @@ triton9SetRenderState(HANDLE hDevice, const D3DDDIARG_RENDERSTATE *args)
     case D3DDDIRS_SCISSORTESTENABLE:
     case D3DDDIRS_DEPTHBIAS:
     case D3DDDIRS_SLOPESCALEDEPTHBIAS:
+    case D3DDDIRS_CLIPPING:
+    case D3DDDIRS_MULTISAMPLEANTIALIAS:
+    case D3DDDIRS_ANTIALIASEDLINEENABLE:
         device->rasterizerStateDirty = TRUE;
         break;
     default:
@@ -1091,8 +1179,14 @@ triton9SetTextureStageState(HANDLE hDevice,
                             const D3DDDIARG_TEXTURESTAGESTATE *args)
 {
     TRITON9_DEVICE *device = static_cast<TRITON9_DEVICE *>(hDevice);
+    D3DDDIARG_TEXTURESTAGESTATE normalized;
 
-    if (!device || !args || !device->shaderLockInitialized ||
+    if (!args)
+        return E_INVALIDARG;
+    normalized = *args;
+    normalized.Stage = triton9SamplerIndex(args->Stage);
+    args = &normalized;
+    if (!device || !device->shaderLockInitialized ||
         args->Stage >= TRITON9_MAX_TEXTURE_STAGES ||
         args->State >= TRITON9_TEXTURE_STAGE_STATE_COUNT)
         return E_INVALIDARG;
@@ -1105,6 +1199,8 @@ triton9SetTextureStageState(HANDLE hDevice,
             (args->Stage >= TRITON9_FIXED_TEXTURE_STAGES && args->Value != D3DTOP_DISABLE))
             return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
         break;
+    case D3DDDITSS_COLORARG0:
+    case D3DDDITSS_ALPHAARG0:
     case D3DDDITSS_COLORARG1:
     case D3DDDITSS_COLORARG2:
     case D3DDDITSS_ALPHAARG1:
@@ -1112,30 +1208,30 @@ triton9SetTextureStageState(HANDLE hDevice,
         if (args->Stage >= TRITON9_FIXED_TEXTURE_STAGES || !triton9ValidFixedArgument(args->Value))
             return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
         break;
-    case D3DDDITSS_TEXCOORDINDEX:
-        /* Vista's state manager initializes the identity coordinate index on
-         * every advertised stage, including stages that are disabled.  The
-         * fixed shader consumes the eight enabled blend stages; accepting the
-         * inert identity state on the others keeps the advertised eight-stage
-         * contract internally consistent. */
-        if (args->Value != args->Stage)
-            return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
+    case D3DDDITSS_TEXCOORDINDEX: {
+        const UINT coordinates = args->Value & 0xffffu;
+        const UINT generation = args->Value & 0xffff0000u;
+        if (args->Stage >= TRITON9_FIXED_TEXTURE_STAGES) {
+            if (args->Value != args->Stage)
+                return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
+        } else if (coordinates >= TRITON9_FIXED_TEXTURE_STAGES ||
+                   generation > D3DTSS_TCI_SPHEREMAP) {
+            return triton9RejectTextureStageState(args, D3DDDIERR_INVALIDCALL);
+        }
         break;
-    case D3DDDITSS_TEXTURETRANSFORMFLAGS:
-        if (args->Value != D3DTTFF_DISABLE)
-            return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
+    }
+    case D3DDDITSS_TEXTURETRANSFORMFLAGS: {
+        const UINT count = args->Value & ~D3DTTFF_PROJECTED;
+        if (count > D3DTTFF_COUNT4 ||
+            ((args->Value & D3DTTFF_PROJECTED) && count < D3DTTFF_COUNT2) ||
+            (args->Stage >= TRITON9_FIXED_TEXTURE_STAGES && args->Value))
+            return triton9RejectTextureStageState(args, D3DDDIERR_INVALIDCALL);
         break;
+    }
     case D3DDDITSS_RESULTARG:
-        if (args->Value != D3DTA_CURRENT)
-            return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
+        if (args->Value != D3DTA_CURRENT && args->Value != D3DTA_TEMP)
+            return triton9RejectTextureStageState(args, D3DDDIERR_INVALIDCALL);
         break;
-    /* Vista initializes the full D3D9 texture-stage block for every
-     * advertised stage during CreateDeviceEx.  Triton's fixed shader neither
-     * selects bump/environment mapping nor a displacement map, but returning
-     * an error for their legal inert values makes the runtime discard the HAL
-     * before an application has issued a draw.  Keep these state-only values
-     * so the DDI contract is complete; the consuming COLOROP path above still
-     * rejects unsupported triadic/bump operations for actual rendering. */
     case D3DDDITSS_TEXTUREMAP:
         /* Resource binding uses pfnSetTexture; preserve this legacy state
          * token only for the runtime's initialization bookkeeping. */
@@ -1149,11 +1245,7 @@ triton9SetTextureStageState(HANDLE hDevice,
         if (!triton9FiniteFloatBits(args->Value))
             return triton9RejectTextureStageState(args, D3DDDIERR_INVALIDCALL);
         break;
-    case D3DDDITSS_COLORARG0:
-    case D3DDDITSS_ALPHAARG0:
     case D3DDDITSS_CONSTANT:
-        /* These feed only triadic texture ops, which this fixed path does not
-         * expose.  D3DTA/D3DCOLOR bits are preserved for a future shader path. */
         break;
     case D3DDDITSS_ELEMENTINDEX:
     case D3DDDITSS_DMAPOFFSET:
@@ -1193,17 +1285,14 @@ triton9SetTextureStageState(HANDLE hDevice,
             return triton9RejectTextureStageState(args, D3DDDIERR_INVALIDCALL);
         break;
     case D3DDDITSS_MAXANISOTROPY:
-        if (args->Value != 1)
+        if (!args->Value || args->Value > 16)
             return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
         break;
     case D3DDDITSS_MAXMIPLEVEL:
-        /* The current resource path exposes only mip level zero. */
-        if (args->Value)
-            return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
         break;
     case D3DDDITSS_SRGBTEXTURE:
-        if (args->Value)
-            return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
+        if (args->Value > 1)
+            return triton9RejectTextureStageState(args, D3DDDIERR_INVALIDCALL);
         break;
     default:
         return triton9RejectTextureStageState(args, D3DDDIERR_NOTAVAILABLE);
@@ -1237,12 +1326,15 @@ triton9SetTexture(HANDLE hDevice, UINT stage, HANDLE resourceHandle)
     TRITON9_RESOURCE *resource = static_cast<TRITON9_RESOURCE *>(resourceHandle);
     HRESULT hr;
 
+    stage = triton9SamplerIndex(stage);
     if (!device || !device->shaderLockInitialized ||
         stage >= TRITON9_MAX_TEXTURE_STAGES)
         return E_INVALIDARG;
     if (device->deviceLost)
         return D3DDDIERR_DEVICEREMOVED;
     if (resource) {
+        if (stage == TRITON9_MAX_PIXEL_SAMPLERS)
+            return D3DDDIERR_NOTAVAILABLE;
         if (!triton9ResourceBelongsToDevice(device, resource))
             return D3DDDIERR_INVALIDCALL;
         hr = triton9PrepareResourceForHostRead(device, resource);
@@ -1335,10 +1427,29 @@ triton9PreparePipelineState(TRITON9_DEVICE *device)
     if (!device || !device->hostContext || !device->hostDevice ||
         !device->renderTarget)
         return E_INVALIDARG;
-    if (!triton9CpuDitherStateSupported(
-            device->renderStates[D3DDDIRS_DITHERENABLE],
-            triton9RenderTargetColorLayout(device->renderTarget)))
-        return D3DDDIERR_NOTAVAILABLE;
+    /* Setters may arrive in any order while changing passes. Validate the
+     * complete attachment set immediately before it can render. */
+    for (UINT target = 1; target < 4; ++target) {
+        const TRITON9_RESOURCE *resource = device->renderTargets[target];
+        if (resource && (resource->width != device->renderTarget->width ||
+                         resource->height != device->renderTarget->height ||
+                         resource->sampleCount != device->renderTarget->sampleCount ||
+                         resource->sampleQuality != device->renderTarget->sampleQuality))
+            return D3DDDIERR_INVALIDCALL;
+    }
+    if (device->depthStencil &&
+        (device->depthStencil->width < device->renderTarget->width ||
+         device->depthStencil->height < device->renderTarget->height ||
+         device->depthStencil->sampleCount != device->renderTarget->sampleCount ||
+         device->depthStencil->sampleQuality != device->renderTarget->sampleQuality))
+        return D3DDDIERR_INVALIDCALL;
+    const BOOL ditherEnabled = device->renderStates[D3DDDIRS_DITHERENABLE] != 0;
+    if (ditherEnabled != device->hostDitherEnabled) {
+        hr = tritonSharedBridgeSetDither(device->hostContext, ditherEnabled);
+        if (FAILED(hr))
+            return triton9MapDeviceFailure(device, hr);
+        device->hostDitherEnabled = ditherEnabled;
+    }
     /* The shader bridge calls this while it owns shaderLock. */
     hr = triton9CreateBlendState(device);
     if (SUCCEEDED(hr))
@@ -1349,11 +1460,23 @@ triton9PreparePipelineState(TRITON9_DEVICE *device)
         return hr;
     for (stage = 0; stage < TRITON9_MAX_TEXTURE_STAGES; ++stage) {
         views[stage] = nullptr;
+        if (stage == TRITON9_MAX_PIXEL_SAMPLERS)
+            continue;
         if (device->textures[stage]) {
-            if (device->textures[stage] == device->renderTarget)
-                return D3DDDIERR_INVALIDCALL;
-            hr = triton9GetShaderResourceView(device, device->textures[stage],
-                                               &views[stage]);
+            bool writableAlias = triton9ResourcesShareBacking(
+                device->textures[stage], device->depthStencil);
+            for (UINT target = 0; target < 4; ++target) {
+                writableAlias |= triton9ResourcesShareBacking(
+                    device->textures[stage], device->renderTargets[target]);
+            }
+            /* D3D9 permits a bound, unused sampler to alias an output.
+             * Hide the backend view for this draw, retaining logical state
+             * so that a later pass restores the original texture binding. */
+            if (writableAlias)
+                continue;
+            hr = triton9GetShaderResourceViewEx(device, device->textures[stage],
+                device->textureStageStates[stage][D3DDDITSS_SRGBTEXTURE] != 0,
+                &views[stage]);
             if (FAILED(hr))
                 return hr;
         }
@@ -1364,16 +1487,24 @@ triton9PreparePipelineState(TRITON9_DEVICE *device)
     hr = triton9ValidateViewport(device, &viewport, &scissor);
     if (FAILED(hr))
         return hr;
+    hr = triton9BindOutputs(device);
+    if (FAILED(hr))
+        return hr;
     triton9ColorToFloat(device->renderStates[D3DDDIRS_BLENDFACTOR], blendFactor);
     device->hostContext->OMSetBlendState(device->blendState, blendFactor,
-        device->renderStates[D3DDDIRS_MULTISAMPLEMASK]);
+        device->renderTarget->nonMaskable ? ~0u :
+            device->renderStates[D3DDDIRS_MULTISAMPLEMASK]);
     device->hostContext->OMSetDepthStencilState(device->depthStencilState,
         device->renderStates[D3DDDIRS_STENCILREF]);
     device->hostContext->RSSetState(device->rasterizerState);
     device->hostContext->RSSetViewports(1, &viewport);
     device->hostContext->RSSetScissorRects(1, &scissor);
-    device->hostContext->PSSetShaderResources(0, TRITON9_MAX_TEXTURE_STAGES, views);
-    device->hostContext->PSSetSamplers(0, TRITON9_MAX_TEXTURE_STAGES,
+    device->hostContext->PSSetShaderResources(0, TRITON9_MAX_PIXEL_SAMPLERS, views);
+    device->hostContext->PSSetSamplers(0, TRITON9_MAX_PIXEL_SAMPLERS,
                                        device->samplerStates);
+    device->hostContext->VSSetShaderResources(0, TRITON9_MAX_VERTEX_SAMPLERS,
+        views + TRITON9_VERTEX_SAMPLER_BASE);
+    device->hostContext->VSSetSamplers(0, TRITON9_MAX_VERTEX_SAMPLERS,
+        device->samplerStates + TRITON9_VERTEX_SAMPLER_BASE);
     return triton9CheckHostDevice(device);
 }

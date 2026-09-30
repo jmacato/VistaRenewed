@@ -37,7 +37,11 @@
 
 #define TRITON9_MAX_VERTEX_STREAMS 16u
 #define TRITON9_MAX_CONSTANT_BUFFERS 6u
-#define TRITON9_MAX_TEXTURE_STAGES 16u
+#define TRITON9_MAX_PIXEL_SAMPLERS 16u
+#define TRITON9_MAX_VERTEX_SAMPLERS 4u
+#define TRITON9_VERTEX_SAMPLER_BASE 17u
+#define TRITON9_MAX_TEXTURE_STAGES 21u
+#define TRITON9_MAX_RENDER_TARGETS 4u
 #define TRITON9_FIXED_TEXTURE_STAGES 8u
 #define TRITON9_RENDER_STATE_COUNT 210u
 #define TRITON9_TEXTURE_STAGE_STATE_COUNT 35u
@@ -90,6 +94,11 @@ typedef struct TRITON9_RESOURCE {
     HANDLE                      hOwnerDevice;
     HANDLE                      hRTResource;
     D3DKMT_HANDLE               hKMAllocation;
+    /* Export ownership survives failed allocation callbacks and cleanup.
+     * This reference can be the resolve wrapper rather than hostResource. */
+    UINT64                      pendingExportBlob;
+    ID3D11Resource             *pendingExportResource;
+    struct TRITON9_RESOURCE    *failedNext;
     D3DKMT_HANDLE               hImportAllocation;
     D3DKMT_HANDLE               hImportResource;
     D3DDDIFORMAT                format;
@@ -102,6 +111,22 @@ typedef struct TRITON9_RESOURCE {
     /* Primary flip-chain entries have independent backing and lifetimes. */
     struct TRITON9_RESOURCE    **chainSurfaces;
     BOOL                        independentAllocation;
+    /* All texture aliases share the root's single host allocation. Each
+     * materialized alias owns a COM reference; primary chains remain separate. */
+    struct TRITON9_RESOURCE     *textureOwner;
+    struct TRITON9_RESOURCE    **textureSurfaces;
+    UINT                        subresourceIndex, mipLevel, arraySlice;
+    UINT                        exposedMipLevels, arraySize;
+    UINT                        sampleCount, sampleQuality;
+    BOOL                        nonMaskable;
+    UINT                        blockWidth, blockHeight, bytesPerBlock;
+    BOOL                        isTexture, isCube, isVolume;
+    BOOL                        dynamic;
+    BOOL                        autogenGenerating, autogenDirty;
+    UINT                        autogenFilter;
+    ID3D11ShaderResourceView    *srgbShaderResourceView;
+    ID3D11RenderTargetView      *srgbRenderTargetView;
+    ID3D11Resource              *resolveResource;
     /* The D3D runtime assigns this resource to a VidPn source.  Preserve it
      * in every later allocation callback instead of assuming source zero. */
     UINT                        vidPnSourceId;
@@ -112,6 +137,12 @@ typedef struct TRITON9_RESOURCE {
     UINT                        fvf;
     SIZE_T                      shadowSize;
     BYTE                       *shadow;
+    /* A SYSTEMMEM buffer's last submitted bytes. Vista can modify its alias
+     * without advancing contentSerial, so every refresh compares the bytes. */
+    BYTE                       *systemMemorySnapshot;
+    SIZE_T                      systemMemorySnapshotSize;
+    ID3D11Resource             *systemMemorySnapshotHost;
+    UINT64                      systemMemorySnapshotSerial;
     ID3D11Resource             *hostResource;
     /* hostResource can exist while shared-allocation registration or an
      * initial upload is incomplete.  Only hostReady proves the full lazy
@@ -155,9 +186,16 @@ typedef struct TRITON9_RESOURCE {
     BOOL                        uploadOnUnlock;
     BOOL                        lockRangeValid;
     BOOL                        lockAreaValid;
+    BOOL                        lockBoxValid;
+    D3DDDIBOX                   lockBox;
     D3DDDIRANGE                 lockRange;
     RECT                        lockArea;
     void                       *pendingRename;
+    /* Event-backed DONOTWAIT readback snapshots are invalidated by any write
+     * to the canonical texture, including writes through another alias. */
+    UINT64                      contentSerial, readbackSerial;
+    ID3D11Query                 *readbackQuery;
+    BOOL                        readbackPending, readbackReady;
 } TRITON9_RESOURCE;
 
 static inline TRITON9_RESOURCE *
@@ -165,9 +203,62 @@ triton9ResourceSurface(TRITON9_RESOURCE *resource, UINT index)
 {
     if (!resource || index >= resource->surfaceCount)
         return NULL;
+    if (resource->textureSurfaces)
+        return resource->textureSurfaces[index];
     return resource->chainSurfaces ? resource->chainSurfaces[index] :
                                     (index == 0 ? resource : NULL);
 }
+
+static inline TRITON9_RESOURCE *
+triton9ResourceRoot(TRITON9_RESOURCE *resource)
+{
+    return resource && resource->textureOwner ? resource->textureOwner : resource;
+}
+
+static inline void
+triton9ResourceWritten(TRITON9_RESOURCE *resource)
+{
+    TRITON9_RESOURCE *root = triton9ResourceRoot(resource);
+    if (root) {
+        if (!++root->contentSerial) ++root->contentSerial;
+        if (root->wantsAutogenMipmap && !root->autogenGenerating) root->autogenDirty = TRUE;
+    }
+}
+
+static inline BOOL
+triton9ResourcesShareBacking(TRITON9_RESOURCE *a, TRITON9_RESOURCE *b)
+{
+    return a && b && triton9ResourceRoot(a) == triton9ResourceRoot(b);
+}
+
+static inline SIZE_T
+triton9ResourceByteOffset(const TRITON9_RESOURCE *r, UINT x, UINT y, UINT z)
+{
+    UINT bw = r->blockWidth ? r->blockWidth : 1;
+    UINT bh = r->blockHeight ? r->blockHeight : 1;
+    UINT bytes = r->bytesPerBlock ? r->bytesPerBlock : r->bytesPerPixel;
+    return (SIZE_T)z * r->slicePitch + (SIZE_T)(y / bh) * r->pitch + (SIZE_T)(x / bw) * bytes;
+}
+
+static inline BOOL
+triton9ResourceBoxValid(const TRITON9_RESOURCE *r, const D3D11_BOX *box)
+{
+    UINT bw = r->blockWidth ? r->blockWidth : 1;
+    UINT bh = r->blockHeight ? r->blockHeight : 1;
+    return box && box->left < box->right && box->top < box->bottom &&
+        box->front < box->back && box->right <= r->width &&
+        box->bottom <= r->height && box->back <= r->depth &&
+        !(box->left % bw) && !(box->top % bh) &&
+        (!(box->right % bw) || box->right == r->width) &&
+        (!(box->bottom % bh) || box->bottom == r->height);
+}
+
+typedef struct TRITON9_LIGHT {
+    UINT index;
+    D3DDDI_LIGHT data;
+    BOOL enabled;
+    struct TRITON9_LIGHT *next;
+} TRITON9_LIGHT;
 
 static inline BOOL
 triton9ResourceIsSystemMemory(const TRITON9_RESOURCE *resource)
@@ -176,6 +267,7 @@ triton9ResourceIsSystemMemory(const TRITON9_RESOURCE *resource)
 }
 
 typedef struct TRITON9_DEVICE {
+    TRITON9_RESOURCE *failedResources;
     HANDLE                      hRTDevice;
     TRITON9_ADAPTER            *adapter;
     D3DDDI_DEVICECALLBACKS     callbacks;
@@ -186,6 +278,7 @@ typedef struct TRITON9_DEVICE {
     UINT                        runtimeVersion;
     ID3D11Device1             *hostDevice;
     ID3D11DeviceContext1      *hostContext;
+    BOOL                      hostDitherEnabled;
     D3D_FEATURE_LEVEL          featureLevel;
     HANDLE                      hKMContext;
     void                       *kmCommandBuffer;
@@ -195,6 +288,8 @@ typedef struct TRITON9_DEVICE {
     D3DDDI_PATCHLOCATIONLIST    *kmPatchLocationList;
     UINT                        kmPatchLocationListSize;
     BOOL                        presentConsumptionReported;
+    /* Auto-reset event reused under shaderLock; one outstanding Present. */
+    HANDLE                      presentConsumptionEvent;
     BOOL                        runtimeContextInitialized;
     UINT                        runtimeContextId;
     BOOL                        deviceLost;
@@ -241,7 +336,8 @@ typedef struct TRITON9_DEVICE {
     TRITON9_CONSTANT_BUFFER     pixelConstants[TRITON9_MAX_CONSTANT_BUFFERS];
     TRITON9_CONSTANT_BUFFER     fixedVertexFloatConstants;
     TRITON9_CONSTANT_BUFFER     fixedPixelFloatConstants;
-    TRITON9_RESOURCE           *renderTarget;
+    TRITON9_RESOURCE           *renderTarget; /* RT0 compatibility alias */
+    TRITON9_RESOURCE           *renderTargets[TRITON9_MAX_RENDER_TARGETS];
     TRITON9_RESOURCE           *depthStencil;
     UINT                        renderStates[TRITON9_RENDER_STATE_COUNT];
     /* Keep the material supplied by the D3D9 runtime even while the current
@@ -267,15 +363,46 @@ typedef struct TRITON9_DEVICE {
     BOOL                        rasterizerStateDirty;
     BOOL                        samplerStatesDirty[TRITON9_MAX_TEXTURE_STAGES];
     D3DMATRIX                   worldTransform;
+    D3DMATRIX                   worldTransforms[256];
+    FLOAT                       clipPlanes[6][4];
+    BOOL                        wFogEnable;
+    TRITON9_LIGHT              *lights;
+    void                       *pointState;
     D3DMATRIX                   viewTransform;
     D3DMATRIX                   projectionTransform;
+    D3DMATRIX                   textureTransforms[TRITON9_FIXED_TEXTURE_STAGES];
     /* Internal Present completion gate.  It is separate from application
      * D3D9 query handles and is reused for the lifetime of this device. */
     ID3D11Fence                 *presentFence;
     ID3D11DeviceContext4        *presentContext;
     UINT64                      presentFenceValue;
+    UINT                        presentProfileState;
+    UINT                        presentProfileFrames;
+    UINT64                      presentProfileTicks[4];
+    UINT64                      presentProfileMaxTicks[4];
+    void                       *traceMap;
+    HANDLE                      traceMapHandle;
+    DWORD                       traceLastOpen;
+    BOOL                        traceTriedOpen;
+    UINT64                      traceRun, traceFrame;
+    UINT                        traceContext;
+    ID3D11Query                 *traceGpuBegin, *traceGpuEnd, *traceGpuDisjoint;
+    UINT64                      traceGpuRun;
+    BOOL                        traceGpuArmed;
+    UINT                        traceGpuEvery, traceGpuSampleCount;
+    UINT64                      traceGpuSampleRun;
     void                       *queries;
 } TRITON9_DEVICE;
+
+BOOL triton9TraceEnabled(TRITON9_DEVICE *device);
+void triton9TraceBegin(TRITON9_DEVICE *device, UINT64 ticks, UINT flags, UINT kind);
+void triton9TraceEventAt(TRITON9_DEVICE *device, UINT kind, UINT64 ticks, UINT64 a, UINT64 b, UINT64 c);
+void triton9TraceEvent(TRITON9_DEVICE *device, UINT kind, UINT64 a, UINT64 b, UINT64 c);
+void triton9TraceClose(TRITON9_DEVICE *device);
+void triton9TraceGpuStart(TRITON9_DEVICE *device);
+void triton9TraceGpuFinish(TRITON9_DEVICE *device);
+void triton9TraceGpuResolve(TRITON9_DEVICE *device);
+void triton9TraceGpuRelease(TRITON9_DEVICE *device);
 
 static inline BOOL
 triton9ResourceBelongsToDevice(const TRITON9_DEVICE *device,
@@ -291,6 +418,8 @@ typedef struct TRITON9_FORMAT {
     UINT                        bytesPerPixel;
     UINT                        operations;
     BOOL                        depthStencil;
+    UINT                        blockWidth, blockHeight, bytesPerBlock;
+    DXGI_FORMAT                 resourceFormat, srgbFormat;
 } TRITON9_FORMAT;
 
 /* The format table calls this symbol before it exposes D24S8.  The clear
@@ -309,6 +438,19 @@ const TRITON9_FORMAT *triton9FormatLookup(D3DDDIFORMAT format);
 const TRITON9_FORMAT *triton9FormatLookupHost(DXGI_FORMAT format);
 UINT triton9FormatCount(void);
 void triton9CopyFormatOperations(FORMATOP *destination, UINT count);
+BOOL triton9FormatSupportsSrgb(D3DDDIFORMAT format);
+UINT triton9FormatMultisampleQuality(D3DDDIFORMAT format, UINT samples);
+HRESULT triton9GetShaderResourceViewEx(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                                     BOOL srgb, ID3D11ShaderResourceView **view);
+HRESULT triton9GetRenderTargetViewEx(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                                   BOOL srgb, ID3D11RenderTargetView **view);
+HRESULT triton9BindOutputs(TRITON9_DEVICE *device);
+HRESULT triton9CopyStagingBoxToShadow(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                                    const D3D11_BOX *box);
+HRESULT triton9ResolveResource(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+                              ID3D11Resource **host, UINT *subresource);
+HRESULT APIENTRY triton9VolBlt(HANDLE hDevice, const D3DDDIARG_VOLUMEBLT *args);
+void triton9DestroyLights(TRITON9_DEVICE *device);
 
 /* Neptune's internal D3D11 proxy creator.  It deliberately has no import
  * from d3d11.dll; it talks to Neptune's generated guest transport. */
@@ -330,7 +472,11 @@ HRESULT triton9EnsureHostDevice(TRITON9_DEVICE *device);
 
 HRESULT APIENTRY triton9CreateResource(HANDLE hDevice,
                                        D3DDDIARG_CREATERESOURCE *args);
+HRESULT triton9UpdateHostTexture(TRITON9_DEVICE *device, TRITON9_RESOURCE *resource,
+    ID3D11DeviceContext *context, ID3D11Resource *destination, UINT subresource,
+    const D3D11_BOX *box, const BYTE *source, UINT rowPitch, UINT slicePitch);
 HRESULT APIENTRY triton9DestroyResource(HANDLE hDevice, HANDLE hResource);
+HRESULT triton9DestroyFailedResources(TRITON9_DEVICE *device);
 /* CreateDeviceEx allocates its bootstrap resources before it returns the
  * runtime device to the caller.  Materialize their Neptune backing only from
  * a later operational callback, after Vista has published that device. */
@@ -338,6 +484,9 @@ HRESULT triton9EnsureResourceHost(TRITON9_DEVICE *device,
                                   TRITON9_RESOURCE *resource);
 HRESULT triton9PrepareResourceForHostRead(TRITON9_DEVICE *device,
                                           TRITON9_RESOURCE *resource);
+HRESULT triton9PrepareBufferRangeForHostRead(TRITON9_DEVICE *device,
+                                             TRITON9_RESOURCE *resource,
+                                             UINT first, UINT end);
 /* Propagate a completed write to Vista's SYSTEMMEM backing into an existing
  * host mirror.  This never creates a mirror for a CPU-only resource. */
 HRESULT triton9CommitSystemMemoryWrite(TRITON9_DEVICE *device,
@@ -383,6 +532,7 @@ HRESULT APIENTRY triton9SetDepthStencil(HANDLE hDevice,
 HRESULT APIENTRY triton9Clear(HANDLE hDevice, const D3DDDIARG_CLEAR *args,
                               UINT rectCount, const RECT *rects);
 HRESULT APIENTRY triton9Blt(HANDLE hDevice, const D3DDDIARG_BLT *args);
+HRESULT triton9CompleteRedirectedPresent(TRITON9_DEVICE *device);
 HRESULT triton9StretchBlt(TRITON9_DEVICE *device, TRITON9_RESOURCE *source,
                           TRITON9_RESOURCE *destination,
                           const RECT *sourceRect, const RECT *destinationRect,
@@ -518,14 +668,26 @@ static inline HRESULT triton9CheckHostDevice(TRITON9_DEVICE *device)
                                           : (IUnknown *)device->hostDevice;
     if (!triton9TransportHealthy(transportObject))
         return triton9DeviceRemoved(device);
+    return S_OK;
+}
+
+/* The corrected GetDeviceRemovedReason override is a synchronous RPC. Calling it
+ * after every state change/draw drains the command stream and defeats async
+ * submission. Poll at Present/Flush boundaries; hot DDIs still detect a
+ * poisoned transport and propagate failures returned by their host calls. */
+static inline HRESULT triton9PollHostDevice(TRITON9_DEVICE *device)
+{
+    HRESULT hr = triton9CheckHostDevice(device);
+    if (FAILED(hr))
+        return hr;
 #ifdef __cplusplus
     hr = device->hostDevice->GetDeviceRemovedReason();
 #else
     hr = ID3D11Device1_GetDeviceRemovedReason(device->hostDevice);
 #endif
-    if (FAILED(hr) || !triton9TransportHealthy(transportObject))
+    if (FAILED(hr))
         return triton9DeviceRemoved(device);
-    return S_OK;
+    return triton9CheckHostDevice(device);
 }
 
 #ifdef __cplusplus

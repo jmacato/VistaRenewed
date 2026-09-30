@@ -141,11 +141,16 @@ fence_slot(struct npt_d3d11_fence_aux *aux)
 static UINT64 NPT_STDMETHODCALLTYPE
 fence_GetCompletedValue_override(void *self)
 {
+   struct npt_device *dev = npt_com_self_device(self);
+   struct npt_ring *ring = npt_com_self_ring(self);
+   if (!dev || !npt_ring_is_healthy(dev->ring) || !npt_ring_is_healthy(ring))
+      return UINT64_MAX;
    struct npt_d3d11_fence_aux *aux = fence_aux(self);
    struct npt_d3d11_fence_feedback_slot *slot = fence_slot(aux);
    if (!slot || !aux->base.registered) {
       /* Env opt-out, pool OOM, or QI-routed wrapper. */
-      return npt_id3d11fence_default_GetCompletedValue(self);
+      UINT64 value = npt_id3d11fence_default_GetCompletedValue(self);
+      return npt_ring_is_healthy(ring) ? value : UINT64_MAX;
    }
    /* Acquire pairs with the host's release-CAS.  Monotonic fences
     * mean any observed value is a valid lower bound. */

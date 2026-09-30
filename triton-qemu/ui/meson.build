@@ -3,6 +3,7 @@ specific_ss.add(when: ['CONFIG_SYSTEM_ONLY'], if_true: pixman)   # for the inclu
 specific_ss.add(when: ['CONFIG_SYSTEM_ONLY'], if_true: opengl)   # for the include path
 
 system_ss.add(png)
+system_ss.add(files('triton-trace.c'), zlib)
 system_ss.add(files(
   'clipboard.c',
   'console.c',
@@ -65,6 +66,10 @@ if opengl.found()
                if_true: files('shader.c', 'console-gl.c'))
   opengl_ss.add(when: [egl, opengl],
                if_true: files('egl-helpers.c', 'egl-context.c'))
+  if host_os == 'linux'
+    opengl_ss.add(when: [egl, opengl],
+                 if_true: files('egl-external-copy.c'))
+  endif
   ui_modules += {'opengl' : opengl_ss}
 endif
 

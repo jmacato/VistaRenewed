@@ -9,6 +9,7 @@
 ****************************************************************************/
 
 #pragma once
+#include "ShaderValidation.h"
 
 #include "ShaderConvInternal.h"
 
@@ -56,83 +57,7 @@ namespace ShaderConv
 inline UINT
 __getInstrLength( DWORD dwInstr, DWORD dwVersion )
 {
-    const D3DSHADER_INSTRUCTION_OPCODE_TYPE opCode =
-            (D3DSHADER_INSTRUCTION_OPCODE_TYPE)( dwInstr & D3DSI_OPCODE_MASK );
-
-    if ( D3DSIO_COMMENT == opCode )
-    {
-        return ( ( (UINT)dwInstr & D3DSI_COMMENTSIZE_MASK ) >> D3DSI_COMMENTSIZE_SHIFT ) + 1;
-    }
-    else
-    if ( D3DSIO_DEF == opCode ||
-         D3DSIO_DEFI == opCode )
-    {
-        return 6;
-    }
-    else
-    if ( D3DSIO_DEFB == opCode )
-    {
-        return 3;
-    }
-    else
-    if ( __IS_PS( dwVersion ) ||
-         dwVersion >= D3DVS_VERSION(2,0) )
-    {
-        return D3DSI_GETINSTLENGTH( dwInstr ) + 1;
-    }
-    else
-    {
-        switch ( opCode )
-        {
-        case D3DSIO_DCL :
-            return 3;
-
-        case D3DSIO_DEF :
-            return 6;
-
-        // 0 source instructions
-        case D3DSIO_END :
-        case D3DSIO_NOP :
-            return 1;
-
-        // 1 source instructions
-        case D3DSIO_EXP :
-        case D3DSIO_EXPP:
-        case D3DSIO_FRC :
-        case D3DSIO_LIT :
-        case D3DSIO_LOG :
-        case D3DSIO_LOGP:
-        case D3DSIO_MOV :
-        case D3DSIO_RCP :
-        case D3DSIO_RSQ :
-            return 3;
-
-        // 2 source instructions
-        case D3DSIO_ADD  :
-        case D3DSIO_DP3  :
-        case D3DSIO_DP4  :
-        case D3DSIO_DST  :
-        case D3DSIO_M4x4 :
-        case D3DSIO_M4x3 :
-        case D3DSIO_M3x4 :
-        case D3DSIO_M3x3 :
-        case D3DSIO_M3x2 :
-        case D3DSIO_MAX  :
-        case D3DSIO_MIN  :
-        case D3DSIO_MUL  :
-        case D3DSIO_SGE  :
-        case D3DSIO_SLT  :
-            return 4;
-
-        // 3 source instructions
-        case D3DSIO_MAD  :
-            return 5;
-
-        default:
-            //WarpError("Invalid instruction opCode.");
-            return 1;
-        }
-    }
+    return LegacyInstructionLength(dwInstr, dwVersion);
 }
 
 inline BYTE
@@ -372,7 +297,7 @@ enum ePSInputRegister
 
 inline bool IsImplicitFogCalculationNeeded(const RasterStates& rasterStates, UINT version)
 {
-    return version < D3DPS_VERSION(3, 0) && rasterStates.FogEnable;
+    return (version < D3DPS_VERSION(3, 0) || rasterStates.FixedFunctionPixel) && rasterStates.FogEnable;
 }
 
 // Wraps CShaderASM so that extra commands can be patched in at EmitInstruction.

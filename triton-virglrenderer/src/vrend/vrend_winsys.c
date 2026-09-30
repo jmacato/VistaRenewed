@@ -227,6 +227,19 @@ int vrend_winsys_get_attrs_for_texture(uint32_t tex_id, uint32_t format, int *fo
    return 0;
 }
 
+int vrend_winsys_export_texture_query(uint32_t tex_id,
+                                      struct virgl_renderer_export_query *query)
+{
+#ifdef ENABLE_GBM
+   if (egl)
+      return virgl_egl_export_texture_query(egl, tex_id, query);
+#else
+   (void)tex_id;
+   (void)query;
+#endif
+   return -1;
+}
+
 int vrend_winsys_get_fd_for_texture(uint32_t tex_id, int *fd)
 {
 #ifdef ENABLE_GBM

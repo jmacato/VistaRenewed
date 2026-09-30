@@ -63,9 +63,8 @@ struct npt_d3d_map_ring {
 void npt_d3d_map_ring_init(struct npt_d3d_map_ring *r,
                            struct npt_com_base *com);
 
-/* Records aligned_slot_size and ensures NPT_D3D_MAP_SLOT_INIT slots
- * are allocated.  Idempotent on the same size; logs and rejects size
- * drift (buffer/texture descs are immutable). */
+/* Ensures at least aligned_slot_size bytes per slot. A larger host pitch
+ * can grow the slots after pending uploads are drained; never shrinks them. */
 bool npt_d3d_map_ring_alloc_shmem(struct npt_d3d_map_ring *r,
                                   uint32_t aligned_slot_size);
 
@@ -111,6 +110,8 @@ struct npt_d3d11_buffer *npt_d3d11_buffer_cast(void *resource);
 
 void npt_d3d11_buffer_set_byte_width(struct npt_d3d11_buffer *b, uint32_t bytes);
 uint32_t npt_d3d11_buffer_get_byte_width(struct npt_d3d11_buffer *b);
+void npt_d3d11_buffer_set_bind_flags(struct npt_d3d11_buffer *b, uint32_t flags);
+uint32_t npt_d3d11_buffer_get_bind_flags(struct npt_d3d11_buffer *b);
 
 bool npt_d3d11_buffer_ensure_map_shmem(struct npt_d3d11_buffer *b);
 /* Slot 0's res_id (sync MAP_RESOURCE always lands on slot 0). */
@@ -170,7 +171,7 @@ struct npt_d3d11_texture_desc {
 };
 
 /* Must be called before any Map(); otherwise dimensions are 0 and
- * the cached bytes-per-pixel is 0. */
+ * no row layout is available. */
 void npt_d3d11_texture_set_desc(struct npt_d3d11_texture *t,
                                 const struct npt_d3d11_texture_desc *d);
 
@@ -185,14 +186,23 @@ void npt_d3d11_texture_fill_desc3d(const struct npt_d3d11_texture *t,
 void npt_d3d11_texture_fill_desc3d1(const struct npt_d3d11_texture *t,
                                     D3D11_TEXTURE3D_DESC1 *out);
 
-/* False for textures that arrived via swapchain GetBuffer /
- * OpenSharedResource; GetDesc falls back to the sync round-trip. */
+/* True once known-create or lazy imported metadata is published and the
+ * format has a supported transfer-row layout. This accessor performs no RPC. */
 bool npt_d3d11_texture_has_desc(const struct npt_d3d11_texture *t);
 
-/* Mappable = USAGE_DYNAMIC + CPU_ACCESS_WRITE + known-bpp format. */
+/* Hydrate imported wrappers on first use, after the host object exists.
+ * Typed GetDesc callers supply their dimension; Map/Update use UNKNOWN.
+ * extended requests TextureLayout through the caller's *Texture*1 tier. */
+bool npt_d3d11_texture_ensure_desc(struct npt_d3d11_texture *t,
+                                  D3D11_RESOURCE_DIMENSION dimension,
+                                  bool extended);
+
+/* Dynamic CPU-write or staging CPU-access resource with a known row layout,
+ * including block-compressed formats. */
 bool npt_d3d11_texture_is_mappable(const struct npt_d3d11_texture *t);
 
 bool npt_d3d11_texture_ensure_map_shmem(struct npt_d3d11_texture *t);
+bool npt_d3d11_texture_grow_map_shmem(struct npt_d3d11_texture *t, uint32_t min_size);
 /* Slot 0's res_id (sync MAP_RESOURCE always lands on slot 0). */
 uint32_t npt_d3d11_texture_get_map_shmem_res_id(const struct npt_d3d11_texture *t);
 /* Per-slot res_id for async Unmap on the rename ring. */
@@ -238,9 +248,21 @@ uint32_t npt_d3d11_texture_get_cached_depth_pitch(const struct npt_d3d11_texture
 void npt_d3d11_texture_set_cached_pitches(struct npt_d3d11_texture *t,
                                           uint32_t row_pitch, uint32_t depth_pitch);
 
+uint32_t npt_d3d11_texture_get_subresource_map_byte_size(const struct npt_d3d11_texture *t,
+                                                        uint32_t subresource,
+                                                        uint32_t row_pitch,
+                                                        uint32_t depth_pitch);
 uint32_t npt_d3d11_texture_get_subresource_byte_size(const struct npt_d3d11_texture *t,
                                                      uint32_t subresource,
                                                      uint32_t row_pitch);
+
+/* Bounds a texel update box and describes only its occupied memory rows. */
+bool npt_d3d11_texture_get_update_layout(const struct npt_d3d11_texture *t,
+                                         uint32_t subresource,
+                                         const D3D11_BOX *box,
+                                         D3D11_BOX *region,
+                                         uint32_t *row_bytes, uint32_t *rows,
+                                         uint32_t *block_height, bool *planar);
 
 /* Returns the full-pitch footprint of a no-box UpdateSubresource and
  * stores the D3D-guaranteed readable extent of its source in
@@ -267,6 +289,7 @@ DXGI_FORMAT npt_d3d11_texture_get_format(const struct npt_d3d11_texture *t);
  * one row of memory, and the block-compressed families pack four texel rows
  * into one row of 4x4 blocks.  Valid for a partial (box) region. */
 uint32_t npt_dxgi_format_block_rows(DXGI_FORMAT fmt, uint32_t texel_rows);
+uint32_t npt_dxgi_format_block_height(DXGI_FORMAT fmt);
 uint32_t npt_dxgi_format_row_bytes(DXGI_FORMAT fmt, uint32_t texel_width);
 
 /* Rows of memory in one whole 2D slice of a mip.  Adds the chroma-plane rows
@@ -283,6 +306,7 @@ uint32_t npt_dxgi_format_subresource_rows(DXGI_FORMAT fmt, uint32_t height);
 struct npt_d3d11_buffer_aux {
    struct npt_com_base *com;
    uint32_t byte_width;
+   uint32_t bind_flags;
    struct npt_d3d_map_ring map_ring;
 };
 
@@ -293,6 +317,11 @@ void npt_d3d11_buffer_aux_init(struct npt_com_base *com,
  * the rename ring shared with the buffer aux. */
 struct npt_d3d11_texture_aux {
    struct npt_com_base *com;
+   /* Base fields are immutable after publication. A base-only import may
+    * later publish TextureLayout without rewriting those fields. The mutex
+    * serializes lazy RPCs, outside the COM wrapper-cache lock. */
+   mtx_t desc_mutex;
+   _Atomic unsigned desc_state; /* 0 = absent, 1 = base, 2 = extended */
    uint32_t width, height, depth;
    uint32_t mip_levels, array_size;
    DXGI_FORMAT format;
@@ -300,8 +329,8 @@ struct npt_d3d11_texture_aux {
    uint32_t usage, cpu_access_flags, bind_flags, misc_flags;
    uint32_t sample_count, sample_quality;
    D3D11_TEXTURE_LAYOUT texture_layout;
-   /* Pitches from the first sync MAP_RESOURCE; reused by the
-    * WRITE_DISCARD / WRITE_NO_OVERWRITE fast path. */
+   /* Pitches from the last sync MAP_RESOURCE; reusable by the fast path
+    * only for last_map_subresource. */
    uint32_t cached_row_pitch, cached_depth_pitch;
    /* Per-Map state for the matching Unmap. */
    uint32_t last_map_subresource;

@@ -250,6 +250,9 @@ public:
         m_bLastInstrBreak( false )
     {
         m_loopNestingDepth = 0xff;
+        LegacyFunctionRanks(pShaderDesc->GetInstructions(),
+            pShaderDesc->GetCodeSize() / sizeof(DWORD), m_functionRanks);
+        m_functionLoopBank = m_functionRanks[2048] * D3DVS20_MAX_STATICFLOWCONTROLDEPTH;
     }
 
     virtual ~CContext()
@@ -472,9 +475,23 @@ protected:
 
     COperandBase EmitInputOperand(DWORD dwRegIndex, UINT sizzle = 0) const;
 
+    void RestoreLoopAddress()
+    {
+        if (m_loopNestingDepth == 0xff || m_inputRegs.aL == INVALID_INDEX)
+            return;
+        for (int depth = m_loopNestingDepth; depth >= 0; --depth) {
+            if (m_countedLoops[depth]) {
+                m_pShaderAsm->EmitInstruction(CInstruction(D3D10_SB_OPCODE_MOV,
+                    CTempOperandDst(m_inputRegs.aL),
+                    CTempOperand4(m_loopRegs[depth], __SWIZZLE_Y)));
+                return;
+            }
+        }
+    }
+
     void AllocateLoopRegister()
     {
-        m_loopRegs[m_loopNestingDepth] = m_nextLoopRegister++;
+        m_loopRegs[m_loopNestingDepth] = m_nextLoopRegister + m_functionLoopBank + m_loopNestingDepth;
     }
 
     UINT GetLoopRegister() const
@@ -579,6 +596,9 @@ protected:
 
     BYTE m_defaultInputRegs[MAX_INPUT_REGS];
 
+    BYTE m_functionRanks[2049] = {};
+    UINT m_functionLoopBank = 0;
+    bool m_countedLoops[D3DVS20_MAX_STATICFLOWCONTROLDEPTH] = {};
     UINT m_loopRegs[D3DVS20_MAX_STATICFLOWCONTROLDEPTH];
     BYTE m_toggleTEXM3x3PAD;
     BYTE m_controlFlowDepth;

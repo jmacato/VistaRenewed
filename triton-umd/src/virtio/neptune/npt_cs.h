@@ -47,6 +47,7 @@ typedef int npt_object_type;
 struct npt_cs_encoder {
    uint8_t *cur;
    const uint8_t *end;
+   bool fatal;
 };
 
 /*
@@ -80,9 +81,16 @@ npt_cs_encoder_write(struct npt_cs_encoder *enc,
                      const void *val,
                      size_t val_size)
 {
-   assert(val_size <= size);
-   if (unlikely(size > (size_t)(enc->end - enc->cur)))
+   /* Submission initialization may reject a failed ring. Generated thunks
+    * still visit their encoders; discard writes and let submission/reply
+    * handling propagate the transport failure instead of crashing DWM. */
+   if (unlikely(!enc))
       return;
+   if (unlikely(enc->fatal || val_size > size ||
+                size > (size_t)(enc->end - enc->cur))) {
+      enc->fatal = true;
+      return;
+   }
    if (enc->cur != val)
       memcpy(enc->cur, val, val_size);
    enc->cur += size;
@@ -91,7 +99,8 @@ npt_cs_encoder_write(struct npt_cs_encoder *enc,
 static inline void
 npt_cs_encoder_set_fatal(const struct npt_cs_encoder *enc)
 {
-   (void)enc;
+   if (enc)
+      ((struct npt_cs_encoder *)enc)->fatal = true;
 }
 
 static inline void

@@ -1,43 +1,50 @@
-# Triton for Windows Vista
+# Triton for Windows Vista — developer preview
 
-This project ports osy's Triton graphics driver to Windows Vista with WDDM 1.0
-and Direct3D 9 interfaces. Neptune sends guest graphics commands through QEMU
-to the Linux host, where native DXVK translates Direct3D 11 operations to Vulkan.
+This repository adapts osy's Triton/Neptune virtual graphics stack to Windows
+Vista. It combines Vista WDDM 1.0 drivers, Direct3D 9 and 10 frontends, a matching
+QEMU/Neptune host renderer, and native DXVK on Linux/Vulkan. The original
+Direct3D 11 route and macOS source components remain in the tree.
 
-The driver is experimental. Aero Glass has worked in the Vista Ultimate SP2 x64
-checked development guest on an Intel Vulkan host. Both x64 and x86 drivers
-compile; x86 guest compatibility and complete Direct3D 9 conformance are not
-established. Boot and shutdown blue screens have occurred. CI builds and checks
-installer packages but does not boot Vista or certify the driver.
+This is experimental source for developers. Full Direct3D 9/10 compatibility,
+smooth Aero, and acceptable game performance are **not established**. In
+particular, a SuperTuxKart run recorded only about 10–12 actual QEMU-window
+updates per second. Guest FPS alone cannot close that regression. Tests of an
+older development build do not validate a newly built installer.
 
-## Build
+## Start here
 
-- [Driver installer ISO and CI](docs/CI.md)
-- [Linux host and driver build instructions](docs/BUILDING.md)
-- [Installer instructions](docs/INSTALL-ISO.txt)
-- [Architecture and source map](docs/ARCHITECTURE.md)
-- [Upstream sources and licenses](docs/UPSTREAM.md)
+1. Clone normally, without `--recurse-submodules`.
+2. Restore the pinned host sources with `python3 scripts/bootstrap_sources.py`
+   and `python3 scripts/bootstrap_qemu_sources.py`.
+3. Build the toolchain image: `bash scripts/dev-container.sh build`.
+4. Follow [BUILDING](docs/BUILDING.md) for the host, x64/x86 drivers and packages.
 
-Clone without `--recurse-submodules`. To build the Linux host backend, restore
-the pinned DXVK source and dependencies from the repository root:
+The bootstrap restores the bundled DXVK commit and applies the curated DXVK and
+shader-compiler patches. A recursive submodule checkout alone is insufficient.
+Microsoft SDK/WDK inputs and a licensed Vista installation are separate inputs;
+no Windows installation media, VM disk or private signing key is included.
 
-```sh
-python3 scripts/bootstrap_sources.py
-```
+- [Build and test workflow](docs/BUILDING.md)
+- [Architecture and paired-component contracts](docs/ARCHITECTURE.md)
+- [Installer/CI behavior](docs/CI.md) and [installation instructions](docs/INSTALL-ISO.txt)
+- [Upstream provenance and licensing decisions](docs/UPSTREAM.md)
+- [Release validation requirements](docs/RELEASE-VALIDATION.md)
+- [Contributor/agent presentation requirements](AGENTS.md)
 
-`patches/dxvk-neptune.bundle` contains the additional DXVK source commit needed
-by the host build. Ordinary recursive submodule initialization cannot fetch that
-commit from upstream. The guest driver ISO build does not require DXVK.
+## Source layout
 
-## Layout
+| Path | Contents |
+| --- | --- |
+| `triton-kmd/` | Vista kernel display driver |
+| `triton-umd/` | Guest user-mode drivers and transport |
+| `triton-qemu/`, `triton-virglrenderer/` | Matching VM, renderer and presentation code |
+| `triton-dxvk/`, `patches/` | Pinned host backend and downstream source patches |
+| `triton-dxmt/`, `triton-angle/`, `triton-libepoxy/` | Retained upstream platform components |
+| `scripts/`, `packaging/` | Bootstrap, builds, validators and installer source |
+| `tests/`, component test directories | CPU, native GPU and guest tests |
+| `docs/` | Build, architecture, installation and validation documentation |
 
-- `triton-*`: driver, host renderer and dependency sources, with upstream licenses.
-- `scripts/`: source bootstrap, build, validation, signing and packaging tools.
-- `packaging/`: installer service source, Windows resources and package INF.
-- `tests/`: native host graphics test source.
-- `docs/`: build, installation, architecture and licensing documentation.
-- `.github/workflows/`: automated driver ISO build.
-
-Build intermediates go in ignored `build/` and component build directories;
-installer outputs go in ignored `dist/`. VM disks, downloaded development kits,
-local signing identities and generated binaries are excluded from Git.
+Upstream component layouts and licenses are preserved. Build output belongs in
+ignored `build/`, component build directories, `host-linux/` and `dist/`; test
+captures belong in `test-artifacts/`. See [UPSTREAM](docs/UPSTREAM.md) for the
+unresolved license grant on standalone helpers before redistributing them.

@@ -230,7 +230,7 @@ npt_device_wrapper_cache_foreach(struct npt_device *dev,
    free(snapshot);
 }
 
-#if !defined(__WINE__) && !defined(NPT_D3D9_RUNTIME_DDI)
+#if !defined(__WINE__) && !defined(NPT_D3D9_RUNTIME_DDI) && !defined(NPT_D3D10_RUNTIME_DDI)
 static struct npt_device *g_npt_device;
 static mtx_t g_npt_device_mutex;
 static _Atomic int g_npt_device_mutex_inited;
@@ -264,7 +264,7 @@ npt_host_workaround_flags(void)
    uint32_t c = atomic_load_explicit(&g_host_workarounds, memory_order_relaxed);
    if (c & NPT_WA_FLAGS_PRESENT)
       return c & ~(uint32_t)NPT_WA_FLAGS_PRESENT;
-#if !defined(__WINE__) && !defined(NPT_D3D9_RUNTIME_DDI)
+#if !defined(__WINE__) && !defined(NPT_D3D9_RUNTIME_DDI) && !defined(NPT_D3D10_RUNTIME_DDI)
    struct npt_device *dev = g_npt_device;
    if (dev && dev->ring && dev->ring->wa_word) {
       uint32_t w = atomic_load_explicit(dev->ring->wa_word, memory_order_acquire);
@@ -434,10 +434,10 @@ npt_device_destroy(struct npt_device *dev)
    free(dev);
 }
 
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
 
 /* Runtime callback handles and rotating DMA buffers belong to one outer
- * D3D9 device. Sharing this transport across devices leaves stale handles
+ * runtime device. Sharing this transport across devices leaves stale handles
  * as soon as the original owner is destroyed. */
 struct npt_device *
 npt_device_acquire(void)
@@ -560,7 +560,7 @@ npt_device_release(struct npt_device *dev)
 void
 npt_device_retain(struct npt_device *dev)
 {
-#if defined(NPT_D3D9_RUNTIME_DDI)
+#if defined(NPT_D3D9_RUNTIME_DDI) || defined(NPT_D3D10_RUNTIME_DDI)
    if (dev)
       atomic_fetch_add_explicit(&dev->runtime_refs, 1, memory_order_relaxed);
 #else

@@ -33,6 +33,7 @@
 #include "viogpu_adapter.h"
 #include "viogpu_device.h"
 #include "viogpu_pnp_fixup.h"
+#include "viogpu_trace.h"
 #if !DBG
 #include "driver.tmh"
 #endif
@@ -93,6 +94,7 @@ void InitializeDebugPrints(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Re
 extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_STRING *pRegistryPath)
 {
     PAGED_CODE();
+    VioGpuTraceInitialize();
     WPP_INIT_TRACING(pDriverObject, pRegistryPath)
     DbgPrint(TRACE_LEVEL_FATAL, ("---> VIOGPU FULL build on on %s %s\n", __DATE__, __TIME__));
     DRIVER_INITIALIZATION_DATA InitialData = {0};
@@ -213,6 +215,13 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
         DbgPrint(TRACE_LEVEL_ERROR, ("DxgkInitialize failed with Status: 0x%X\n", Status));
     }
 
+#if defined(VIOGPU_TARGET_VISTA)
+    // The synthetic display needs sub-ms scheduling. Own the request for
+    // the driver lifetime, outside power IRPs and flip-thread stop waits.
+    if (NT_SUCCESS(Status))
+        ExSetTimerResolution(5000, TRUE);
+#endif
+
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return Status;
 }
@@ -228,8 +237,12 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
 
 VOID VioGpu3DUnload(VOID)
 {
+    VioGpuTraceShutdown();
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--> %s\n", __FUNCTION__));
+#if defined(VIOGPU_TARGET_VISTA)
+    ExSetTimerResolution(0, FALSE);
+#endif
     WPP_CLEANUP(NULL);
 }
 
@@ -668,13 +681,7 @@ VioGpu3DSetPointerPosition(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOI
         return STATUS_UNSUCCESSFUL;
     }
 
-    // Hardware pointer support is intentionally not advertised in
-    // DXGK_DRIVERCAPS, so win32k/CDD draws the cursor into the primary. Vista
-    // still calls this DDI with Visible=FALSE while it disables all primaries.
-    // That call is an acknowledgement, not an unsupported hardware request;
-    // STATUS_NOT_IMPLEMENTED triggers the checked dxgkrnl DDM warning and
-    // prevents CDD from finishing display enable.
-    return STATUS_SUCCESS;
+    return pAdapter->SetPointerPosition(pSetPointerPosition);
 }
 
 NTSTATUS
@@ -696,7 +703,7 @@ VioGpu3DSetPointerShape(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETPOINTE
                  ("<---> %s VioGpu (%p) is being called when not active!\n", __FUNCTION__, pAdapter));
         return STATUS_UNSUCCESSFUL;
     }
-    return STATUS_NOT_IMPLEMENTED;
+    return pAdapter->SetPointerShape(pSetPointerShape);
 }
 
 NTSTATUS
@@ -1586,12 +1593,7 @@ VioGpu3DDdiGetScanLine(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_GETSCANLINE *
         return STATUS_INVALID_PARAMETER;
     }
 
-    // virtio-gpu has no per-line scanout model. Report always-in-vblank
-    // with ScanLine 0; DWM and present-statistics callers treat that as
-    // "vblank just occurred, proceed."
-    pGetScanLine->InVerticalBlank = TRUE;
-    pGetScanLine->ScanLine = 0;
-    return STATUS_SUCCESS;
+    return VioGpuAdapter::FromHandle(hAdapter)->vidpn.GetScanLine(pGetScanLine);
 }
 
 // END: Paged Code

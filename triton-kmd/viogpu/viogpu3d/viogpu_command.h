@@ -1,6 +1,7 @@
 #pragma once
 
 #include "handle.h"
+#include "viogpu_trace.h"
 
 #define VIOGPU_MAX_RUNNING 1
 
@@ -49,7 +50,7 @@ class VioGpuCommand final : public HandleBase<"VIOGCOMM"_M, VioGpuCommand>
     // completed successfully and the authoritative source generation is still
     // current. The allocation is also held by m_allocations.
     void SetScanoutSourceCompletion(VioGpuAllocation *allocation,
-                                    LONG sourceGeneration, BOOLEAN dmaFlip = FALSE);
+                                    LONG sourceGeneration, BOOLEAN dmaFlip = FALSE, UINT flipInterval = 0);
 
     // Takes ownership of a referenced event object obtained by Render while
     // still in the submitting process context.  The raw user HANDLE never
@@ -88,6 +89,7 @@ class VioGpuCommand final : public HandleBase<"VIOGCOMM"_M, VioGpuCommand>
     // Retain the creating device so recycled private data cannot move a
     // command to a different WDDM context/device at submit time.
     VioGpuDevice *m_pExpectedDevice;
+    VioGpuTraceTag m_traceTag;
 
     VioGpuAllocation **m_allocations;
     UINT m_allocationsLength;
@@ -122,6 +124,7 @@ class VioGpuCommand final : public HandleBase<"VIOGCOMM"_M, VioGpuCommand>
     VioGpuAllocation *m_pScanoutSourceCompletion;
     LONG m_scanoutSourceGeneration;
     BOOLEAN m_scanoutSourceIsDmaFlip;
+    UINT m_scanoutFlipInterval;
 
     // Present only for a terminal VIOGPU_CMD_SIGNAL_EVENT.  Volatile and
     // atomically exchanged because reset/cancel can race the worker's normal

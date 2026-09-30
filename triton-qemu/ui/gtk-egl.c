@@ -21,8 +21,42 @@
 #include "ui/gtk.h"
 #include "ui/egl-helpers.h"
 #include "ui/shader.h"
+#include "ui/triton-trace.h"
 
 #include "system/system.h"
+
+/* Opt-in host-window pacing diagnostics, independent of guest vblank counters. */
+static int64_t rate_start, rate_draw_us, rate_switch_us;
+static unsigned rate_draws, rate_switches, rate_updates;
+
+static bool gd_egl_rate_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        enabled = g_strcmp0(g_getenv("TRITON_DISPLAY_STATS"), "1") == 0;
+    }
+    return enabled;
+}
+
+static void gd_egl_rate_report(void)
+{
+    int64_t now = g_get_monotonic_time();
+    if (!rate_start) {
+        rate_start = now;
+    }
+    if (now - rate_start >= 5000000) {
+        double secs = (now - rate_start) / 1000000.0;
+        error_report("TRITON-RATE draws=%.1f/s switches=%.1f/s "
+                     "updates=%.1f/s draw_ms=%.3f switch_ms=%.3f",
+                     rate_draws / secs, rate_switches / secs,
+                     rate_updates / secs,
+                     rate_draws ? rate_draw_us / 1000.0 / rate_draws : 0,
+                     rate_switches ? rate_switch_us / 1000.0 / rate_switches : 0);
+        rate_start = now;
+        rate_draws = rate_switches = rate_updates = 0;
+        rate_draw_us = rate_switch_us = 0;
+    }
+}
 
 static void gtk_egl_set_scanout_mode(VirtualConsole *vc, bool scanout)
 {
@@ -56,23 +90,67 @@ void gd_egl_init(VirtualConsole *vc)
         return;
     }
 
-    vc->gfx.ectx = qemu_egl_init_ctx();
+    if (!vc->gfx.ectx) {
+        vc->gfx.ectx = qemu_egl_init_ctx();
+    }
     vc->gfx.esurface = qemu_egl_init_surface
         (vc->gfx.ectx, (EGLNativeWindowType)x11_window);
 
     assert(vc->gfx.esurface);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    /* The first, surfaceless binding initializes desktop GL buffers to NONE. */
+    if (qemu_egl_mode == DISPLAY_GL_MODE_CORE) {
+        glDrawBuffer(GL_BACK);
+        glReadBuffer(GL_BACK);
+    }
+
+    /*
+     * GTK schedules redraws; do not additionally wait for the host compositor
+     * inside QEMU's main loop. Occluded X11 windows can otherwise hold a swap
+     * for a second, delaying unrelated guest timers and input as well.
+     */
+    if (!eglSwapInterval(qemu_egl_display, 0)) {
+        error_report("egl: disabling blocking swap interval failed: %s",
+                     qemu_egl_get_error_string());
+    }
+}
+
+static void gd_egl_set_surface_viewport(VirtualConsole *vc,
+                                      int ww, int wh, int gs)
+{
+    int fbw = surface_width(vc->gfx.ds);
+    int fbh = surface_height(vc->gfx.ds);
+    int sw, sh, x, y;
+
+    if (vc->s->free_scale) {
+        vc->gfx.scale_x = vc->gfx.scale_y =
+            MIN((double)ww / fbw, (double)wh / fbh);
+    }
+
+    /*
+     * Honor the selected zoom even in fullscreen. Use the same logical
+     * dimensions and centering as gd_motion_event so input follows pixels.
+     * An oversized surface stays at the top left, matching that mapping.
+     */
+    sw = fbw * vc->gfx.scale_x;
+    sh = fbh * vc->gfx.scale_y;
+    x = MAX(0, (ww - sw) / 2);
+    y = MAX(0, (wh - sh) / 2);
+    glViewport(x * gs, (wh - y - sh) * gs, sw * gs, sh * gs);
 }
 
 void gd_egl_draw(VirtualConsole *vc)
 {
+    int64_t rate_t0 = gd_egl_rate_enabled() ? g_get_monotonic_time() : 0;
     GdkWindow *window;
 #ifdef CONFIG_GBM
     QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
     int fence_fd;
 #endif
-    int ww, wh, pw, ph, gs;
+    int ww, wh, gs;
 
-    if (!vc->gfx.gls) {
+    if (!vc->gfx.gls || !vc->gfx.esurface) {
         return;
     }
 
@@ -80,8 +158,6 @@ void gd_egl_draw(VirtualConsole *vc)
     gs = gdk_window_get_scale_factor(window);
     ww = gdk_window_get_width(window);
     wh = gdk_window_get_height(window);
-    pw = ww * gs;
-    ph = wh * gs;
 
     if (vc->gfx.scanout_mode) {
 #ifdef CONFIG_GBM
@@ -96,9 +172,10 @@ void gd_egl_draw(VirtualConsole *vc)
 #endif
         gd_egl_scanout_flush(&vc->gfx.dcl, 0, 0, vc->gfx.w, vc->gfx.h);
 
-        vc->gfx.scale_x = (double)ww / surface_width(vc->gfx.ds);
-        vc->gfx.scale_y = (double)wh / surface_height(vc->gfx.ds);
-
+        if (vc->gfx.guest_fb.dmabuf || vc->gfx.cursor_fb.texture) {
+            vc->gfx.scale_x = (double)ww / surface_width(vc->gfx.ds);
+            vc->gfx.scale_y = (double)wh / surface_height(vc->gfx.ds);
+        }
         glFlush();
 #ifdef CONFIG_GBM
         if (dmabuf) {
@@ -119,18 +196,30 @@ void gd_egl_draw(VirtualConsole *vc)
         if (!vc->gfx.ds) {
             return;
         }
-        eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
-                       vc->gfx.esurface, vc->gfx.ectx);
+        if (!eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
+                            vc->gfx.esurface, vc->gfx.ectx)) {
+            error_report("egl: eglMakeCurrent failed: %s",
+                         qemu_egl_get_error_string());
+            return;
+        }
+        triton_trace_display(TT_HOST_DISPLAY_BEGIN, vc->gfx.dcl.con);
 
-        surface_gl_setup_viewport(vc->gfx.gls, vc->gfx.ds, pw, ph);
+        gd_egl_set_surface_viewport(vc, ww, wh, gs);
         surface_gl_render_texture(vc->gfx.gls, vc->gfx.ds);
 
-        eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
-
-        vc->gfx.scale_x = (double)ww / surface_width(vc->gfx.ds);
-        vc->gfx.scale_y = (double)wh / surface_height(vc->gfx.ds);
+        if (!eglSwapBuffers(qemu_egl_display, vc->gfx.esurface)) {
+            error_report("egl: eglSwapBuffers failed: %s",
+                         qemu_egl_get_error_string());
+            return;
+        }
 
         glFlush();
+        triton_trace_display(TT_HOST_DISPLAY_END, vc->gfx.dcl.con);
+    }
+    if (rate_t0) {
+        rate_draws++;
+        rate_draw_us += g_get_monotonic_time() - rate_t0;
+        gd_egl_rate_report();
     }
 }
 
@@ -143,10 +232,24 @@ void gd_egl_update(DisplayChangeListener *dcl,
         return;
     }
 
-    eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
-                   vc->gfx.esurface, vc->gfx.ectx);
+    /*
+     * Texture uploads do not need the window's back buffer. Binding the
+     * window here can block in the native display's buffer acquisition while
+     * the window is occluded, starving QEMU's device timers and QMP input.
+     * qemu_egl_init_ctx() already requires a surfaceless-capable context.
+     */
+    if (!eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
+                        EGL_NO_SURFACE, vc->gfx.ectx)) {
+        triton_trace_invalidate(dcl->con);
+        error_report("egl: eglMakeCurrent failed: %s",
+                     qemu_egl_get_error_string());
+        return;
+    }
     surface_gl_update_texture(vc->gfx.gls, vc->gfx.ds, x, y, w, h);
     vc->gfx.glupdates++;
+    if (gd_egl_rate_enabled()) {
+        rate_updates++;
+    }
     eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE,
                    EGL_NO_SURFACE, EGL_NO_CONTEXT);
 }
@@ -158,7 +261,7 @@ void gd_egl_refresh(DisplayChangeListener *dcl)
     gd_update_monitor_refresh_rate(
             vc, vc->window ? vc->window : vc->gfx.drawing_area);
 
-    if (vc->gfx.guest_fb.dmabuf &&
+    if (vc->gfx.esurface && vc->gfx.guest_fb.dmabuf &&
         qemu_dmabuf_get_draw_submitted(vc->gfx.guest_fb.dmabuf)) {
         gd_egl_draw(vc);
         return;
@@ -169,7 +272,9 @@ void gd_egl_refresh(DisplayChangeListener *dcl)
         if (!vc->gfx.esurface) {
             return;
         }
-        vc->gfx.gls = qemu_gl_init_shader();
+        if (!vc->gfx.gls) {
+            vc->gfx.gls = qemu_gl_init_shader();
+        }
         if (vc->gfx.ds) {
             surface_gl_destroy_texture(vc->gfx.gls, vc->gfx.ds);
             surface_gl_create_texture(vc->gfx.gls, vc->gfx.ds);
@@ -180,6 +285,7 @@ void gd_egl_refresh(DisplayChangeListener *dcl)
             gd_egl_scanout_dmabuf(dcl, vc->gfx.guest_fb.dmabuf);
         }
 #endif
+        gtk_widget_queue_draw(vc->gfx.drawing_area);
     }
 
     graphic_hw_update(dcl->con);
@@ -196,6 +302,7 @@ void gd_egl_switch(DisplayChangeListener *dcl,
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
     bool resized = true;
+    int64_t rate_t0 = gd_egl_rate_enabled() ? g_get_monotonic_time() : 0;
 
     trace_gd_switch(vc->label, surface_width(surface), surface_height(surface));
 
@@ -219,6 +326,11 @@ void gd_egl_switch(DisplayChangeListener *dcl,
 
     eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                    EGL_NO_CONTEXT);
+    if (rate_t0) {
+        rate_switches++;
+        rate_switch_us += g_get_monotonic_time() - rate_t0;
+        gd_egl_rate_report();
+    }
 }
 
 QEMUGLContext gd_egl_create_context(DisplayGLCtx *dgc,
@@ -254,6 +366,7 @@ void gd_egl_scanout_texture(DisplayChangeListener *dcl,
     vc->gfx.w = w;
     vc->gfx.h = h;
     vc->gfx.y0_top = backing_y_0_top;
+    vc->gfx.glupdates = 0;
 
     if (!vc->gfx.esurface) {
         gd_egl_init(vc);
@@ -367,8 +480,26 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
                           vc->gfx.y0_top,
                           vc->gfx.cursor_x, vc->gfx.cursor_y,
                           vc->gfx.scale_x, vc->gfx.scale_y);
-    } else {
+    } else if (vc->gfx.guest_fb.dmabuf) {
         egl_fb_blit(&vc->gfx.win_fb, &vc->gfx.guest_fb, !vc->gfx.y0_top);
+    } else {
+        GLint viewport[4];
+        int top = vc->gfx.y;
+        int bottom = top + vc->gfx.h;
+
+        if (vc->gfx.y0_top) {
+            top = vc->gfx.guest_fb.height - top;
+            bottom = vc->gfx.guest_fb.height - bottom;
+        }
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, vc->gfx.guest_fb.framebuffer);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        gd_egl_set_surface_viewport(vc, ww / ws, wh / ws, ws);
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBlitFramebuffer(vc->gfx.x, bottom, vc->gfx.x + vc->gfx.w, top,
+            viewport[0], viewport[1], viewport[0] + viewport[2],
+            viewport[1] + viewport[3], GL_COLOR_BUFFER_BIT, GL_LINEAR);
     }
 
 #ifdef CONFIG_GBM
@@ -378,6 +509,10 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
 #endif
 
     eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
+    if (!vc->gfx.guest_fb.dmabuf) {
+        /* Other shared contexts may update an owned scanout after return. */
+        glFinish();
+    }
 }
 
 void gd_egl_flush(DisplayChangeListener *dcl,
@@ -392,7 +527,8 @@ void gd_egl_flush(DisplayChangeListener *dcl,
         gtk_egl_set_scanout_mode(vc, true);
     }
 
-    gtk_widget_queue_draw_area(area, x, y, w, h);
+    /* The scanout blit covers the widget, including zoom and letterboxing. */
+    gtk_widget_queue_draw(area);
 }
 
 void gtk_egl_init(DisplayGLMode mode)
@@ -410,13 +546,12 @@ void gtk_egl_init(DisplayGLMode mode)
 int gd_egl_make_current(DisplayGLCtx *dgc,
                         QEMUGLContext ctx)
 {
-    VirtualConsole *vc = container_of(dgc, VirtualConsole, gfx.dgc);
-
-    if (!eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
-                        vc->gfx.esurface, ctx)) {
-        error_report("egl: eglMakeCurrent failed: %s", qemu_egl_get_error_string());
-        return -1;
-    }
-
-    return 0;
+    /*
+     * Renderer commands target their own FBOs. Acquiring the GTK window's
+     * back buffer here can stall the virtio command queue (and device timers)
+     * in Mesa/XCB when the compositor withholds that buffer. Use the same
+     * surfaceless binding as the EGL headless frontend; gd_egl_draw owns the
+     * window binding needed for actual display output.
+     */
+    return qemu_egl_make_context_current(dgc, ctx);
 }

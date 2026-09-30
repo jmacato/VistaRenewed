@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Check the Vista D3D9 INF template or a completed driver package.
+"""Check the Vista D3D9/D3D10 INF template or a completed driver package.
 
 Run this after the Vista KMD build and after Inf2Cat:
 
   check_vista_inf.py --arch x86 viogpu3d.inf --package-dir package-x86
   check_vista_inf.py --arch x64 viogpu3d.inf --package-dir package-x64
 
-The checker requires the D3D9 UMD registration that Vista uses.  It rejects
-modern Triton D3D10/11 file names in the INF.  When --package-dir is present,
+The checker requires the ordered D3D9/D3D10 UMD registration that Vista uses.  It rejects
+modern Triton D3D11 file names in the INF.  When --package-dir is present,
 it also requires the exact files that the catalog must cover.
 """
 
@@ -23,18 +23,18 @@ EXPECTED = {
     "x86": {
         "catalog": "viogpu3d-vista-x86.cat",
         "manufacturer": "[rhel.ntx86]",
-        "files": {"viogpu3d.sys", "neptune_d3d9.dll"},
+        "files": {"viogpu3d.sys", "neptune_d3d9.dll", "neptune_d3d10.dll"},
         "service_file": "triton-vista-deploy.exe",
-        "umds": {"neptune_d3d9.dll"},
+        "umds": {"neptune_d3d9.dll", "neptune_d3d10.dll"},
         "copy_sections": {
-            "[viogpu3d_files.usermode]": {"neptune_d3d9.dll"},
+            "[viogpu3d_files.usermode]": {"neptune_d3d9.dll", "neptune_d3d10.dll"},
         },
         "destinations": {
             "viogpu3d_files.usermode=11",
         },
         "registry": {
-            "hkr,,usermodedrivername,%reg_multi_sz%,neptune_d3d9.dll",
-            "hkr,,installeddisplaydrivers,%reg_multi_sz%,neptune_d3d9",
+            "hkr,,usermodedrivername,%reg_multi_sz%,neptune_d3d9.dll,neptune_d3d10.dll",
+            "hkr,,installeddisplaydrivers,%reg_multi_sz%,neptune_d3d9,neptune_d3d10",
             "hkr,,vgacompatible,%reg_dword%,0",
             "hkr,,capabilityoverride,%reg_dword%,0x8",
         },
@@ -45,13 +45,15 @@ EXPECTED = {
         "files": {
             "viogpu3d.sys",
             "neptune_d3d9.dll",
+            "neptune_d3d10.dll",
             "neptune_d3d9_wow.dll",
+            "neptune_d3d10_wow.dll",
             "triton-vista-deploy.exe",
         },
-        "umds": {"neptune_d3d9.dll", "neptune_d3d9_wow.dll"},
+        "umds": {"neptune_d3d9.dll", "neptune_d3d10.dll", "neptune_d3d9_wow.dll", "neptune_d3d10_wow.dll"},
         "copy_sections": {
-            "[viogpu3d_files.usermodenative]": {"neptune_d3d9.dll"},
-            "[viogpu3d_files.usermodewow]": {"neptune_d3d9_wow.dll"},
+            "[viogpu3d_files.usermodenative]": {"neptune_d3d9.dll", "neptune_d3d10.dll"},
+            "[viogpu3d_files.usermodewow]": {"neptune_d3d9_wow.dll", "neptune_d3d10_wow.dll"},
         },
         "destinations": {
             "viogpu3d_files.usermodenative=11",
@@ -59,16 +61,16 @@ EXPECTED = {
             "tritonvistadeploy_files=11",
         },
         "registry": {
-            "hkr,,usermodedrivername,%reg_multi_sz%,neptune_d3d9.dll",
-            "hkr,,usermodedrivernamewow,%reg_multi_sz%,neptune_d3d9_wow.dll",
-            "hkr,,installeddisplaydrivers,%reg_multi_sz%,neptune_d3d9",
+            "hkr,,usermodedrivername,%reg_multi_sz%,neptune_d3d9.dll,neptune_d3d10.dll",
+            "hkr,,usermodedrivernamewow,%reg_multi_sz%,neptune_d3d9_wow.dll,neptune_d3d10_wow.dll",
+            "hkr,,installeddisplaydrivers,%reg_multi_sz%,neptune_d3d9,neptune_d3d10",
             "hkr,,vgacompatible,%reg_dword%,0",
             "hkr,,capabilityoverride,%reg_dword%,0x8",
         },
     },
 }
 
-FORBIDDEN_TEXT = ("d3d10", "d3d11", "dxgi", "neptune_umd")
+FORBIDDEN_TEXT = ("d3d11", "dxgi", "neptune_umd")
 
 
 def normalize(line: str) -> str:
@@ -129,11 +131,11 @@ def validate(path: Path, arch: str, package_dir: Path | None) -> list[str]:
 
     driver_ver = assignment_value(version, "DriverVer") or ""
     version_match = re.fullmatch(
-        r"\s*\d{1,2}/\d{1,2}/\d{4}\s*,\s*7\.14\.(\d{1,2})\.(\d{1,4})\s*",
+        r"\s*\d{1,2}/\d{1,2}/\d{4}\s*,\s*7\.15\.(\d{1,2})\.(\d{1,4})\s*",
         driver_ver,
     )
     if version_match is None or not (1 <= int(version_match.group(1)) <= 99):
-        errors.append("DriverVer must use the Vista DirectX 9 WDDM 7.14.01.0000-7.14.99.9999 range")
+        errors.append("DriverVer must use the Vista DirectX 10 WDDM 7.15.01.0000-7.15.99.9999 range")
 
     control_flags = {normalize(line) for line in sections.get("[controlflags]", [])}
     if "excludefromselect=*" not in control_flags:

@@ -788,6 +788,55 @@ int virgl_egl_get_attrs_for_texture(struct virgl_egl *egl, uint32_t tex_id,
    return ret;
 }
 
+int virgl_egl_export_texture_query(struct virgl_egl *egl, uint32_t tex_id,
+                                  struct virgl_renderer_export_query *query)
+{
+   EGLint fourcc = 0, planes = 0;
+   EGLint strides[4] = {0}, offsets[4] = {0};
+   EGLuint64KHR modifiers[4] = {0};
+   int fds[4] = {-1, -1, -1, -1};
+   int ret = -EINVAL;
+   if (!has_bit(egl->extension_bits, EGL_MESA_IMAGE_DMA_BUF_EXPORT))
+      return ret;
+   EGLImageKHR image = eglCreateImageKHR(egl->egl_display, eglGetCurrentContext(),
+      EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)tex_id, NULL);
+   if (image == EGL_NO_IMAGE_KHR)
+      return ret;
+   if (!eglExportDMABUFImageQueryMESA(egl->egl_display, image,
+                                     &fourcc, &planes, modifiers) ||
+       planes < 1 || planes > 4 || !fourcc)
+      goto out;
+   // EGL returns -1 for a plane that reuses an earlier plane's buffer.
+   // Like the GBM path, retain per-plane layouts but pack distinct fds.
+   if (!eglExportDMABUFImageMESA(egl->egl_display, image, fds, strides, offsets) ||
+       fds[0] < 0)
+      goto out;
+   for (int i = 0; i < planes; i++)
+      if (strides[i] <= 0 || offsets[i] < 0 || modifiers[i] != modifiers[0])
+         goto out;
+   query->out_num_fds = 0;
+   query->out_fourcc = fourcc;
+   query->out_modifier = modifiers[0];
+   for (int i = 0; i < planes; i++) {
+      query->out_strides[i] = strides[i];
+      query->out_offsets[i] = offsets[i];
+      if (fds[i] >= 0) {
+         if (query->in_export_fds) {
+            query->out_fds[query->out_num_fds] = fds[i];
+            fds[i] = -1;
+         }
+         query->out_num_fds++;
+      }
+   }
+   ret = 0;
+out:
+   for (unsigned i = 0; i < 4; i++)
+      if (fds[i] >= 0)
+         close(fds[i]);
+   eglDestroyImageKHR(egl->egl_display, image);
+   return ret;
+}
+
 int virgl_egl_get_fd_for_texture2(struct virgl_egl *egl, uint32_t tex_id, int *fd,
                                   int *stride, int *offset)
 {

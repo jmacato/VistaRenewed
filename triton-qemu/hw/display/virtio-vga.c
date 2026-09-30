@@ -47,6 +47,20 @@ static void virtio_vga_base_text_update(void *opaque, console_ch_t *chardata)
     }
 }
 
+static bool virtio_vga_base_readback(void *opaque, QemuConsole *con,
+                                   Error **errp)
+{
+    VirtIOVGABase *vvga = opaque;
+    VirtIOGPUBase *g = vvga->vgpu;
+
+    if (g->enable) {
+        return !g->hw_ops->gfx_readback ||
+               g->hw_ops->gfx_readback(g, con, errp);
+    }
+    return !vvga->vga.hw_ops->gfx_readback ||
+           vvga->vga.hw_ops->gfx_readback(&vvga->vga, con, errp);
+}
+
 static void virtio_vga_base_ui_info(void *opaque, uint32_t idx, QemuUIInfo *info)
 {
     VirtIOVGABase *vvga = opaque;
@@ -79,6 +93,7 @@ static const GraphicHwOps virtio_vga_base_ops = {
     .get_flags = virtio_vga_base_get_flags,
     .invalidate = virtio_vga_base_invalidate_display,
     .gfx_update = virtio_vga_base_update_display,
+    .gfx_readback = virtio_vga_base_readback,
     .text_update = virtio_vga_base_text_update,
     .ui_info = virtio_vga_base_ui_info,
     .gl_block = virtio_vga_base_gl_block,

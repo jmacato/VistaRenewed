@@ -935,8 +935,8 @@ npt_context_create_resource(struct npt_context *ctx,
       if (pb->fd_type == NPT_SHARED_FD_TYPE) {
          int table_fd = dup(pb->fd);
          if (table_fd >= 0 &&
-             !npt_context_import_resource(ctx, res_id, pb->fd_type,
-                                          table_fd, pb->size))
+             !npt_context_import_resource_layout(ctx, res_id, pb->fd_type,
+                                                 table_fd, pb->size, &pb->layout))
             close(table_fd);
       }
 
@@ -947,10 +947,28 @@ npt_context_create_resource(struct npt_context *ctx,
                         ? VIRGL_RENDERER_MAP_CACHE_WC
                         : VIRGL_RENDERER_MAP_CACHE_NONE,
          .export_format = pb->virgl_format,
+         .export_layout = pb->layout,
       };
       free(pb);
 
       return true;
+   }
+}
+
+void
+npt_context_cancel_pending_blob(struct npt_context *ctx, uint64_t blob_id)
+{
+   mtx_lock(&ctx->pending_blob_mutex);
+   struct hash_entry *entry =
+      _mesa_hash_table_search(ctx->pending_blob_table, &blob_id);
+   struct npt_pending_blob *pb = entry ? entry->data : NULL;
+   if (entry)
+      _mesa_hash_table_remove(ctx->pending_blob_table, entry);
+   mtx_unlock(&ctx->pending_blob_mutex);
+   if (pb) {
+      if (pb->fd >= 0)
+         close(pb->fd);
+      free(pb);
    }
 }
 
@@ -960,7 +978,8 @@ npt_context_register_pending_blob(struct npt_context *ctx,
                                   enum virgl_resource_fd_type fd_type,
                                   int fd,
                                   uint64_t size,
-                                  uint32_t virgl_format)
+                                  uint32_t virgl_format,
+                                  const struct virgl_attachment_layout *layout)
 {
    struct npt_pending_blob *pb = calloc(1, sizeof(*pb));
    if (!pb)
@@ -971,12 +990,17 @@ npt_context_register_pending_blob(struct npt_context *ctx,
    pb->fd = fd;
    pb->size = size;
    pb->virgl_format = virgl_format;
+   if (layout)
+      pb->layout = *layout;
 
    mtx_lock(&ctx->pending_blob_mutex);
-   _mesa_hash_table_insert(ctx->pending_blob_table, &pb->blob_id, pb);
+   const bool inserted =
+      !_mesa_hash_table_search(ctx->pending_blob_table, &blob_id) &&
+      _mesa_hash_table_insert(ctx->pending_blob_table, &pb->blob_id, pb);
    mtx_unlock(&ctx->pending_blob_mutex);
-
-   return true;
+   if (!inserted)
+      free(pb);
+   return inserted;
 }
 
 bool
@@ -986,6 +1010,17 @@ npt_context_import_resource(struct npt_context *ctx,
                             int fd,
                             uint64_t size)
 {
+   return npt_context_import_resource_layout(ctx, res_id, fd_type, fd, size, NULL);
+}
+
+bool
+npt_context_import_resource_layout(struct npt_context *ctx,
+                            uint32_t res_id,
+                            enum virgl_resource_fd_type fd_type,
+                            int fd,
+                            uint64_t size,
+                            const struct virgl_attachment_layout *layout)
+{
    struct npt_resource *res = calloc(1, sizeof(*res));
    if (!res)
       return false;
@@ -993,6 +1028,8 @@ npt_context_import_resource(struct npt_context *ctx,
    res->res_id = res_id;
    res->fd_type = fd_type;
    res->size = size;
+   if (layout)
+      res->layout = *layout;
 
    /* Defer fd ownership until the hash-table insert succeeds: on
     * duplicate-id rejection the caller still owns the original fd. */

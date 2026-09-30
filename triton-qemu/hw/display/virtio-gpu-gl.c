@@ -33,7 +33,7 @@ static void virtio_gpu_gl_update_cursor_data(VirtIOGPU *g,
     uint32_t width, height;
     uint32_t pixels, *data;
 
-    if (gl->renderer_state != RS_INITED) {
+    if (gl->renderer_state != RS_INITED || gl->context_failure) {
         return;
     }
 
@@ -57,7 +57,9 @@ static void virtio_gpu_gl_flushed(VirtIOGPUBase *b)
 {
     VirtIOGPU *g = VIRTIO_GPU(b);
 
-    virtio_gpu_process_cmdq(g);
+    if (!VIRTIO_GPU_GL(g)->context_failure) {
+        virtio_gpu_process_cmdq(g);
+    }
 }
 
 static void virtio_gpu_gl_handle_ctrl(VirtIODevice *vdev, VirtQueue *vq)
@@ -66,7 +68,7 @@ static void virtio_gpu_gl_handle_ctrl(VirtIODevice *vdev, VirtQueue *vq)
     VirtIOGPUGL *gl = VIRTIO_GPU_GL(vdev);
     struct virtio_gpu_ctrl_command *cmd;
 
-    if (!virtio_queue_ready(vq)) {
+    if (gl->context_failure || !virtio_queue_ready(vq)) {
         return;
     }
 
@@ -102,21 +104,24 @@ static void virtio_gpu_gl_handle_ctrl(VirtIODevice *vdev, VirtQueue *vq)
     virtio_gpu_virgl_fence_poll(g);
 }
 
-static void virtio_gpu_gl_reset(VirtIODevice *vdev)
+static bool virtio_gpu_gl_reset(VirtIOGPU *g)
 {
-    VirtIOGPU *g = VIRTIO_GPU(vdev);
-    VirtIOGPUGL *gl = VIRTIO_GPU_GL(vdev);
-
-    virtio_gpu_reset(vdev);
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
 
     /*
-     * GL functions must be called with the associated GL context in main
-     * thread, and when the renderer is unblocked.
+     * The base reset invokes this on the main loop while scanout resources
+     * still exist. Device reset itself can run on a vCPU thread.
      */
+    if (!virtio_gpu_virgl_recover_context(g)) {
+        return false;
+    }
     if (gl->renderer_state == RS_INITED) {
-        virtio_gpu_virgl_reset_scanout(g);
+        if (!virtio_gpu_virgl_reset_scanout(g)) {
+            return false;
+        }
         gl->renderer_state = RS_RESET;
     }
+    return true;
 }
 
 static void virtio_gpu_gl_device_realize(DeviceState *qdev, Error **errp)
@@ -170,14 +175,27 @@ static void virtio_gpu_gl_device_unrealize(DeviceState *qdev)
     VirtIOGPU *g = VIRTIO_GPU(qdev);
     VirtIOGPUGL *gl = VIRTIO_GPU_GL(qdev);
 
-    if (gl->renderer_state >= RS_INITED) {
 #if VIRGL_VERSION_MAJOR >= 1
-        qemu_bh_delete(gl->cmdq_resume_bh);
+    g_clear_pointer(&gl->cmdq_resume_bh, qemu_bh_delete);
 #endif
-        if (virtio_gpu_stats_enabled(g->parent_obj.conf)) {
-            timer_free(gl->print_stats);
+    g_clear_pointer(&gl->print_stats, timer_free);
+    g_clear_pointer(&gl->fence_poll, timer_free);
+
+    if (gl->renderer_state >= RS_INITED) {
+        virtio_gpu_virgl_clear_fence_watches(g);
+        if (!virtio_gpu_virgl_recover_context(g) ||
+            !virtio_gpu_virgl_reset_scanout(g) ||
+            !virtio_gpu_virgl_destroy_resource_copies(g)) {
+            /*
+             * A driver failure must not run GL destruction in an unknown
+             * context. Keep renderer storage until host process teardown.
+             */
+            error_report("Neptune renderer teardown retained GL storage");
+            g_array_unref(g->capset_ids);
+            return;
         }
-        timer_free(gl->fence_poll);
+        /* Display callbacks may have released the renderer's EGL context. */
+        virgl_renderer_force_ctx_0();
         virgl_renderer_cleanup(NULL);
     }
 
@@ -194,6 +212,8 @@ static void virtio_gpu_gl_class_init(ObjectClass *klass, void *data)
     VirtIOGPUClass *vgc = VIRTIO_GPU_CLASS(klass);
 
     vbc->gl_flushed = virtio_gpu_gl_flushed;
+    vbc->gl_readback = virtio_gpu_virgl_readback;
+    vgc->reset = virtio_gpu_gl_reset;
     vgc->handle_ctrl = virtio_gpu_gl_handle_ctrl;
     vgc->process_cmd = virtio_gpu_virgl_process_cmd;
     vgc->update_cursor_data = virtio_gpu_gl_update_cursor_data;
@@ -201,7 +221,6 @@ static void virtio_gpu_gl_class_init(ObjectClass *klass, void *data)
 
     vdc->realize = virtio_gpu_gl_device_realize;
     vdc->unrealize = virtio_gpu_gl_device_unrealize;
-    vdc->reset = virtio_gpu_gl_reset;
     device_class_set_props(dc, virtio_gpu_gl_properties);
 }
 

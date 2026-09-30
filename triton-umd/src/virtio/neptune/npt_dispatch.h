@@ -58,6 +58,15 @@ HRESULT npt_dispatch_resource_map(struct npt_ring *ring,
                                   uint32_t *out_row_pitch,
                                   uint32_t *out_depth_pitch);
 
+/* Synchronous, no-copy cancellation of a successful Map rejected by the guest. */
+HRESULT npt_dispatch_resource_abort(struct npt_ring *ring,
+                                    uint64_t context_id, uint64_t resource_id,
+                                    uint32_t subresource);
+
+/* Query-neutral GPU conversion of equally sized raw color scratch views. */
+HRESULT npt_dispatch_resource_copy_color(void *context, void *dst_rtv,
+                                          void *src_srv);
+
 bool npt_dispatch_resource_unmap(struct npt_ring *ring,
                                  uint64_t context_id,
                                  uint64_t resource_id,
@@ -103,10 +112,17 @@ HRESULT npt_dispatch_clear_depth_stencil_rects(
 
 struct npt_blob_export_info;
 struct npt_cmd_shared_open_res;
+struct npt_cmd_shared_query_layout_reply;
+HRESULT npt_dispatch_shared_query_layout(
+   struct npt_ring *ring, uint32_t res_id,
+   struct npt_cmd_shared_query_layout_reply *out);
 
 /* Sync: stage texture_id's dmabuf export as this context's pending
  * blob under blob_id; the host writes npt_blob_export_info into
  * (data_res_id, data_off). */
+HRESULT npt_dispatch_shared_cancel_export(struct npt_ring *ring,
+                                           uint64_t blob_id);
+
 HRESULT npt_dispatch_shared_export_blob(struct npt_ring *ring,
                                         uint64_t texture_id,
                                         uint64_t blob_id,

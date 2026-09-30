@@ -278,7 +278,7 @@ CTranslator::AnalyzeVS( const void* pSrcBytes,
             case D3DSIO_LOOP:
 
                 // Allocate loop registers
-                ++uiNumLoopRegs;
+                uiNumLoopRegs = 5 * D3DVS20_MAX_STATICFLOWCONTROLDEPTH;
 
             case D3DSIO_CALL:
             case D3DSIO_CALLNZ:
@@ -795,7 +795,8 @@ CVSContext::WriteDeclarations()
             // nFloatConstRegs = 0; // ie any size
             m_pShaderAsm->EmitConstantBufferDecl(
                 CB_FLOAT, 
-                MAX_VS_CONSTANTSF - ((nIntConstRegs / 4) + (nBoolConstRegs / 4) + __sizeof16( VSCBExtension )),
+                (m_pShaderDesc->GetShaderSettings() & InternalFixedFunction)
+                    ? MAX_FIXED_CONSTANTSF : MAX_VS_CONSTANTSF,
                 D3D10_SB_CONSTANT_BUFFER_DYNAMIC_INDEXED );
         }
         else
@@ -826,9 +827,9 @@ CVSContext::WriteDeclarations()
     // Declare vertex shader samplers
     for ( UINT i = 0; i < MAX_VS_SAMPLER_REGS; ++i )
     {
-        TEXTURETYPE textureType = (TEXTURETYPE)m_inputRegs.s[i];
-        if ( textureType != INVALID_INDEX )
+        if (m_inputRegs.s[i] != INVALID_INDEX)
         {
+            const TEXTURETYPE textureType = (TEXTURETYPE)m_inputRegs.s[i];
             // if reading from a specialized depth texture implicitly use a comparison 
             // sample for 'Hardware Shadow Maps'
             if (m_rasterStates.HardwareShadowMappingRequiredVS & (1 << i))

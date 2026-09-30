@@ -420,7 +420,7 @@ CTranslator::AnalyzePS( const void* pSrcBytes,
             case D3DSIO_LOOP:
 
                 // Allocate loop registers
-                ++uiNumLoopRegs;
+                uiNumLoopRegs = 5 * D3DVS20_MAX_STATICFLOWCONTROLDEPTH;
 
             case D3DSIO_CALL:
             case D3DSIO_CALLNZ:
@@ -972,9 +972,9 @@ CPSContext::WriteDeclarations()
     // Declare pixel shader samplers
     for ( UINT i = 0; i < MAX_PS_SAMPLER_REGS; ++i )
     {
-        TEXTURETYPE textureType = (TEXTURETYPE)m_inputRegs.s[i];
-        if ( textureType != INVALID_INDEX )
+        if (m_inputRegs.s[i] != INVALID_INDEX)
         {
+            TEXTURETYPE textureType = (TEXTURETYPE)m_inputRegs.s[i];
             if ( TEXTURETYPE_UNKNOWN == textureType )
             {
                 textureType = (TEXTURETYPE)m_rasterStates.PSSamplers[i].TextureType;
@@ -1038,7 +1038,6 @@ CPSContext::WriteDeclarations()
                     D3D10_SB_INTERPOLATION_MODE interpolation;
 
                     if ((D3DDECLUSAGE_COLOR == usage) 
-                     && (0 == usageIndex)
                      && (D3DSHADE_FLAT == m_rasterStates.ShadeMode))
                     {
                         interpolation = D3D10_SB_INTERPOLATION_CONSTANT;
@@ -1374,10 +1373,9 @@ CPSContext::ComputePixelFog()
 {
     assert(IsImplicitFogCalculationNeeded());
     
-    // Get the fog index value
-    const COperandBase srcFogIndex = ( m_rasterStates.WFogEnable ) ?
-        CInputOperand4(m_positionRegister, __SWIZZLE_W) :
-        CInputOperand4(m_positionRegister, __SWIZZLE_Z);
+    // Direct3D SV_Position.w retains clip W (unlike Vulkan FragCoord.w).
+    const COperandBase srcFogIndex = CInputOperand4(m_positionRegister,
+        m_rasterStates.WFogEnable ? __SWIZZLE_W : __SWIZZLE_Z);
 
     switch ( m_rasterStates.FogTableMode )
     {

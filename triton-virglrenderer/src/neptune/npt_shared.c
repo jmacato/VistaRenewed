@@ -44,9 +44,8 @@
 #define NPT_SHARED_EXPORT_FORMAT(d) ((d)->meta.Format)
 #endif
 
-/* DXGI_FORMAT -> enum virgl_formats, for the 8-bit RGBA/BGRA families
- * that can back a presentable surface.  0 means "unmapped", which leaves
- * the importer's own format in charge. */
+/* DXGI_FORMAT -> enum virgl_formats for the typed shared-resource contract.
+ * A shared format is not necessarily eligible for display scanout. */
 static uint32_t
 npt_shared_dxgi_to_virgl_format(uint32_t dxgi_format)
 {
@@ -57,6 +56,16 @@ npt_shared_dxgi_to_virgl_format(uint32_t dxgi_format)
       return VIRGL_FORMAT_B8G8R8X8_UNORM;
    case 28: /* DXGI_FORMAT_R8G8B8A8_UNORM */
       return VIRGL_FORMAT_R8G8B8A8_UNORM;
+   case 29: /* DXGI_FORMAT_R8G8B8A8_UNORM_SRGB */
+      return VIRGL_FORMAT_R8G8B8A8_SRGB;
+   case 91: /* DXGI_FORMAT_B8G8R8A8_UNORM_SRGB */
+      return VIRGL_FORMAT_B8G8R8A8_SRGB;
+   case 93: /* DXGI_FORMAT_B8G8R8X8_UNORM_SRGB */
+      return VIRGL_FORMAT_B8G8R8X8_SRGB;
+   case 24: /* DXGI_FORMAT_R10G10B10A2_UNORM */
+      return VIRGL_FORMAT_R10G10B10A2_UNORM;
+   case 10: /* DXGI_FORMAT_R16G16B16A16_FLOAT */
+      return VIRGL_FORMAT_R16G16B16A16_FLOAT;
    default:
       return 0;
    }
@@ -111,11 +120,11 @@ npt_shared_linear_desc_valid(uint32_t width, uint32_t height,
           (NPT_D3D11_BIND_SHADER_RESOURCE | NPT_D3D11_BIND_RENDER_TARGET) ||
        cpu_access_flags != 0 ||
        !(misc_flags & NPT_D3D11_RESOURCE_MISC_SHARED) || !info ||
-       info->plane_count != 1 || !info->allocation_size ||
+       info->plane_count != 1 || info->texture_layout > 2 || !info->allocation_size ||
        !info->planes[0].pitch)
       return false;
 
-   row_bytes = (uint64_t)width * 4;
+   row_bytes = (uint64_t)width * (format == 10 ? 8 : 4);
    if (info->planes[0].pitch < row_bytes ||
        info->planes[0].offset >= info->allocation_size)
       return false;
@@ -134,6 +143,72 @@ npt_shared_linear_desc_valid(uint32_t width, uint32_t height,
          return false;
    }
    return true;
+}
+
+/* Restrict imports to the formats and plane count our D3D shared path
+ * supports.  Preserve modifiers and padded strides; guessing width*4 can
+ * alias the wrong rows of a tiled standard primary. */
+static bool
+npt_shared_layout_to_reply(const struct virgl_attachment_layout *layout,
+                           uint64_t size,
+                           struct npt_cmd_shared_query_layout_reply *reply)
+{
+   struct npt_blob_export_info info = {0};
+   uint32_t format;
+   switch (layout->fourcc) {
+   case 0x34325241u: format = 87; break; /* DRM AR24: BGRA */
+   case 0x34325258u: format = 88; break; /* DRM XR24: BGRX */
+   case 0x34324241u: format = 28; break; /* DRM AB24: RGBA */
+   /* DXGI has no RGBX8 format.  Import its physical RGBA8 storage; the
+    * primary's logical X format and opaque scanout remain unchanged. */
+   case 0x34324258u: format = 28; break; /* DRM XB24: RGBX */
+   default: return false;
+   }
+   info.modifier = layout->modifier;
+   info.allocation_size = size;
+   info.plane_count = layout->plane_count;
+   for (uint32_t i = 0; i < NPT_BLOB_EXPORT_MAX_PLANES; i++) {
+      info.planes[i].pitch = layout->strides[i];
+      info.planes[i].offset = layout->offsets[i];
+   }
+   if (!npt_shared_linear_desc_valid(layout->width, layout->height, format,
+          1, 1, 1, 0, NPT_D3D11_BIND_SHADER_RESOURCE |
+          NPT_D3D11_BIND_RENDER_TARGET, 0, NPT_D3D11_RESOURCE_MISC_SHARED,
+          &info))
+      return false;
+   reply->width = layout->width;
+   reply->height = layout->height;
+   reply->format = format;
+   reply->export_info = info;
+   return true;
+}
+
+HRESULT
+npt_shared_query_layout(struct npt_context *ctx, uint32_t res_id,
+                        struct npt_cmd_shared_query_layout_reply *reply)
+{
+   for (int waited_ms = 0;; waited_ms += NPT_SHARED_ATTACH_POLL_MS) {
+      bool found = false;
+      bool valid = false;
+      /* Copy all metadata under the same lock as attach/detach.  No resource
+       * pointer survives the unlock, including on the polling path. */
+      mtx_lock(&ctx->resource_mutex);
+      const struct hash_entry *entry =
+         _mesa_hash_table_search(ctx->resource_table, &res_id);
+      const struct npt_resource *res = entry ? entry->data : NULL;
+      if (res) {
+         found = true;
+         if (res->fd_type == VIRGL_RESOURCE_FD_DMABUF && res->u.fd >= 0)
+            valid = npt_shared_layout_to_reply(&res->layout, res->size, reply);
+      }
+      mtx_unlock(&ctx->resource_mutex);
+      if (valid)
+         return NPT_S_OK;
+      if (found || waited_ms >= NPT_SHARED_ATTACH_WAIT_MS)
+         return NPT_E_INVALIDARG;
+      thrd_sleep(&(struct timespec){
+                    .tv_nsec = NPT_SHARED_ATTACH_POLL_MS * 1000000L }, NULL);
+   }
 }
 
 /* Duplicate the attached resource fd while its table entry is protected.
@@ -310,6 +385,30 @@ npt_shared_export_blob(struct npt_context *ctx, uint64_t texture_id,
    if (!export_virgl_format)
       return NPT_E_INVALIDARG;
 
+   struct virgl_attachment_layout layout = {0};
+#ifndef __APPLE__
+   /* Keep the backend's layout with the host blob as well as the guest handle. */
+   layout.width = desc->meta.Width;
+   layout.height = desc->meta.Height;
+   switch (desc->meta.Format) {
+   case 87: case 91: layout.fourcc = 0x34325241u; break; /* AR24 */
+   case 88: case 93: layout.fourcc = 0x34325258u; break; /* XR24 */
+   case 28: case 29: layout.fourcc = 0x34324241u; break; /* AB24 */
+   case 24: layout.fourcc = 0x30334241u; break; /* AB30 */
+   case 10: layout.fourcc = 0x48344241u; break; /* AB4H */
+   default: return NPT_E_INVALIDARG;
+   }
+   layout.modifier = info.modifier;
+   layout.plane_count = info.plane_count;
+   for (uint32_t i = 0; i < info.plane_count; i++) {
+      if (info.planes[i].offset > UINT32_MAX ||
+          info.planes[i].pitch > UINT32_MAX)
+         return NPT_E_INVALIDARG;
+      layout.offsets[i] = info.planes[i].offset;
+      layout.strides[i] = info.planes[i].pitch;
+   }
+#endif
+
    /* Publish the export-level facts into the exporter's shmem window. */
    bool data_ok = false;
    mtx_lock(&ctx->resource_mutex);
@@ -339,7 +438,7 @@ npt_shared_export_blob(struct npt_context *ctx, uint64_t texture_id,
    if (!npt_context_register_pending_blob(ctx, blob_id,
                                           NPT_SHARED_FD_TYPE, fd,
                                           export_size,
-                                          export_virgl_format)) {
+                                          export_virgl_format, &layout)) {
       close(fd);
       return NPT_E_FAIL;
    }
@@ -455,8 +554,12 @@ npt_shared_open_res(struct npt_context *ctx, uint64_t device_id,
    close(desc.fd);
 
    if (NPT_FAILED(hr) || !texture) {
-      npt_log("shared: open: res_id %u import failed (hr=0x%x)",
-              cmd->res_id, hr);
+      npt_log("shared: open: res_id %u import failed "
+              "(hr=0x%x format=%u modifier=0x%016" PRIx64
+              " pitch=%" PRIu64 " size=%" PRIu64 ")",
+              cmd->res_id, hr, cmd->format, cmd->export_info.modifier,
+              cmd->export_info.planes[0].pitch,
+              cmd->export_info.allocation_size);
       return NPT_FAILED(hr) ? hr : NPT_E_FAIL;
    }
 

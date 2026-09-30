@@ -22,6 +22,13 @@
 extern "C" {
 #endif
 
+/* Versioned host rasterization control; setters return the host HRESULT. */
+int32_t tritonSharedBridgeGetDitherCaps(void *context, uint32_t *flags);
+int32_t tritonSharedBridgeSetDither(void *context, uint32_t enabled);
+
+/* Copy raw color scratch views on the GPU, outside application queries. */
+int32_t tritonSharedBridgeCopyColor(void *context, void *dst_rtv, void *src_srv);
+
 #define TRITON_SHARED_MAX_PLANES 4
 
 /* Wire-neutral texture description; Triton converts to/from the WDDM
@@ -57,6 +64,10 @@ struct triton_shared_texture_desc {
 bool tritonSharedBridgeExportBlob(void *pResourceWrapper,
                                   struct triton_shared_texture_desc *desc);
 
+/* Drop only the host pending export after failed KMD registration. Call
+ * before releasing the exporter; already claimed exports are unaffected. */
+bool tritonSharedBridgeCancelExportBlob(void *pResourceWrapper, uint64_t blob_id);
+
 /* Consumer: attach the VM-global virtio resource \p res_id to this
  * process's transport context so the host worker receives its dmabuf
  * (Venus-style import).  Returns opaque WDDM handles for the release
@@ -64,6 +75,10 @@ bool tritonSharedBridgeExportBlob(void *pResourceWrapper,
 bool tritonSharedBridgeImportRes(void *pDeviceWrapper, uint32_t res_id,
                                  uint64_t size, uint32_t *out_alloc,
                                  uint32_t *out_res_kmt);
+
+/* Query the actual host layout after attaching a standard primary. */
+bool tritonSharedBridgeQueryRes(void *pDeviceWrapper, uint32_t res_id,
+                                struct triton_shared_texture_desc *desc);
 
 bool tritonSharedBridgeReleaseImportRes(void *pDeviceWrapper, uint32_t alloc,
                                         uint32_t res_kmt);
@@ -75,10 +90,15 @@ bool tritonSharedBridgeReleaseImportRes(void *pDeviceWrapper, uint32_t alloc,
 void *tritonSharedBridgeOpenRes(void *pDeviceWrapper, uint32_t res_id,
                                 const struct triton_shared_texture_desc *desc);
 
-/* Drain the wrapper's Neptune ring, then submit an ordered renderer marker.
- * This is the D3D9 present boundary: success means all host GPU work emitted
- * before the call has retired. */
+/* Drain the wrapper's Neptune ring, then retire an ordered renderer marker.
+ * This guarantees host dispatch and a runtime kernel submission, not GPU
+ * execution completion. Callers needing completed pixels must fence first. */
 bool tritonSharedBridgeDrain(void *pWrapper, uint32_t timeout_ms);
+
+/* Diagnostic-only host query read, bypassing the optional guest feedback
+ * cache. DONOTFLUSH is retained; this performs a transport RPC, not a GPU wait. */
+int32_t tritonSharedBridgeTraceQueryRead(void *context, void *query,
+                                        void *data, uint32_t size);
 
 #ifdef __cplusplus
 }

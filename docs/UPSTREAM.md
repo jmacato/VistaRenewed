@@ -20,13 +20,48 @@ The component directories retain their upstream source layouts. The table above
 records their base revisions; this repository includes subsequent Vista and Linux
 changes and is not a complete upstream mirror.
 
-DXVK retains its Git history. `patches/dxvk-neptune.bundle` supplies the additional
-commit required by the Linux host build and depends on the recorded upstream base.
-Run `scripts/bootstrap_sources.py` to restore it and its dependencies.
+DXVK retains its Git history. `patches/dxvk-neptune.bundle` supplies commit
+`c6bb6d57fac2b6cae7f6adbbc521eb949849815e` above the recorded upstream base.
+`patches/sources.json` records the bundle, pinned sources and patch hashes.
+`patches/dxvk-vista.patch` and `patches/dxbc-spirv-vista.patch` carry the curated
+backend and shader-compiler changes. The latter applies to dxbc-spirv revision
+`0e79a703db8b23004c77dbabacf25ed2d41f0bd9`. Run
+`python3 scripts/bootstrap_sources.py` to restore and apply the complete series;
+do not combine it with historical manual patch commands.
+
+## Licenses and attribution
 
 Each component and dependency retains its copyright and license notices.
-No repository-wide license replaces those terms.
-Read the component `LICENSE`, `COPYING`, `COPYING.LIB` and per-file notices.
-Read the shader converter's third-party notices.
-New standalone development helpers have no project-wide license grant.
-Before you advertise one license for the repository, resolve this missing grant and the component terms.
+No repository-wide license replaces those terms. Read component `LICENSE`,
+`COPYING`, `COPYING.LIB` and per-file notices, including the D3D9 shader
+converter's third-party notices. The Windows SDK/WDK and guest applications
+have their own terms and are not source components of this repository.
+
+**Unresolved publication decision:** standalone development helpers without an
+existing license notice do not have a project-wide license grant. A rights
+holder must identify the authorship of those files and authorize a specific
+license before the repository can claim they are freely redistributable.
+Likewise, copied copyright wording on newly authored files is not evidence of
+ownership. Preserve genuine upstream notices; do not invent a grant, assign
+third-party ownership or add contributor sign-offs on someone's behalf.
+
+This is a release-readiness limitation. A public source preview must not claim a
+single repository-wide open-source license while it remains unresolved.
+
+## Contribution and review boundaries
+
+Read each destination's current contribution instructions before preparing an
+upstream submission. UTM's [contribution guidelines](https://github.com/utmapp/UTM/blob/main/CONTRIBUTING.md)
+require human testing; local agent substitution does not satisfy that upstream
+requirement. QEMU's [code provenance policy](https://www.qemu.org/docs/master/devel/code-provenance.html#use-of-ai-generated-content)
+declines AI-generated contributions. Do not represent agent-authored changes as
+eligible upstream submissions or supply false provenance/DCO statements.
+
+The public fork can retain local review evidence without claiming upstream
+acceptance. Formatting/checkpatch results and fresh adversarial reviews are
+bounded checks, not exceptions to those policies.
+
+Original design context: [Neptune announcement](https://blog.getutm.app/2026/introducing-neptune-direct3d-virtualization-for-qemu/)
+and [Triton announcement](https://blog.getutm.app/2026/introducing-triton-directx-11-driver-for-qemu/).
+Those releases describe their own stack; they are not evidence of this Vista
+preview's compatibility or actual QEMU-window frame rate.

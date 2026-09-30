@@ -253,49 +253,18 @@ npt_ring_load_head(const struct npt_ring *ring)
 static inline void
 npt_ring_store_tail(struct npt_ring *ring)
 {
-   /* Ring shmem is mapped WC (virglrenderer returns
-    * VIRGL_RENDERER_MAP_CACHE_WC for the ring blob), so x86 TSO does
-    * not order the cmd-data stores against the tail store -- without
-    * a drain the consumer can see a new tail value while earlier cmd
-    * bytes are still in the producer's WC store buffer.
-    *
-    * x86: SFENCE drains the WC store buffer, after which a relaxed mov
-    * publishes the tail (it cannot reorder ahead of the SFENCE).  A
-    * seq_cst store lowers to LOCK/MFENCE instead, and on a WC mapping
-    * that MFENCE is far more than the textbook ~30 cycles: it must both
-    * drain the WC buffers and fence for global visibility, so SFENCE is
-    * the cheaper primitive here.
-    *
-    * The GCC/Clang SFENCE builtin is gated on __x86_64__/__i386__, which
-    * the guest's MSVC (cl.exe) toolchain does not define, so MSVC uses the
-    * _mm_sfence() intrinsic (from <intrin.h>, pulled in via windows.h;
-    * same intrinsic family as the __rdtsc/_BitScanReverse used elsewhere).
-    *
-    * ARM64 (and other non-x86): seq_cst lowers to STLR, which is already
-    * cheap and is the correct primitive for ordering Normal Non-cacheable
-    * stores -- keep seq_cst there.
-    *
-    * arm64ec must not take the MSVC x86 branch: MSVC defines _M_X64 for it
-    * (it uses the x64 ABI for source compatibility) while emitting ARM64
-    * code, so that branch would publish the tail with a plain relaxed store
-    * on ARM.  The idle handshake needs store->load ordering here --
-    * npt_ring_submit_locked stores the tail, then loads status to decide
-    * whether an IDLE host needs a notify -- and a relaxed tail store lets
-    * ARM order that load first while the host, which sets IDLE and then
-    * re-reads the tail, still observes the old value.  Both sides then miss
-    * each other: the guest skips the notify and the host stays parked.
-    * seq_cst (STLR) supplies the required Dekker ordering. */
-#if (defined(__x86_64__) || defined(__i386__)) && \
-    __has_builtin(__builtin_ia32_sfence)
-   __builtin_ia32_sfence();
-   atomic_store_explicit(ring->tail, ring->cur, memory_order_relaxed);
-#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86)) && \
-    !defined(_M_ARM64EC) && !defined(__arm64ec__)
-   _mm_sfence();
-   atomic_store_explicit(ring->tail, ring->cur, memory_order_relaxed);
-#else
-   atomic_store_explicit(ring->tail, ring->cur, memory_order_seq_cst);
-#endif
+   /* Publish command bytes before the tail, and the tail before reading
+    * host status. The second edge is Store->Load: SFENCE before a relaxed
+    * tail store does not provide it, even on x86. Together with the host's
+    * IDLE publication before its tail recheck, this prevents lost wakeups.
+    * The full fence also drains command writes from WC mappings. */
+   /* Do not use a seq_cst store here: x86 compilers implement it with
+    * XCHG on the WC mapping, which translated x86/ARM cannot safely RMW.
+    * The first fence drains WC payload writes before publishing the tail;
+    * the second supplies the Store->Load edge for the idle handshake. */
+   atomic_thread_fence(memory_order_seq_cst);
+   atomic_store_explicit(ring->tail, ring->cur, memory_order_release);
+   atomic_thread_fence(memory_order_seq_cst);
 }
 
 static inline uint32_t
@@ -387,18 +356,10 @@ npt_ring_submit_locked(struct npt_ring *ring,
    }
 
    if (status & NPT_RING_STATUS_IDLE_BIT) {
-#ifndef _WIN32
-      const int64_t now = os_time_get_nano();
-      if (os_time_timeout(ring->last_notify, ring->next_notify, now)) {
-         ring->last_notify = now;
-         ring->next_notify = now + NPT_RING_IDLE_TIMEOUT_NS;
-         if (!npt_ring_notify(ring))
-            return false;
-      }
-#else
+      /* IDLE is a promise to sleep, including after a spurious wake or a
+       * feedback poll. An earlier doorbell cannot cover this submission. */
       if (!npt_ring_notify(ring))
          return false;
-#endif
    }
 
    return true;
@@ -779,18 +740,8 @@ npt_ring_submit_locked_split(struct npt_ring *ring,
       return npt_ring_mark_failed(ring, "fatal status after split submit");
    }
    if (status & NPT_RING_STATUS_IDLE_BIT) {
-#ifndef _WIN32
-      const int64_t now = os_time_get_nano();
-      if (os_time_timeout(ring->last_notify, ring->next_notify, now)) {
-         ring->last_notify = now;
-         ring->next_notify = now + NPT_RING_IDLE_TIMEOUT_NS;
-         if (!npt_ring_notify(ring))
-            return false;
-      }
-#else
       if (!npt_ring_notify(ring))
          return false;
-#endif
    }
    return true;
 }
@@ -907,9 +858,12 @@ npt_ring_submit_command_init(struct npt_ring *ring,
    if (!submit)
       return NULL;
    memset(submit, 0, sizeof(*submit));
-   if (!ring || !cmd_data || !cmd_size || cmd_size > UINT32_MAX ||
-       reply_size > UINT32_MAX || npt_ring_is_failed(ring))
+   if (!ring || npt_ring_is_failed(ring))
       return NULL;
+   if (!cmd_data || !cmd_size || cmd_size > UINT32_MAX || reply_size > UINT32_MAX) {
+      npt_ring_mark_failed(ring, "command allocation or sizing failed");
+      return NULL;
+   }
    submit->cmd_data = cmd_data;
    submit->cmd_size = cmd_size;
    submit->reply_size = reply_size;
@@ -926,6 +880,11 @@ npt_ring_submit_command(struct npt_ring *ring,
        submit->cmd_size > UINT32_MAX || submit->reply_size > UINT32_MAX ||
        npt_ring_is_failed(ring))
       return;
+
+   if (submit->enc.fatal || submit->enc.cur != submit->enc.end) {
+      npt_ring_mark_failed(ring, "incomplete command encoding");
+      return;
+   }
 
    /* prof_cmd_type stashes cmd_type so get_command_reply can attribute
     * reply_ns -- sync thunks free cmd_data before the reply arrives. */

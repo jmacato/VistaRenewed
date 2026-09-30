@@ -27,15 +27,24 @@ for arch in "${arches[@]}"; do
     "$meson" "${setup[@]}" "$build" triton-umd \
         --cross-file "$profile" \
         --buildtype debugoptimized -Dplatforms=windows -Dneptune=true \
-        -Dnpt_wine=false -Dnpt_umd=off -Dnpt_vista_d3d9=true \
+        -Dnpt_wine=false -Dnpt_umd=off -Dnpt_vista_d3d9=true -Dnpt_vista_d3d10=true \
         -Dmin-windows-version=6 -Dgallium-drivers= -Dvulkan-drivers= \
         -Dopengl=false -Degl=disabled -Dglx=disabled -Dllvm=disabled \
         -Dbuild-tests=false
     target=src/virtio/neptune/vista-d3d9
     ninja -C "$build" -j "$jobs" "$target/neptune_d3d9.dll" \
-        "$target/triton9_runtime_probe.exe" "$target/libtriton9_abi_compile.a"
+        "$target/triton9_runtime_probe.exe" "$target/libtriton9_abi_compile.a" \
+        src/virtio/neptune/vista-d3d10/neptune_d3d10.dll \
+        src/virtio/neptune/vista-d3d10/triton10_runtime_probe.exe \
+        src/virtio/neptune/vista-d3d10/triton10_present_probe.exe
     python3 triton-kmd/viogpu/tools/check_vista_pe.py --kind umd --arch "$arch" \
         "$build/$target/neptune_d3d9.dll"
+    python3 triton-kmd/viogpu/tools/check_vista_pe.py --kind umd10 --arch "$arch" \
+        "$build/src/virtio/neptune/vista-d3d10/neptune_d3d10.dll"
+    python3 triton-kmd/viogpu/tools/check_vista_pe.py --kind exe --arch "$arch" \
+        --allow-import gdi32.dll "$build/src/virtio/neptune/vista-d3d10/triton10_runtime_probe.exe"
+    python3 triton-kmd/viogpu/tools/check_vista_pe.py --kind exe --arch "$arch" \
+        --allow-import gdi32.dll "$build/src/virtio/neptune/vista-d3d10/triton10_present_probe.exe"
     # The public probe uses GDI to draw its controlled evidence scene.
     python3 triton-kmd/viogpu/tools/check_vista_pe.py --kind exe --arch "$arch" \
         --allow-import gdi32.dll "$build/$target/triton9_runtime_probe.exe"

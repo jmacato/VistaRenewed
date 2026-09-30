@@ -258,6 +258,8 @@ typedef struct DisplayChangeListenerOps {
 
     /* required if GL */
     void (*dpy_gl_scanout_disable)(DisplayChangeListener *dcl);
+    /* All texture reads finish before a display callback returns. */
+    bool dpy_gl_texture_read_sync;
     /* required if GL */
     void (*dpy_gl_scanout_texture)(DisplayChangeListener *dcl,
                                    uint32_t backing_id,
@@ -369,6 +371,8 @@ void dpy_gl_ctx_destroy(QemuConsole *con, QEMUGLContext ctx);
 int dpy_gl_ctx_make_current(QemuConsole *con, QEMUGLContext ctx);
 
 bool console_has_gl(QemuConsole *con);
+bool console_gl_texture_read_sync(QemuConsole *con);
+bool console_gl_scanout_texture_is(QemuConsole *con, uint32_t texture);
 
 typedef uint32_t console_ch_t;
 
@@ -389,6 +393,7 @@ typedef struct GraphicHwOps {
     int (*get_flags)(void *opaque); /* optional, default 0 */
     void (*invalidate)(void *opaque);
     void (*gfx_update)(void *opaque);
+    bool (*gfx_readback)(void *opaque, QemuConsole *con, Error **errp);
     bool gfx_update_async; /* if true, calls graphic_hw_update_done() */
     void (*text_update)(void *opaque, console_ch_t *text);
     void (*ui_info)(void *opaque, uint32_t head, QemuUIInfo *info);
@@ -404,6 +409,7 @@ void graphic_console_set_hwops(QemuConsole *con,
 void graphic_console_close(QemuConsole *con);
 
 void graphic_hw_update(QemuConsole *con);
+bool graphic_hw_readback(QemuConsole *con, Error **errp);
 void graphic_hw_update_done(QemuConsole *con);
 void graphic_hw_invalidate(QemuConsole *con);
 void graphic_hw_text_update(QemuConsole *con, console_ch_t *chardata);

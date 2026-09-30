@@ -28,20 +28,20 @@ triton9UnsupportedResult(HANDLE hDevice, const void *args)
         return triton9UnsupportedResult(hDevice, args); \
     }
 
-/* Vista calls UpdateWInfo while it publishes a newly-created D3D9 device.
- * Triton presents through the WDDM Present DDI and does not retain a separate
- * window binding, so this is intentionally a validated no-op.  Treating this
- * required bookkeeping callback as NOTAVAILABLE makes the public runtime
- * abandon CreateDeviceEx before it can issue its first resource operation. */
+/* WNear/WFar select W-based rather than Z-based table fog at the DDI
+ * boundary. This callback also arrives during runtime state initialization. */
 static HRESULT APIENTRY
 triton9UpdateWInfo(HANDLE hDevice, const D3DDDIARG_WINFO *args)
 {
     TRITON9_DEVICE *device = (TRITON9_DEVICE *)hDevice;
 
-    if (!device || !args)
+    if (!device || !args || !device->shaderLockInitialized)
         return E_INVALIDARG;
     if (device->deviceLost)
         return D3DDDIERR_DEVICEREMOVED;
+    EnterCriticalSection(&device->shaderLock);
+    device->wFogEnable = args->WNear != 1.0f || args->WFar != 1.0f;
+    LeaveCriticalSection(&device->shaderLock);
     return S_OK;
 }
 TRITON9_UNSUPPORTED(triton9DrawRectPatch,
@@ -50,8 +50,6 @@ TRITON9_UNSUPPORTED(triton9DrawRectPatch,
 TRITON9_UNSUPPORTED(triton9DrawTriPatch,
                     (HANDLE hDevice, const D3DDDIARG_DRAWTRIPATCH *args,
                      const D3DDDITRIPATCH_INFO *info, const FLOAT *data))
-TRITON9_UNSUPPORTED(triton9VolBlt,
-                    (HANDLE hDevice, const D3DDDIARG_VOLUMEBLT *args))
 #ifndef D3DHAL_STATESETCREATE
 #define D3DHAL_STATESETCREATE 5u
 #endif
@@ -95,11 +93,7 @@ TRITON9_UNSUPPORTED(triton9UpdatePalette,
                      const PALETTEENTRY *entries))
 TRITON9_UNSUPPORTED(triton9SetPalette,
                     (HANDLE hDevice, const D3DDDIARG_SETPALETTE *args))
-/* MIL programs a material as part of the canonical hardware-device state
- * block, even though that block immediately disables lighting for its 2D
- * composition draws.  Preserve the value rather than treating the callback
- * as an unsupported rendering feature; this is required device state and is
- * the natural storage point for the eventual fixed-function lighting path. */
+/* Retain material state for the generated fixed-function lighting shader. */
 static HRESULT APIENTRY
 triton9SetMaterial(HANDLE hDevice, const D3DDDIARG_SETMATERIAL *args)
 {
@@ -114,27 +108,141 @@ triton9SetMaterial(HANDLE hDevice, const D3DDDIARG_SETMATERIAL *args)
     LeaveCriticalSection(&device->shaderLock);
     return S_OK;
 }
-TRITON9_UNSUPPORTED(triton9SetLight,
-                    (HANDLE hDevice, const D3DDDIARG_SETLIGHT *args,
-                     const D3DDDI_LIGHT *light))
-TRITON9_UNSUPPORTED(triton9CreateLight,
-                    (HANDLE hDevice, const D3DDDIARG_CREATELIGHT *args))
-TRITON9_UNSUPPORTED(triton9DestroyLight,
-                    (HANDLE hDevice, const D3DDDIARG_DESTROYLIGHT *args))
-/* Do not make public device creation depend on the old clip-plane callback.
- * Triton reports no usable user clip planes, and SetRenderState rejects any
- * nonzero CLIPPLANEENABLE mask, but Vista still initializes this ABI field
- * while publishing a device.  Validate the device and plane slot, then keep
- * it a state-only no-op; it cannot affect a draw on the current path. */
+/* Runtime light indices are identifiers, not positions in the active-light
+ * array. Preserve disabled definitions independently of the eight lights
+ * that can contribute to a fixed-function draw. shaderLock protects the list. */
+static TRITON9_LIGHT **
+triton9FindLight(TRITON9_DEVICE *device, UINT index)
+{
+    TRITON9_LIGHT **slot = &device->lights;
+
+    while (*slot && (*slot)->index != index)
+        slot = &(*slot)->next;
+    return slot;
+}
+
+static HRESULT APIENTRY
+triton9CreateLight(HANDLE hDevice, const D3DDDIARG_CREATELIGHT *args)
+{
+    TRITON9_DEVICE *device = (TRITON9_DEVICE *)hDevice;
+    TRITON9_LIGHT **slot;
+    TRITON9_LIGHT *light;
+
+    if (!device || !args || !device->shaderLockInitialized)
+        return E_INVALIDARG;
+    if (device->deviceLost)
+        return D3DDDIERR_DEVICEREMOVED;
+    EnterCriticalSection(&device->shaderLock);
+    slot = triton9FindLight(device, args->Index);
+    if (*slot) {
+        LeaveCriticalSection(&device->shaderLock);
+        return D3DDDIERR_INVALIDCALL;
+    }
+    light = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*light));
+    if (light) {
+        light->index = args->Index;
+        light->data.Type = D3DLIGHT_DIRECTIONAL;
+        light->data.Diffuse.r = 1.0f;
+        light->data.Diffuse.g = 1.0f;
+        light->data.Diffuse.b = 1.0f;
+        light->data.Direction.z = 1.0f;
+        *slot = light;
+    }
+    LeaveCriticalSection(&device->shaderLock);
+    return light ? S_OK : E_OUTOFMEMORY;
+}
+
+static HRESULT APIENTRY
+triton9SetLight(HANDLE hDevice, const D3DDDIARG_SETLIGHT *args,
+                const D3DDDI_LIGHT *data)
+{
+    TRITON9_DEVICE *device = (TRITON9_DEVICE *)hDevice;
+    TRITON9_LIGHT *light;
+    HRESULT hr = S_OK;
+
+    if (!device || !args || !device->shaderLockInitialized ||
+        (UINT)args->DataType > D3DDDI_SETLIGHT_DATA)
+        return E_INVALIDARG;
+    if (device->deviceLost)
+        return D3DDDIERR_DEVICEREMOVED;
+    if (args->DataType == D3DDDI_SETLIGHT_DATA &&
+        (!data || (data->Type != D3DLIGHT_POINT &&
+                   data->Type != D3DLIGHT_SPOT &&
+                   data->Type != D3DLIGHT_DIRECTIONAL)))
+        return D3DDDIERR_INVALIDCALL;
+    EnterCriticalSection(&device->shaderLock);
+    light = *triton9FindLight(device, args->Index);
+    if (!light) {
+        hr = D3DDDIERR_INVALIDCALL;
+    } else if (args->DataType == D3DDDI_SETLIGHT_DATA) {
+        light->data = *data;
+    } else if (args->DataType == D3DDDI_SETLIGHT_DISABLE) {
+        light->enabled = FALSE;
+    } else if (!light->enabled) {
+        TRITON9_LIGHT *other;
+        UINT active = 0;
+        for (other = device->lights; other; other = other->next)
+            active += other->enabled != 0;
+        if (active >= 8)
+            hr = D3DDDIERR_INVALIDCALL;
+        else
+            light->enabled = TRUE;
+    }
+    LeaveCriticalSection(&device->shaderLock);
+    return hr;
+}
+
+static HRESULT APIENTRY
+triton9DestroyLight(HANDLE hDevice, const D3DDDIARG_DESTROYLIGHT *args)
+{
+    TRITON9_DEVICE *device = (TRITON9_DEVICE *)hDevice;
+    TRITON9_LIGHT **slot;
+    TRITON9_LIGHT *light;
+
+    if (!device || !args || !device->shaderLockInitialized)
+        return E_INVALIDARG;
+    EnterCriticalSection(&device->shaderLock);
+    slot = triton9FindLight(device, args->Index);
+    light = *slot;
+    if (light)
+        *slot = light->next;
+    LeaveCriticalSection(&device->shaderLock);
+    if (!light)
+        return D3DDDIERR_INVALIDCALL;
+    HeapFree(GetProcessHeap(), 0, light);
+    return S_OK;
+}
+
+void
+triton9DestroyLights(TRITON9_DEVICE *device)
+{
+    TRITON9_LIGHT *light;
+
+    if (!device || !device->shaderLockInitialized)
+        return;
+    EnterCriticalSection(&device->shaderLock);
+    light = device->lights;
+    device->lights = NULL;
+    while (light) {
+        TRITON9_LIGHT *next = light->next;
+        HeapFree(GetProcessHeap(), 0, light);
+        light = next;
+    }
+    LeaveCriticalSection(&device->shaderLock);
+}
+
 static HRESULT APIENTRY
 triton9SetClipPlane(HANDLE hDevice, const D3DDDIARG_SETCLIPPLANE *args)
 {
     TRITON9_DEVICE *device = (TRITON9_DEVICE *)hDevice;
 
-    if (!device || !args || args->Index >= 6)
+    if (!device || !args || args->Index >= 6 || !device->shaderLockInitialized)
         return E_INVALIDARG;
     if (device->deviceLost)
         return D3DDDIERR_DEVICEREMOVED;
+    EnterCriticalSection(&device->shaderLock);
+    CopyMemory(device->clipPlanes[args->Index], args->Plane, sizeof(args->Plane));
+    LeaveCriticalSection(&device->shaderLock);
     return S_OK;
 }
 

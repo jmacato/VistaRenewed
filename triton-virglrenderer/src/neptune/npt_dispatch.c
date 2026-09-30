@@ -570,6 +570,47 @@ npt_dispatch_subgroup_com(struct npt_context *ctx,
    }
 }
 
+static void
+npt_dispatch_resource_copy_color(struct npt_context *ctx,
+                                 struct npt_dispatch_context *dispatch,
+                                 struct npt_cs_decoder *dec,
+                                 struct npt_cs_encoder *enc,
+                                 const struct npt_command_header *header)
+{
+   struct npt_cmd_resource_copy_color cmd = {0};
+   struct npt_cmd_resource_copy_color_reply reply = {0};
+   HRESULT hr = NPT_E_INVALIDARG;
+
+   if (header->cmd_size != sizeof(cmd)) {
+      npt_cs_decoder_set_fatal(dec);
+      return;
+   }
+   npt_cs_decoder_read(dec, sizeof(cmd) - sizeof(cmd.header),
+                       &cmd.context_id, sizeof(cmd) - sizeof(cmd.header));
+   if (npt_cs_decoder_get_fatal(dec))
+      return;
+
+   if (npt_dispatch_is_ring_dispatch(ctx, dispatch) &&
+       cmd.context_id && cmd.dst_rtv_id && cmd.src_srv_id) {
+      void *context = npt_context_lookup_object(
+         ctx, NULL, cmd.context_id, NPT_OBJECT_TYPE_ID3D11DEVICECONTEXT);
+      void *dst = npt_context_lookup_object(
+         ctx, NULL, cmd.dst_rtv_id, NPT_OBJECT_TYPE_ID3D11RENDERTARGETVIEW);
+      void *src = npt_context_lookup_object(
+         ctx, NULL, cmd.src_srv_id, NPT_OBJECT_TYPE_ID3D11SHADERRESOURCEVIEW);
+      struct npt_d3d_library *lib = npt_renderer_get_library();
+      if (context && dst && src)
+         hr = lib && lib->backend == NPT_BACKEND_DXVK && lib->pfn_copy_color
+            ? lib->pfn_copy_color(context, dst, src) : NPT_E_NOTIMPL;
+   }
+   reply.header.cmd_type = header->cmd_type;
+   reply.header.cmd_return = (uint32_t)(int32_t)hr;
+   if (npt_cs_encoder_acquire(enc)) {
+      npt_cs_encoder_write(enc, sizeof(reply), &reply, sizeof(reply));
+      npt_cs_encoder_release(enc);
+   }
+}
+
 static bool
 npt_dispatch_subgroup_resource(struct npt_context *ctx,
                                struct npt_dispatch_context *dispatch,
@@ -590,6 +631,9 @@ npt_dispatch_subgroup_resource(struct npt_context *ctx,
       return true;
    case NPT_TRANSPORT_RESOURCE_EXECUTE_CMD_STREAM:
       npt_dispatch_execute_command_stream(ctx, dispatch, dec, enc, header);
+      return true;
+   case NPT_TRANSPORT_RESOURCE_COPY_COLOR:
+      npt_dispatch_resource_copy_color(ctx, dispatch, dec, enc, header);
       return true;
    default:
       return false;
@@ -757,6 +801,53 @@ npt_dispatch_shared_open_res(struct npt_context *ctx,
    }
 }
 
+static void
+npt_dispatch_shared_query_layout(struct npt_context *ctx,
+                                struct npt_cs_decoder *dec,
+                                struct npt_cs_encoder *enc,
+                                const struct npt_command_header *header)
+{
+   struct npt_cmd_shared_query_layout cmd = {0};
+   cmd.header = *header;
+   npt_cs_decoder_read(dec, sizeof(cmd) - sizeof(cmd.header),
+                       &cmd.res_id, sizeof(cmd) - sizeof(cmd.header));
+   if (npt_cs_decoder_get_fatal(dec))
+      return;
+   struct npt_cmd_shared_query_layout_reply reply = {0};
+   HRESULT hr = npt_shared_query_layout(ctx, cmd.res_id, &reply);
+   reply.header.cmd_type = header->cmd_type;
+   reply.header.cmd_return = (uint32_t)(int32_t)hr;
+   if (npt_cs_encoder_acquire(enc)) {
+      npt_cs_encoder_write(enc, sizeof(reply), &reply, sizeof(reply));
+      npt_cs_encoder_release(enc);
+   }
+}
+
+static void
+npt_dispatch_shared_cancel_export(struct npt_context *ctx,
+                                  struct npt_cs_decoder *dec,
+                                  struct npt_cs_encoder *enc,
+                                  const struct npt_command_header *header)
+{
+   struct npt_cmd_shared_cancel_export cmd;
+   cmd.header = *header;
+   npt_cs_decoder_read(dec, sizeof(cmd) - sizeof(cmd.header),
+                       &cmd.blob_id, sizeof(cmd) - sizeof(cmd.header));
+   if (npt_cs_decoder_get_fatal(dec))
+      return;
+   npt_context_cancel_pending_blob(ctx, cmd.blob_id);
+   if (header->cmd_flags & NPT_CMD_FLAG_REPLY) {
+      struct npt_cmd_shared_cancel_export_reply reply;
+      memset(&reply, 0, sizeof(reply));
+      reply.header.cmd_type = header->cmd_type;
+      reply.header.cmd_return = 0;
+      if (npt_cs_encoder_acquire(enc)) {
+         npt_cs_encoder_write(enc, sizeof(reply), &reply, sizeof(reply));
+         npt_cs_encoder_release(enc);
+      }
+   }
+}
+
 static bool
 npt_dispatch_subgroup_shared(struct npt_context *ctx,
                              struct npt_cs_decoder *dec,
@@ -765,8 +856,14 @@ npt_dispatch_subgroup_shared(struct npt_context *ctx,
                              uint32_t method)
 {
    switch (method) {
+   case NPT_TRANSPORT_SHARED_CANCEL_EXPORT:
+      npt_dispatch_shared_cancel_export(ctx, dec, enc, header);
+      return true;
    case NPT_TRANSPORT_SHARED_EXPORT_BLOB:
       npt_dispatch_shared_export_blob(ctx, dec, enc, header);
+      return true;
+   case NPT_TRANSPORT_SHARED_QUERY_LAYOUT:
+      npt_dispatch_shared_query_layout(ctx, dec, enc, header);
       return true;
    case NPT_TRANSPORT_SHARED_OPEN_RES:
       npt_dispatch_shared_open_res(ctx, dec, enc, header);

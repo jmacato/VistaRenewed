@@ -4,6 +4,7 @@
 triton_src = files(
   'triton.c',
   'tritonDDI.c',
+  'tritonD3D10.c',
   'tritonResource.c',
   'tritonView.c',
   'tritonState.c',

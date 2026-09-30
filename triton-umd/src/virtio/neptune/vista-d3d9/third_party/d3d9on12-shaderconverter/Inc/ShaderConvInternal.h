@@ -133,7 +133,7 @@ namespace ShaderConv
         {
             if (m_pdwInstrs)
             {
-                delete(m_pdwInstrs);
+                delete[] m_pdwInstrs;
             }
         }
 

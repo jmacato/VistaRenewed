@@ -45,6 +45,10 @@ virtio_gpu_cmd_res_xfer_toh_2d(uint32_t res) "res 0x%x"
 virtio_gpu_cmd_res_xfer_toh_3d(uint32_t res) "res 0x%x"
 virtio_gpu_cmd_res_xfer_fromh_3d(uint32_t res) "res 0x%x"
 virtio_gpu_cmd_res_flush(uint32_t res, uint32_t w, uint32_t h, uint32_t x, uint32_t y) "res 0x%x, w %d, h %d, x %d, y %d"
+virtio_gpu_neptune_scanout_pixel(uint32_t res, uint32_t format, uint32_t stride, uint32_t offset, uint32_t pixel) "res 0x%x format=0x%x stride=%u offset=%u center=0x%08x"
+virtio_gpu_neptune_fence_wake(int fd) "fd=%d"
+virtio_gpu_neptune_present_cost(uint32_t res, uint64_t bytes, int64_t snapshot_ns, int64_t upload_ns) "res=0x%x bytes=%" PRIu64 " snapshot_ns=%" PRId64 " upload_ns=%" PRId64
+virtio_gpu_neptune_gpu_scanout(uint32_t res, uint32_t width, uint32_t height) "res=0x%x gpu-copy=%ux%u"
 virtio_gpu_cmd_ctx_create(uint32_t ctx, const char *name) "ctx 0x%x, name %s"
 virtio_gpu_cmd_ctx_destroy(uint32_t ctx) "ctx 0x%x"
 virtio_gpu_cmd_ctx_res_attach(uint32_t ctx, uint32_t res) "ctx 0x%x, res 0x%x"
@@ -223,4 +227,3 @@ apple_gfx_iosfc_map_memory_new_region(size_t i, void *region, uint64_t start, ui
 apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *f) "a=%p b=%p c=%p d=%p e=%p f=%p"
 apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
-

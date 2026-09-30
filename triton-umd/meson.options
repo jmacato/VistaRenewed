@@ -904,3 +904,6 @@ option(
   value : false,
   description : 'use experimental virtio backend for intel driver',
 )
+
+option('npt_vista_d3d10', type : 'boolean', value : false,
+  description : 'Build the Vista SP2 D3D10/10.1 WDDM frontend')

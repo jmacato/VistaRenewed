@@ -23,6 +23,9 @@
 #include "neptune-protocol/npt_protocol_defs.h"
 #include "neptune-protocol/npt_protocol_directx_types.h"
 
+/* Native DXVK export layout constraint; separate from the forced-linear bit. */
+#define NPT_D3D11_MISC_SINGLE_PLANE_EXPORT 0x20000000u
+
 bool
 npt_shared_texture_export_blob(void *texture_wrapper,
                                struct npt_shared_texture_desc *desc)
@@ -83,6 +86,7 @@ npt_shared_texture_export_blob(void *texture_wrapper,
          (const struct npt_blob_export_info *)
             ((uint8_t *)shm->mmap_ptr + info_off);
       if (info->plane_count == 1 &&
+          info->texture_layout <= 2 &&
           info->allocation_size &&
           info->planes[0].pitch &&
           info->planes[0].offset < info->allocation_size &&
@@ -110,6 +114,13 @@ npt_shared_texture_export_blob(void *texture_wrapper,
               texture_id, hr);
    }
 
+   if (!ok && NPT_SUCCEEDED(hr)) {
+      HRESULT cancel_hr = npt_dispatch_shared_cancel_export(
+         npt_com_self_ring(texture_wrapper), texture_id);
+      if (!NPT_SUCCEEDED(cancel_hr))
+         npt_log("shared texture: invalid export cancellation failed hr=0x%x",
+                 cancel_hr);
+   }
    npt_renderer_shmem_unref(renderer, shm);
    return ok;
 }
@@ -136,8 +147,13 @@ npt_shared_texture_virgl_format(uint32_t dxgi_format)
    case DXGI_FORMAT_B8G8R8A8_UNORM: return 1;  /* VIRGL_FORMAT_B8G8R8A8_UNORM */
    case DXGI_FORMAT_B8G8R8X8_UNORM: return 2;  /* VIRGL_FORMAT_B8G8R8X8_UNORM */
    case DXGI_FORMAT_R8G8B8A8_UNORM: return 67; /* VIRGL_FORMAT_R8G8B8A8_UNORM */
+   case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return 104; /* VIRGL_FORMAT_R8G8B8A8_SRGB */
+   case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return 100; /* VIRGL_FORMAT_B8G8R8A8_SRGB */
+   case DXGI_FORMAT_B8G8R8X8_UNORM_SRGB: return 101; /* VIRGL_FORMAT_B8G8R8X8_SRGB */
+   case DXGI_FORMAT_R10G10B10A2_UNORM: return 8; /* VIRGL_FORMAT_R10G10B10A2_UNORM */
+   case DXGI_FORMAT_R16G16B16A16_FLOAT: return 94; /* VIRGL_FORMAT_R16G16B16A16_FLOAT */
    default:
-      npt_log("shared texture: DXGI format %u is not scanout-capable",
+      npt_log("shared texture: DXGI format %u is not shareable",
               dxgi_format);
       return 0;
    }
@@ -148,14 +164,12 @@ npt_shared_texture_create_exportable(void *device_wrapper,
                                      uint32_t width, uint32_t height,
                                      uint32_t dxgi_format)
 {
-   if (!device_wrapper || !width || !height || width > UINT32_MAX / 4 ||
+   const uint32_t bytes_per_pixel = dxgi_format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 8 : 4;
+   if (!device_wrapper || !width || !height || width > UINT32_MAX / bytes_per_pixel ||
        !npt_shared_texture_virgl_format(dxgi_format))
       return NULL;
 
-   /* MISC_SHARED gives the texture exportable dedicated storage; the
-    * vendor LINEAR_EXPORT bit forces DRM_FORMAT_MOD_LINEAR so
-    * modifier-less consumers can import it.  SHADER_RESOURCE lets
-    * copy/composite paths sample it. */
+   /* The shared-allocation ABI supports one plane, with its DRM modifier. */
    D3D11_TEXTURE2D_DESC d;
    memset(&d, 0, sizeof(d));
    d.Width            = width;
@@ -167,7 +181,7 @@ npt_shared_texture_create_exportable(void *device_wrapper,
    d.Usage            = D3D11_USAGE_DEFAULT;
    d.BindFlags        = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
    d.MiscFlags        = D3D11_RESOURCE_MISC_SHARED |
-                        NPT_D3D11_MISC_LINEAR_EXPORT;
+                        NPT_D3D11_MISC_SINGLE_PLANE_EXPORT;
 
    const struct npt_id3d11device_client_vtbl *v =
       (const void *)((struct npt_com_base *)device_wrapper)->lpVtbl;

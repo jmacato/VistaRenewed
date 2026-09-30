@@ -15,6 +15,7 @@
 #include "util/anon_file.h"
 #include "util/bitscan.h"
 #include "virgl_fence.h"
+#include "virtgpu_drm.h"
 
 #include "proxy_client.h"
 
@@ -426,6 +427,12 @@ proxy_context_get_blob(struct virgl_context *base,
       return -1;
    }
 
+   if (reply.layout_version != RENDER_RESOURCE_LAYOUT_VERSION) {
+      proxy_log("unsupported resource layout version %u", reply.layout_version);
+      close(reply_fd);
+      return -1;
+   }
+
    bool reply_fd_valid = false;
    switch (reply.fd_type) {
    case VIRGL_RESOURCE_FD_DMABUF:
@@ -458,6 +465,7 @@ proxy_context_get_blob(struct virgl_context *base,
       blob->vulkan_info = reply.vulkan_info;
 
    blob->export_format = reply.export_format;
+   blob->export_layout = reply.export_layout;
 
    proxy_context_resource_add(ctx, res_id);
 
@@ -520,10 +528,46 @@ proxy_context_attach_resource(struct virgl_context *base, struct virgl_resource 
    enum virgl_resource_fd_type res_fd_type = res->fd_type;
    int res_fd = res->fd;
    uint64_t res_size = res->map_size;
+   struct virgl_attachment_layout layout = res->export_layout;
    bool close_res_fd = false;
    if (res_fd_type == VIRGL_RESOURCE_FD_INVALID) {
       /* importable pipe resouce can only export as dma-buf */
-      res_fd_type = virgl_resource_export_fd(res, &res_fd);
+      if (base->capset_id == VIRTGPU_DRM_CAPSET_NEPTUNE && res->pipe_resource) {
+         struct virgl_renderer_export_query query = {0};
+         struct virgl_renderer_resource_info info = {0};
+         query.hdr.stype = VIRGL_RENDERER_STRUCTURE_TYPE_EXPORT_QUERY;
+         query.hdr.size = sizeof(query);
+         query.in_resource_id = res_id;
+         query.in_export_fds = 1;
+         virgl_renderer_force_ctx_0();
+         if (virgl_renderer_execute(&query, sizeof(query))) {
+            proxy_log("failed to query image layout for res %u", res_id);
+            return;
+         }
+         if (query.out_num_fds != 1 || query.out_fds[0] < 0 ||
+             !query.out_fourcc ||
+             virgl_renderer_resource_get_info(res_id, &info)) {
+            for (unsigned i = 0; i < 4; i++)
+               if (query.out_fds[i] >= 0)
+                  close(query.out_fds[i]);
+            proxy_log("unsupported image layout for res %u", res_id);
+            return;
+         }
+         res_fd = query.out_fds[0];
+         res_fd_type = VIRGL_RESOURCE_FD_DMABUF;
+         layout.width = info.width;
+         layout.height = info.height;
+         layout.fourcc = query.out_fourcc;
+         layout.modifier = query.out_modifier;
+         for (unsigned i = 0; i < 4; i++) {
+            layout.strides[i] = query.out_strides[i];
+            layout.offsets[i] = query.out_offsets[i];
+            if (query.out_strides[i])
+               layout.plane_count = i + 1;
+         }
+      } else {
+         res_fd_type = virgl_resource_export_fd(res, &res_fd);
+      }
       if (res_fd_type != VIRGL_RESOURCE_FD_DMABUF) {
          /* close fd for unexpected fd type from succeeded export */
          if (res_fd_type != VIRGL_RESOURCE_FD_INVALID)
@@ -536,7 +580,13 @@ proxy_context_attach_resource(struct virgl_context *base, struct virgl_resource 
        * - pipe resource created by vrend has a zero map_size
        * - blob resource created by vrend can have non-zero fake map_size
        */
-      res_size = lseek(res_fd, 0, SEEK_END);
+      off_t size = lseek(res_fd, 0, SEEK_END);
+      if (size <= 0) {
+         close(res_fd);
+         proxy_log("invalid dma-buf size for res %u", res_id);
+         return;
+      }
+      res_size = size;
 
       close_res_fd = true;
    }
@@ -547,6 +597,7 @@ proxy_context_attach_resource(struct virgl_context *base, struct virgl_resource 
       .res_id = res_id,
       .fd_type = res_fd_type,
       .size = res_size,
+      .layout = layout,
    };
    if (!proxy_socket_send_request_with_fds(&ctx->socket, &req, sizeof(req), &res_fd, 1))
       proxy_log("failed to attach res %d", res_id);

@@ -142,6 +142,9 @@ VioGpuAdapter::VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     m_PciDev = 0;
     m_PciFunc = 0;
     m_pCursorBuf = NULL;
+    m_PointerResource = 0;
+    m_PointerX = m_PointerY = 0;
+    m_PointerVisible = m_PointerFailed = FALSE;
     // Present-fence completion contexts: fixed-size, allocated at Escape
     // (PASSIVE) and freed from the response DPC (DISPATCH), which is exactly
     // the lookaside contract.
@@ -672,6 +675,139 @@ NTSTATUS VioGpuAdapter::QueryDeviceDescriptor(_In_ ULONG ChildUid, _Inout_ DXGK_
     return STATUS_MONITOR_NO_MORE_DESCRIPTOR_DATA;
 }
 
+// The cursor queue is independent of rendering. Wait only for shape uploads,
+// never for pointer motion. A timed-out upload retains its backing until reset.
+NTSTATUS VioGpuAdapter::PointerCommand(const void *data, UINT size, BOOLEAN cursor,
+                                      PGPU_MEM_ENTRY entries, UINT count)
+{
+    PGPU_VBUFFER buffer = NULL;
+    PVOID command = cursor ? m_CursorQueue.AllocCursor(&buffer) : ctrlQueue.AllocCmd(&buffer, size);
+    VioGpuQueue *queue = cursor ? (VioGpuQueue *)&m_CursorQueue : (VioGpuQueue *)&ctrlQueue;
+    if (!command) {
+        delete[] reinterpret_cast<PBYTE>(entries);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(command, data, size);
+    buffer->data_buf = entries;
+    buffer->data_size = count * sizeof(*entries);
+    PVIOGPU_WAIT_CTX wait = VioGpuAllocWaitCtx();
+    if (!wait) { queue->ReleaseBuffer(buffer); return STATUS_INSUFFICIENT_RESOURCES; }
+    wait->vbuf = buffer;
+    InterlockedIncrement(&wait->refCount);
+    InterlockedIncrement(&buffer->ref_count);
+    buffer->complete_cb = VioGpuWaitCtxCompleteCB;
+    buffer->complete_ctx = wait;
+    UINT submitted = cursor ? m_CursorQueue.QueueCursor(buffer) : ctrlQueue.QueueBuffer(buffer);
+    if (submitted == (UINT)-1) {
+        VioGpuWaitCtxFinish(wait, buffer, queue, STATUS_SUCCESS);
+        queue->ReleaseBuffer(buffer);
+        return STATUS_DEVICE_NOT_READY;
+    }
+    LARGE_INTEGER timeout;
+    timeout.QuadPart = -20000000; // two seconds; late callbacks own heap state
+    NTSTATUS status = KeWaitForSingleObject(&wait->event, Executive, KernelMode, FALSE, &timeout);
+    if (!VioGpuWaitCtxFinish(wait, buffer, queue, status)) return STATUS_IO_TIMEOUT;
+    if (NT_SUCCESS(status) && !cursor &&
+        (!buffer->resp_buf || ((PGPU_CTRL_HDR)buffer->resp_buf)->type != VIRTIO_GPU_RESP_OK_NODATA))
+        status = STATUS_UNSUCCESSFUL;
+    queue->ReleaseBuffer(buffer);
+    return status;
+}
+
+NTSTATUS VioGpuAdapter::SetPointerPosition(const DXGKARG_SETPOINTERPOSITION *position)
+{
+    PAGED_CODE();
+    if (position->VidPnSourceId != 0) return STATUS_INVALID_PARAMETER;
+    m_PointerX = position->X;
+    m_PointerY = position->Y;
+    m_PointerVisible = position->Flags.Visible;
+    if (!m_PointerResource || !IsHardwareInit()) return STATUS_SUCCESS;
+    PGPU_VBUFFER buffer = NULL;
+    PGPU_UPDATE_CURSOR cmd = (PGPU_UPDATE_CURSOR)m_CursorQueue.AllocCursor(&buffer);
+    if (!cmd) return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(cmd, sizeof(*cmd));
+    cmd->hdr.type = VIRTIO_GPU_CMD_MOVE_CURSOR;
+    // WDDM positions the bitmap origin; virtio/QEMU positions its hotspot.
+    cmd->pos.x = (UINT)((LONGLONG)m_PointerX + m_PointerShape.XHot);
+    cmd->pos.y = (UINT)((LONGLONG)m_PointerY + m_PointerShape.YHot);
+    cmd->resource_id = m_PointerVisible && !m_PointerFailed ? m_PointerResource : 0;
+    return m_CursorQueue.QueueCursor(buffer) == (UINT)-1 ? STATUS_DEVICE_NOT_READY : STATUS_SUCCESS;
+}
+
+NTSTATUS VioGpuAdapter::SetPointerShape(const DXGKARG_SETPOINTERSHAPE *shape)
+{
+    PAGED_CODE();
+    if (shape->VidPnSourceId != 0 || shape->Flags.Value != 2 ||
+        !shape->pPixels || !shape->Width || !shape->Height ||
+        shape->Width > 64 || shape->Height > 64 || shape->Pitch < shape->Width * 4 ||
+        shape->XHot >= shape->Width || shape->YHot >= shape->Height)
+        return STATUS_NOT_SUPPORTED;
+    if (!IsHardwareInit() || m_PointerFailed) return STATUS_DEVICE_NOT_READY;
+    NTSTATUS status = STATUS_SUCCESS;
+    if (!m_PointerResource) {
+        if (!m_CursorSegment.Init(64 * 64 * 4, NULL)) return STATUS_INSUFFICIENT_RESOURCES;
+        m_PointerResource = resourceIdr.GetId();
+        GPU_RES_CREATE_2D create = {};
+        create.hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+        create.resource_id = m_PointerResource;
+        create.format = VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+        create.width = create.height = 64;
+        status = PointerCommand(&create, sizeof(create), FALSE, NULL, 0);
+        if (!NT_SUCCESS(status)) goto fail;
+        {
+            PSCATTER_GATHER_LIST sg = m_CursorSegment.GetSGList();
+            PGPU_MEM_ENTRY entries = new (VIOGPU_NONPAGED_POOL) GPU_MEM_ENTRY[sg->NumberOfElements];
+            if (!entries) { status = STATUS_INSUFFICIENT_RESOURCES; goto fail; }
+            for (UINT i = 0; i < sg->NumberOfElements; ++i) {
+                entries[i].addr = sg->Elements[i].Address.QuadPart;
+                entries[i].length = sg->Elements[i].Length;
+                entries[i].padding = 0;
+            }
+            GPU_RES_ATTACH_BACKING attach = {};
+            attach.hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+            attach.resource_id = m_PointerResource;
+            attach.nr_entries = sg->NumberOfElements;
+            status = PointerCommand(&attach, sizeof(attach), FALSE, entries, attach.nr_entries);
+            if (!NT_SUCCESS(status)) goto fail;
+        }
+    }
+    // The previous UPDATE_CURSOR has been consumed before this backing is reused.
+    RtlZeroMemory(m_CursorSegment.GetVirtualAddress(), 64 * 64 * 4);
+    for (UINT y = 0; y < shape->Height; ++y)
+        RtlCopyMemory((PBYTE)m_CursorSegment.GetVirtualAddress() + y * 256,
+                      (const BYTE *)shape->pPixels + (SIZE_T)y * shape->Pitch, shape->Width * 4);
+    {
+        GPU_RES_TRANSF_TO_HOST_2D transfer = {};
+        transfer.hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+        transfer.resource_id = m_PointerResource;
+        transfer.r.width = transfer.r.height = 64;
+        status = PointerCommand(&transfer, sizeof(transfer), FALSE, NULL, 0);
+        if (!NT_SUCCESS(status)) goto fail;
+        GPU_UPDATE_CURSOR update = {};
+        update.hdr.type = VIRTIO_GPU_CMD_UPDATE_CURSOR;
+        update.resource_id = m_PointerResource;
+        update.pos.x = (UINT)((LONGLONG)m_PointerX + shape->XHot);
+        update.pos.y = (UINT)((LONGLONG)m_PointerY + shape->YHot);
+        update.hot_x = shape->XHot;
+        update.hot_y = shape->YHot;
+        status = PointerCommand(&update, sizeof(update), TRUE, NULL, 0);
+        if (!NT_SUCCESS(status)) goto fail;
+        m_PointerShape.XHot = shape->XHot;
+        m_PointerShape.YHot = shape->YHot;
+        if (!m_PointerVisible) {
+            DXGKARG_SETPOINTERPOSITION position = {};
+            position.X = m_PointerX; position.Y = m_PointerY;
+            return SetPointerPosition(&position);
+        }
+        return STATUS_SUCCESS;
+    }
+fail:
+    m_PointerFailed = TRUE;
+    // Do not free/rewrite a buffer that an outstanding transfer can still read.
+    // Device reset releases the host resource before the backing is freed.
+    return status;
+}
+
 NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQueryAdapterInfo)
 {
     PAGED_CODE();
@@ -848,13 +984,9 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 pDriverCaps->SupportNonVGA = IsVgaDevice();
 #endif
 
-                // Disable pointer on viogpu3d for now
-                // if (IsPointerEnabled()) {
-                //    pDriverCaps->MaxPointerWidth = POINTER_SIZE;
-                //    pDriverCaps->MaxPointerHeight = POINTER_SIZE;
-                //    pDriverCaps->PointerCaps.Value = 0;
-                //    pDriverCaps->PointerCaps.Color = 1;
-                //}
+                pDriverCaps->MaxPointerWidth = 64;
+                pDriverCaps->MaxPointerHeight = 64;
+                pDriverCaps->PointerCaps.Color = 1;
 
                 // Surely this is enough...
                 // pDriverCaps->NumberOfSwizzlingRanges = 1024;
@@ -997,6 +1129,28 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
     if ((pEscape == NULL) || (pEscape->pPrivateDriverData == NULL))
     {
         return STATUS_INVALID_PARAMETER;
+    }
+
+    if (pEscape->PrivateDriverDataSize >= sizeof(TRITON_TRACE_REQUEST) &&
+        ((TRITON_TRACE_REQUEST *)pEscape->pPrivateDriverData)->type == TRITON_TRACE_ESCAPE_TYPE) {
+        TRITON_TRACE_REQUEST *request = (TRITON_TRACE_REQUEST *)pEscape->pPrivateDriverData;
+        if (request->operation == TT_MARK) {
+            if (request->length != pEscape->PrivateDriverDataSize - 4 ||
+                !request->run || request->run != VioGpuTraceRun() || !request->frame)
+                return STATUS_INVALID_PARAMETER;
+            VioGpuDevice *device = VioGpuDevice::FromHandle(pEscape->hDevice);
+            if (!device) return STATUS_INVALID_PARAMETER;
+            device->traceTag.run = request->run;
+            device->traceTag.frame = request->frame;
+            device->traceTag.command = 0;
+            device->traceTag.context = device->m_Context.GetId();
+            device->traceTag.pid = HandleToULong(PsGetCurrentProcessId());
+            VioGpuTraceRecord(TT_KMD_MARK, device->traceTag, request->arg0, request->arg1);
+            request->arg0 = device->traceTag.context;
+            request->arg1 = KeQueryPerformanceCounter(NULL).QuadPart;
+            return STATUS_SUCCESS;
+        }
+        return VioGpuTraceControl(request, pEscape->PrivateDriverDataSize);
     }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s Flags = %d\n", __FUNCTION__, pEscape->Flags.Value));
@@ -1541,6 +1695,9 @@ VOID VioGpuAdapter::DpcRoutine(VOID)
             {
                 DbgPrint(TRACE_LEVEL_VERBOSE,
                          ("---> %s m_CursorQueue pvbuf = %p len = %u\n", __FUNCTION__, pvbuf, len));
+                if (pvbuf->complete_cb != NULL &&
+                    InterlockedExchange(&pvbuf->complete_fired, 1) == 0)
+                    pvbuf->complete_cb(pvbuf->complete_ctx, pvbuf->buf, NULL);
                 m_CursorQueue.ReleaseQueueBuffer(pvbuf);
                 m_CursorQueue.ReleaseBuffer(pvbuf);
             };
@@ -1978,6 +2135,11 @@ void VioGpuAdapter::VioGpuAdapterClose()
         m_CursorQueue.Close();
         virtio_delete_queues(&m_VioDev);
         m_GpuBuf.Close();
+        // Both virtqueues have stopped and all callback references are drained.
+        if (m_PointerResource) resourceIdr.PutId(m_PointerResource);
+        m_PointerResource = 0;
+        m_CursorSegment.Close();
+        m_PointerFailed = m_PointerVisible = FALSE;
         virtio_device_shutdown(&m_VioDev);
     }
     DbgPrint(TRACE_LEVEL_FATAL, ("<--- %s\n", __FUNCTION__));

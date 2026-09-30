@@ -35,7 +35,7 @@ static D3D11_QUERY tritonQueryDdiToD3D11(D3D10DDI_QUERY q)
     case D3D11DDI_QUERY_STREAMOVERFLOWPREDICATE_STREAM1: return D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1;
     case D3D11DDI_QUERY_STREAMOVERFLOWPREDICATE_STREAM2: return D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2;
     case D3D11DDI_QUERY_STREAMOVERFLOWPREDICATE_STREAM3: return D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3;
-    default: return D3D11_QUERY_EVENT;
+    default: return (D3D11_QUERY)-1;
     }
 }
 
@@ -53,23 +53,30 @@ tritonCreateQuery(D3D10DDI_HDEVICE hDevice, const D3D10DDIARG_CREATEQUERY *pArgs
     PTRITON_QUERY  q  = (PTRITON_QUERY)(hQuery.pDrvPrivate);
     if (!pD || !q) return;
     q->pQuery   = NULL;
+    q->type = pArgs->Query;
 
     D3D11_QUERY_DESC d = {};
     d.Query     = tritonQueryDdiToD3D11(pArgs->Query);
+    if ((int)d.Query < 0) { tritonSetError(pD, E_INVALIDARG); return; }
     d.MiscFlags = (pArgs->MiscFlags & D3D10DDI_QUERY_MISCFLAG_PREDICATEHINT)
                   ? D3D11_QUERY_MISC_PREDICATEHINT : 0;
-    /* PREDICATEHINT means the runtime intends to use this with
-     * SetPredication. CreatePredicate returns an ID3D11Predicate, which
-     * derives from ID3D11Query, so the result fits the existing slot. */
+    /* The query kind determines the interface. PREDICATEHINT is optional
+     * and only permits the host to optimize predication; it does not turn
+     * an ordinary query into a predicate. */
     HRESULT hr;
-    if (d.MiscFlags & D3D11_QUERY_MISC_PREDICATEHINT) {
+    if (d.Query == D3D11_QUERY_OCCLUSION_PREDICATE ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0 ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1 ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2 ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3) {
         ID3D11Predicate *pPred = NULL;
         hr = ID3D11Device1_CreatePredicate(pD->pDev1, &d, &pPred);
         q->pQuery = (ID3D11Query *)pPred;
     } else {
         hr = ID3D11Device1_CreateQuery(pD->pDev1, &d, &q->pQuery);
     }
-    if (FAILED(hr)) { TR_LOG("CreateQuery: 0x%08lx", hr); q->pQuery = NULL; }
+    if (FAILED(hr)) { TR_LOG("CreateQuery: 0x%08lx", hr); q->pQuery = NULL; tritonSetError(pD, hr); }
 }
 
 void APIENTRY
@@ -85,7 +92,7 @@ tritonQueryBegin(D3D10DDI_HDEVICE hDevice, D3D10DDI_HQUERY hQuery)
 {
     PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
     PTRITON_QUERY  q  = (PTRITON_QUERY)(hQuery.pDrvPrivate);
-    if (!pD || !q || !q->pQuery) return;
+    if (!pD || !q || !q->pQuery) { tritonSetError(pD, E_INVALIDARG); return; }
     ID3D11DeviceContext1_Begin(pD->pCtx1, (ID3D11Asynchronous *)q->pQuery);
 }
 
@@ -94,7 +101,7 @@ tritonQueryEnd(D3D10DDI_HDEVICE hDevice, D3D10DDI_HQUERY hQuery)
 {
     PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
     PTRITON_QUERY  q  = (PTRITON_QUERY)(hQuery.pDrvPrivate);
-    if (!pD || !q || !q->pQuery) return;
+    if (!pD || !q || !q->pQuery) { tritonSetError(pD, E_INVALIDARG); return; }
     ID3D11DeviceContext1_End(pD->pCtx1, (ID3D11Asynchronous *)q->pQuery);
 }
 
@@ -104,13 +111,20 @@ tritonQueryGetData(D3D10DDI_HDEVICE hDevice, D3D10DDI_HQUERY hQuery,
 {
     PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
     PTRITON_QUERY  q  = (PTRITON_QUERY)(hQuery.pDrvPrivate);
-    if (!pD || !q || !q->pQuery) return;
+    if (!pD || !q || !q->pQuery) { tritonSetError(pD, E_INVALIDARG); return; }
     /* DDI's D3D10_DDI_GET_DATA_FLAG values match D3D11_ASYNC_GETDATA_DONOTFLUSH.
      * GetData returns S_FALSE when the query result isn't ready. The DDI's
      * QueryGetData is VOID, so we propagate that via pfnSetErrorCb so the
      * app doesn't read stale pData. */
+    D3D11_QUERY_DATA_PIPELINE_STATISTICS stats;
+    BOOL legacyStats = q->type == D3D10DDI_QUERY_PIPELINESTATS && pData;
+    if (legacyStats && DataSize != sizeof(D3D10_DDI_QUERY_DATA_PIPELINE_STATISTICS)) {
+        tritonSetError(pD, E_INVALIDARG); return;
+    }
     HRESULT hr = ID3D11DeviceContext1_GetData(pD->pCtx1, (ID3D11Asynchronous *)q->pQuery,
-                                              pData, DataSize, Flags);
+        legacyStats ? &stats : pData, legacyStats ? sizeof(stats) : DataSize, Flags);
+    if (hr == S_OK && legacyStats)
+        memcpy(pData, &stats, sizeof(D3D10_DDI_QUERY_DATA_PIPELINE_STATISTICS));
     if (hr == S_FALSE)
         tritonSetError(pD, DXGI_DDI_ERR_WASSTILLDRAWING);
     else if (FAILED(hr))
@@ -342,6 +356,14 @@ static UINT tritonMsaaQuality(PTRITON_DEVICE pD, DXGI_FORMAT Format, UINT Sample
             if (m > famMax)
                 famMax = m;
         }
+#if defined(NPT_D3D10_RUNTIME_DDI)
+        /* A castable MSAA resource must also be allocatable through its
+         * typeless parent. A typed view's support alone does not establish
+         * that capability for the family. */
+        UINT parentQuality = tritonNativeMsaaQuality(pD, group[0], SampleCount);
+        if (famMax > parentQuality)
+            famMax = parentQuality;
+#endif
         /* Publish one consistent value per member: read-only depth views and
          * non-renderable members stay 0 (they are exempt from the agreement),
          * while every render-target-capable member -- the typeless parent AND
@@ -393,7 +415,9 @@ static UINT tritonTranslateFormatSupport(UINT s1, UINT s2)
     if (s1 & D3D11_FORMAT_SUPPORT_SHADER_SAMPLE)             caps |= D3D10_DDI_FORMAT_SUPPORT_SHADER_SAMPLE;
     if (s1 & D3D11_FORMAT_SUPPORT_RENDER_TARGET)            caps |= D3D10_DDI_FORMAT_SUPPORT_RENDERTARGET;
     if (s1 & D3D11_FORMAT_SUPPORT_BLENDABLE)                caps |= D3D10_DDI_FORMAT_SUPPORT_BLENDABLE;
+#if !defined(NPT_D3D10_RUNTIME_DDI)
     if (s1 & D3D11_FORMAT_SUPPORT_IA_VERTEX_BUFFER)         caps |= D3D11_1DDI_FORMAT_SUPPORT_VERTEX_BUFFER;
+#endif
     /* MULTISAMPLE_RENDERTARGET is intentionally NOT mapped here -- the caller
      * (tritonCheckFormatSupport) sets it from tritonMsaaQuality() so it stays
      * exactly consistent with CheckMultisampleQualityLevels. */
@@ -477,6 +501,10 @@ tritonCheckMultisampleQualityLevels(D3D10DDI_HDEVICE hDevice, DXGI_FORMAT Format
 {
     PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
     if (!pD || !pNumQualityLevels) { if (pNumQualityLevels) *pNumQualityLevels = 0; return; }
+    if (SampleCount <= 1 || SampleCount > 32) {
+        *pNumQualityLevels = SampleCount == 1 ? 1 : 0;
+        return;
+    }
     /* Answer from the same cached mask CheckFormatSupport builds, so quality
      * and the MULTISAMPLE_RENDERTARGET bit cannot diverge: D3DMetal reports
      * MSAA quality for R10G10B10_XR_BIAS_A2_UNORM while reporting zero format
@@ -691,15 +719,22 @@ tritonCreateQuery_WDDM2_0(D3D10DDI_HDEVICE hDevice,
     }
 
     q->pQuery  = NULL;
+    q->type = pArgs->Query;
 
     D3D11_QUERY_DESC1 d = {};
     d.Query       = tritonQueryDdiToD3D11(pArgs->Query);
+    if ((int)d.Query < 0) { tritonSetError(pD, E_INVALIDARG); return; }
     d.MiscFlags   = (pArgs->MiscFlags & D3D10DDI_QUERY_MISCFLAG_PREDICATEHINT)
                     ? D3D11_QUERY_MISC_PREDICATEHINT : 0;
     d.ContextType = tritonContextFlagToEnum(pArgs->ContextType);
 
     HRESULT hr;
-    if (d.MiscFlags & D3D11_QUERY_MISC_PREDICATEHINT) {
+    if (d.Query == D3D11_QUERY_OCCLUSION_PREDICATE ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0 ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1 ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2 ||
+        d.Query == D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3) {
         /* No CreatePredicate1 with ContextType in D3D11.3; fall back to
          * the 11.0 path (ContextType discarded for predicates). */
         D3D11_QUERY_DESC d0 = { d.Query, d.MiscFlags };
@@ -711,5 +746,5 @@ tritonCreateQuery_WDDM2_0(D3D10DDI_HDEVICE hDevice,
         hr = ID3D11Device3_CreateQuery1(pD->pDev3, &d, &pQuery1);
         q->pQuery = (ID3D11Query *)pQuery1;
     }
-    if (FAILED(hr)) { TR_LOG("CreateQuery_WDDM2_0: 0x%08lx", hr); q->pQuery = NULL; }
+    if (FAILED(hr)) { TR_LOG("CreateQuery_WDDM2_0: 0x%08lx", hr); q->pQuery = NULL; tritonSetError(pD, hr); }
 }

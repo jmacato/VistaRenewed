@@ -14,6 +14,8 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/iov.h"
+#include "qemu/main-loop.h"
+#include "system/runstate.h"
 #include "trace.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-gpu.h"
@@ -21,9 +23,14 @@
 #include "hw/virtio/virtio-gpu-pixman.h"
 
 #include "ui/egl-helpers.h"
+#include "ui/triton-trace.h"
 
 #include <sys/mman.h>
 #include <sys/stat.h>
+#ifdef CONFIG_LINUX
+#include "standard-headers/drm/drm_fourcc.h"
+#include "ui/egl-external-copy.h"
+#endif
 
 #define VIRGL_RENDERER_UNSTABLE_APIS
 #include <virglrenderer.h>
@@ -50,7 +57,110 @@ struct virtio_gpu_virgl_resource {
     uint32_t blob_mem;
     uint32_t blob_flags;
     uint32_t blob_ctx_id;
+    struct VirtIOGPUExternalCopy *external_copy;
 };
+
+#ifdef CONFIG_LINUX
+struct VirtIOGPUExternalCopy {
+    QemuEGLExternalCopy *helper;
+    GLuint texture;
+    uint32_t width, height;
+    EGLContext context;
+};
+
+struct VirtIOGPUExternalContext {
+    EGLenum api;
+    EGLDisplay display;
+    EGLContext context;
+    EGLSurface draw, read;
+};
+
+static struct VirtIOGPUExternalContext virtio_gpu_external_context(void)
+{
+    struct VirtIOGPUExternalContext saved = {
+        eglQueryAPI(), eglGetCurrentDisplay(), eglGetCurrentContext(),
+        eglGetCurrentSurface(EGL_DRAW), eglGetCurrentSurface(EGL_READ),
+    };
+    return saved;
+}
+
+static void virtio_gpu_external_stop(
+    VirtIOGPU *g, const struct VirtIOGPUExternalContext *saved,
+    const QemuEGLExternalCopyError *error)
+{
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+
+    assert(qemu_in_main_thread());
+    if (!gl->context_failure) {
+        gl->context_failure = g_memdup2(saved, sizeof(*saved));
+        g->parent_obj.renderer_blocked++;
+        error_report("Neptune external copy stopped the renderer: %s "
+                     "(EGL=0x%x GL=0x%x)", error->operation,
+                     error->egl_error, error->gl_error);
+    }
+    if (gl->fence_poll) {
+        timer_del(gl->fence_poll);
+    }
+    if (gl->cmdq_resume_bh) {
+        qemu_bh_cancel(gl->cmdq_resume_bh);
+    }
+    virtio_gpu_virgl_clear_fence_watches(g);
+    qemu_system_vmstop_request(RUN_STATE_INTERNAL_ERROR);
+}
+#endif
+
+bool virtio_gpu_virgl_recover_context(VirtIOGPU *g)
+{
+#ifdef CONFIG_LINUX
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    struct VirtIOGPUExternalContext *saved = gl->context_failure;
+
+    assert(qemu_in_main_thread());
+    if (saved) {
+        if (!eglBindAPI(saved->api) ||
+            !eglMakeCurrent(saved->display, saved->draw, saved->read,
+                             saved->context)) {
+            error_report("Neptune EGL context recovery failed (EGL=0x%x)",
+                         eglGetError());
+            qemu_system_vmstop_request(RUN_STATE_INTERNAL_ERROR);
+            return false;
+        }
+        g_clear_pointer(&gl->context_failure, g_free);
+        assert(g->parent_obj.renderer_blocked);
+        g->parent_obj.renderer_blocked--;
+    }
+#endif
+    return true;
+}
+
+static bool virtio_gpu_neptune_copy_destroy(
+    VirtIOGPU *g, struct VirtIOGPUExternalCopy **slot)
+{
+#ifdef CONFIG_LINUX
+    struct VirtIOGPUExternalCopy *copy = *slot;
+    struct VirtIOGPUExternalContext saved;
+    QemuEGLExternalCopyError error;
+    bool ok;
+
+    if (!copy) {
+        return true;
+    }
+    if (VIRTIO_GPU_GL(g)->context_failure) {
+        return false;
+    }
+    saved = virtio_gpu_external_context();
+    ok = qemu_egl_external_copy_destroy(&copy->helper, &error);
+    if (!copy->helper) {
+        g_clear_pointer(slot, g_free);
+    }
+    if (!ok) {
+        /* Retain the destination until a controlled reset can clean it up. */
+        virtio_gpu_external_stop(g, &saved, &error);
+        return false;
+    }
+#endif
+    return true;
+}
 
 /* Triton private extension: copy one completed SHM rectangle into the
  * retained, ordinary primary. It does not change scanout. */
@@ -108,6 +218,11 @@ virtio_gpu_virgl_disable_resource_scanouts(VirtIOGPU *g,
             virtio_gpu_disable_scanout(g, i);
         }
     }
+    /*
+     * Display callbacks can release the current EGL context. Restore the
+     * renderer context before destroying its GL objects and EGL images.
+     */
+    virgl_renderer_force_ctx_0();
 }
 
 #if VIRGL_RENDERER_CALLBACKS_VERSION >= 4
@@ -329,6 +444,12 @@ void virtio_gpu_virgl_resource_destroy(VirtIOGPU *g,
     struct iovec *res_iovs = NULL;
     int num_iovs = 0;
 
+    if (VIRTIO_GPU_GL(g)->context_failure ||
+        !virtio_gpu_neptune_copy_destroy(g, &vres->external_copy)) {
+        error_setg(errp, "Neptune resource retained after EGL context failure");
+        return;
+    }
+
 #if VIRGL_VERSION_MAJOR >= 1
     if (vres->mr) {
         virtio_gpu_virgl_destroy_hostmem_region(g, vres);
@@ -477,6 +598,11 @@ static void virgl_cmd_resource_unref(VirtIOGPU *g,
         return;
     }
 
+    if (!virtio_gpu_neptune_copy_destroy(g, &res->external_copy)) {
+        cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
+        return;
+    }
+
 #if VIRGL_VERSION_MAJOR >= 1
     if (virtio_gpu_virgl_unmap_resource_blob(g, res, cmd_suspended)) {
         cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
@@ -499,6 +625,87 @@ static void virgl_cmd_resource_unref(VirtIOGPU *g,
     res->base.iov_cnt = 0;
     virgl_renderer_resource_unref(unref.resource_id);
     virtio_gpu_resource_destroy(g, &res->base, NULL);
+}
+
+#if VIRGL_VERSION_MAJOR >= 1
+typedef struct VirtIOGPUContextFenceWatch {
+    VirtIOGPU *gpu;
+    int fd;
+    unsigned references;
+} VirtIOGPUContextFenceWatch;
+
+static void virtio_gpu_context_fence_ready(void *opaque)
+{
+    VirtIOGPUContextFenceWatch *watch = opaque;
+
+    /*
+     * Main-loop callback, like the fallback timer. Renderer polling drains
+     * its eventfd and retires completed fences before resuming commands.
+     */
+    trace_virtio_gpu_neptune_fence_wake(watch->fd);
+    virtio_gpu_virgl_fence_poll(watch->gpu);
+}
+
+static void virtio_gpu_context_fence_watch_free(void *opaque)
+{
+    VirtIOGPUContextFenceWatch *watch = opaque;
+
+    if (--watch->references) {
+        return;
+    }
+    qemu_set_fd_handler(watch->fd, NULL, NULL, NULL);
+    /* The renderer owns the descriptor; unregister before it closes it. */
+    g_free(watch);
+}
+#endif
+
+void virtio_gpu_virgl_clear_fence_watches(VirtIOGPU *g)
+{
+    g_clear_pointer(&VIRTIO_GPU_GL(g)->context_fence_watches,
+                    g_hash_table_unref);
+}
+
+static void virtio_gpu_watch_context_fences(VirtIOGPU *g, uint32_t ctx_id)
+{
+#if VIRGL_VERSION_MAJOR >= 1
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    VirtIOGPUContextFenceWatch *watch;
+    GHashTableIter iter;
+    gpointer value;
+    int fd;
+
+    if (!virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
+        return;
+    }
+    fd = virgl_renderer_context_get_poll_fd(ctx_id);
+    if (fd < 0) {
+        return; /* Contexts without notification retain timer polling. */
+    }
+    if (!gl->context_fence_watches) {
+        gl->context_fence_watches = g_hash_table_new_full(
+            g_direct_hash, g_direct_equal, NULL,
+            virtio_gpu_context_fence_watch_free);
+    }
+    /* vrend contexts share one renderer fd; proxy contexts have their own. */
+    g_hash_table_iter_init(&iter, gl->context_fence_watches);
+    while (g_hash_table_iter_next(&iter, NULL, &value)) {
+        watch = value;
+        if (watch->fd == fd) {
+            /* Retain before replacing the same context's existing entry. */
+            watch->references++;
+            g_hash_table_replace(gl->context_fence_watches,
+                                 GUINT_TO_POINTER(ctx_id), watch);
+            return;
+        }
+    }
+    watch = g_new0(VirtIOGPUContextFenceWatch, 1);
+    watch->gpu = g;
+    watch->fd = fd;
+    watch->references = 1;
+    g_hash_table_replace(gl->context_fence_watches,
+                         GUINT_TO_POINTER(ctx_id), watch);
+    qemu_set_fd_handler(fd, virtio_gpu_context_fence_ready, NULL, watch);
+#endif
 }
 
 static void virgl_cmd_context_create(VirtIOGPU *g,
@@ -525,6 +732,8 @@ static void virgl_cmd_context_create(VirtIOGPU *g,
                                                            cc.debug_name);
         if (ret) {
             cmd->error = virgl_status_to_virtio_error(ret);
+        } else {
+            virtio_gpu_watch_context_fences(g, cc.hdr.ctx_id);
         }
         return;
 #endif
@@ -535,6 +744,8 @@ static void virgl_cmd_context_create(VirtIOGPU *g,
                                             cc.debug_name);
     if (ret) {
         cmd->error = virgl_status_to_virtio_error(ret);
+    } else {
+        virtio_gpu_watch_context_fences(g, cc.hdr.ctx_id);
     }
 }
 
@@ -546,6 +757,10 @@ static void virgl_cmd_context_destroy(VirtIOGPU *g,
     VIRTIO_GPU_FILL_CMD(cd);
     trace_virtio_gpu_cmd_ctx_destroy(cd.hdr.ctx_id);
 
+    if (VIRTIO_GPU_GL(g)->context_fence_watches) {
+        g_hash_table_remove(VIRTIO_GPU_GL(g)->context_fence_watches,
+                            GUINT_TO_POINTER(cd.hdr.ctx_id));
+    }
     virgl_renderer_context_destroy(cd.hdr.ctx_id);
 }
 
@@ -559,12 +774,457 @@ static void virtio_gpu_rect_update(VirtIOGPU *g, int idx, int x, int y,
     dpy_gl_update(g->parent_obj.scanout[idx].con, x, y, width, height);
 }
 
-/*
- * Neptune HOST3D blobs are exported by the render server as linear shared
- * memory.  They deliberately have no pipe_resource, so the normal virgl
- * transfer path cannot read them.  Keep that path for regular resources and
- * copy SHM blobs into QEMU's CPU DisplaySurface instead.
- */
+#ifdef CONFIG_LINUX
+/* Snapshot mutable guest storage before acknowledging its consumption. */
+static int virtio_gpu_neptune_copy_texture(GLuint source, GLuint destination,
+                                          int sx, int sy, int ex, int ey,
+                                          int dx, int dy, int width, int height,
+                                          bool flip_target)
+{
+    GLint old_read, old_draw;
+    GLuint fbo[2];
+    GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+    bool has_srgb = qemu_egl_mode == DISPLAY_GL_MODE_CORE ||
+                   epoxy_has_gl_extension("GL_EXT_sRGB_write_control");
+    GLboolean srgb = has_srgb && glIsEnabled(GL_FRAMEBUFFER_SRGB);
+    int ret = -EIO;
+
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw);
+    glGenFramebuffers(2, fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo[0]);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, source, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo[1]);
+    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, destination, 0);
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) ==
+            GL_FRAMEBUFFER_COMPLETE &&
+        glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) ==
+            GL_FRAMEBUFFER_COMPLETE) {
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glDisable(GL_SCISSOR_TEST);
+        if (has_srgb) {
+            glDisable(GL_FRAMEBUFFER_SRGB);
+        }
+        glBlitFramebuffer(sx, sy, ex, ey, dx, dy, dx + width,
+                          flip_target ? dy - height : dy + height,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        ret = glGetError() == GL_NO_ERROR ? 0 : -EIO;
+    }
+    /* The guest can overwrite source as soon as the command completes. */
+    glFinish();
+    if (glGetError() != GL_NO_ERROR) {
+        ret = -EIO;
+    }
+    if (scissor) {
+        glEnable(GL_SCISSOR_TEST);
+    }
+    if (srgb) {
+        glEnable(GL_FRAMEBUFFER_SRGB);
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw);
+    glDeleteFramebuffers(2, fbo);
+    return ret;
+}
+
+/* DMA-BUF pixels must be interpreted using the exporter's image layout. */
+static int virtio_gpu_neptune_external_only(uint32_t fourcc, uint64_t modifier,
+                                            bool *external_only)
+{
+    EGLint count = 0, written = 0;
+    g_autofree EGLuint64KHR *modifiers = NULL;
+    g_autofree EGLBoolean *external = NULL;
+
+    *external_only = false;
+    if (!eglQueryDmaBufModifiersEXT(qemu_egl_display, fourcc, 0, NULL, NULL,
+                                    &count) || count < 0 || count > 4096) {
+        return -EIO;
+    }
+    if (!count) {
+        return -ENOTSUP;
+    }
+    modifiers = g_new(EGLuint64KHR, count);
+    external = g_new(EGLBoolean, count);
+    if (!eglQueryDmaBufModifiersEXT(qemu_egl_display, fourcc, count, modifiers,
+                                    external, &written) ||
+        written < 0 || written > count) {
+        return -EIO;
+    }
+    for (EGLint i = 0; i < written; i++) {
+        if (modifiers[i] == modifier) {
+            *external_only = external[i];
+            return 0;
+        }
+    }
+    return -ENOTSUP;
+}
+
+static int virtio_gpu_neptune_external_copy(
+    VirtIOGPU *g, struct VirtIOGPUExternalCopy **slot, EGLImageKHR image,
+    GLuint target, uint32_t target_width, uint32_t target_height,
+    uint32_t source_width, uint32_t source_height,
+    uint32_t left, uint32_t top, uint32_t target_x, uint32_t target_y,
+    uint32_t width, uint32_t height, bool flip_target, bool opaque)
+{
+    struct VirtIOGPUExternalContext saved = virtio_gpu_external_context();
+    struct VirtIOGPUExternalCopy *copy = *slot;
+    QemuEGLExternalCopyError error;
+    uint32_t dy;
+
+    if (VIRTIO_GPU_GL(g)->context_failure) {
+        return -EOWNERDEAD;
+    }
+    if (!target_width || !target_height || target_width > INT_MAX ||
+        target_height > INT_MAX || (flip_target && target_y < height)) {
+        return -EINVAL;
+    }
+    dy = flip_target ? target_y - height : target_y;
+    if (target_x > target_width || width > target_width - target_x ||
+        dy > target_height || height > target_height - dy) {
+        return -EINVAL;
+    }
+    if (copy && (copy->texture != target || copy->width != target_width ||
+                 copy->height != target_height ||
+                 copy->context != saved.context)) {
+        if (!virtio_gpu_neptune_copy_destroy(g, slot)) {
+            return -EOWNERDEAD;
+        }
+        copy = NULL;
+    }
+    if (!copy) {
+        copy = g_new0(struct VirtIOGPUExternalCopy, 1);
+        copy->helper = qemu_egl_external_copy_new(target, target_width,
+                                                 target_height, &error);
+        if (!copy->helper) {
+            g_free(copy);
+            if (error.context_restore_failed) {
+                virtio_gpu_external_stop(g, &saved, &error);
+                return -EOWNERDEAD;
+            }
+            return -EIO;
+        }
+        copy->texture = target;
+        copy->width = target_width;
+        copy->height = target_height;
+        copy->context = saved.context;
+        *slot = copy;
+    }
+    if (!qemu_egl_external_copy_run(copy->helper, image,
+            source_width, source_height, left, top, target_x, dy,
+            width, height, flip_target, opaque, &error)) {
+        if (error.context_restore_failed) {
+            virtio_gpu_external_stop(g, &saved, &error);
+            return -EOWNERDEAD;
+        }
+        return -EIO;
+    }
+    return 0;
+}
+
+static int virtio_gpu_neptune_transfer_dmabuf(
+    VirtIOGPU *g, int fd, uint32_t resource_id,
+    const struct virtio_gpu_framebuffer *fb,
+    const struct virtio_gpu_rect *source,
+    uint32_t left, uint32_t top, uint32_t width, uint32_t height,
+    DisplaySurface *surface, GLuint target, uint32_t target_x,
+    uint32_t target_y, bool flip_target,
+    struct VirtIOGPUExternalCopy **copy, uint32_t target_width,
+    uint32_t target_height, bool opaque, bool *gpu_required)
+{
+    struct virgl_renderer_resource_info info = { 0 };
+    struct virgl_renderer_export_query query = {
+        .hdr = {
+            .stype = VIRGL_RENDERER_STRUCTURE_TYPE_EXPORT_QUERY,
+            .size = sizeof(query),
+        },
+        .in_resource_id = resource_id,
+    };
+    EGLImageKHR image;
+    EGLint attrs[23];
+    GLuint texture = 0, framebuffer = 0;
+    GLint old_texture, old_framebuffer, old_pack_buffer;
+    GLint old_alignment, old_row_length, old_skip_rows, old_skip_pixels;
+    GLint old_swap_bytes = 0;
+    GLint old_image_height = 0, old_skip_images = 0;
+    GLenum format;
+    uint64_t offset, end, fb_offset;
+    uint32_t stride = surface ? surface_stride(surface) : 0;
+    bool desktop = qemu_egl_mode == DISPLAY_GL_MODE_CORE;
+    bool modifiers;
+    bool direct_read;
+    bool external_only = false;
+    int n = 0;
+    int ret = -EIO;
+
+    if (target) {
+        *gpu_required = true;
+    }
+    if (!width || !height ||
+        virgl_renderer_resource_get_info(resource_id, &info) ||
+        virgl_renderer_execute(&query, sizeof(query)) ||
+        query.out_num_fds != 1 || !info.width || !info.height ||
+        info.width != fb->width || info.height != fb->height ||
+        info.width > INT_MAX || info.height > INT_MAX ||
+        query.out_modifier == DRM_FORMAT_MOD_INVALID ||
+        query.out_strides[0] != fb->stride ||
+        query.out_strides[0] > INT_MAX || query.out_offsets[0] > INT_MAX ||
+        fb->bytes_pp != 4 || (!surface && !target) ||
+        stride % 4 || stride > INT_MAX ||
+        left < source->x || top < source->y ||
+        left > info.width || width > info.width - left ||
+        top > info.height || height > info.height - top) {
+        return -EINVAL;
+    }
+    for (int i = 1; i < 4; i++) {
+        if (query.out_strides[i] || query.out_offsets[i]) {
+            return -EINVAL;
+        }
+    }
+    fb_offset = (uint64_t)query.out_offsets[0] +
+                (uint64_t)source->y * fb->stride + (uint64_t)source->x * 4;
+    offset = (uint64_t)(top - source->y) * stride +
+             (uint64_t)(left - source->x) * 4;
+    end = offset + (uint64_t)(height - 1) * stride + (uint64_t)width * 4;
+    if (fb_offset != fb->offset || (surface &&
+        (!stride || end - offset > INT_MAX ||
+        left - source->x > surface_width(surface) ||
+        width > surface_width(surface) - (left - source->x) ||
+        end > (uint64_t)stride * surface_height(surface)))) {
+        return -EINVAL;
+    }
+
+    switch (query.out_fourcc) {
+    case DRM_FORMAT_ARGB8888:
+    case DRM_FORMAT_XRGB8888:
+        if ((fb->format != PIXMAN_LE_a8r8g8b8 &&
+             fb->format != PIXMAN_LE_x8r8g8b8) ||
+            (surface && surface_format(surface) != PIXMAN_LE_a8r8g8b8 &&
+             surface_format(surface) != PIXMAN_LE_x8r8g8b8)) {
+            return -EINVAL;
+        }
+        format = GL_BGRA;
+        break;
+    case DRM_FORMAT_ABGR8888:
+    case DRM_FORMAT_XBGR8888:
+        if ((fb->format != PIXMAN_LE_a8b8g8r8 &&
+             fb->format != PIXMAN_LE_x8b8g8r8) ||
+            (surface && surface_format(surface) != PIXMAN_LE_a8b8g8r8 &&
+             surface_format(surface) != PIXMAN_LE_x8b8g8r8)) {
+            return -EINVAL;
+        }
+        format = GL_RGBA;
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    if (!qemu_egl_display || eglGetCurrentContext() == EGL_NO_CONTEXT ||
+        epoxy_gl_version() < 30 ||
+        !epoxy_has_egl_extension(qemu_egl_display,
+                                "EGL_EXT_image_dma_buf_import")) {
+        return -ENOTSUP;
+    }
+    modifiers = epoxy_has_egl_extension(qemu_egl_display,
+                                       "EGL_EXT_image_dma_buf_import_modifiers");
+    if (query.out_modifier && !modifiers) {
+        return -ENOTSUP;
+    }
+    if (target && modifiers) {
+        ret = virtio_gpu_neptune_external_only(query.out_fourcc,
+                                              query.out_modifier,
+                                              &external_only);
+        if (ret) {
+            return ret;
+        }
+    }
+    ret = -EIO;
+    direct_read = desktop &&
+        (epoxy_gl_version() >= 45 ||
+         epoxy_has_gl_extension("GL_ARB_get_texture_sub_image"));
+    attrs[n++] = EGL_WIDTH;
+    attrs[n++] = info.width;
+    attrs[n++] = EGL_HEIGHT;
+    attrs[n++] = info.height;
+    attrs[n++] = EGL_LINUX_DRM_FOURCC_EXT;
+    attrs[n++] = query.out_fourcc;
+    attrs[n++] = EGL_DMA_BUF_PLANE0_FD_EXT;
+    attrs[n++] = fd;
+    attrs[n++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+    attrs[n++] = query.out_offsets[0];
+    attrs[n++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+    attrs[n++] = query.out_strides[0];
+    if (modifiers) {
+        attrs[n++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+        attrs[n++] = (uint32_t)query.out_modifier;
+        attrs[n++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+        attrs[n++] = query.out_modifier >> 32;
+    }
+    attrs[n++] = EGL_NONE;
+    image = eglCreateImageKHR(qemu_egl_display, EGL_NO_CONTEXT,
+                             EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
+    if (image == EGL_NO_IMAGE_KHR) {
+        return -EIO;
+    }
+    if (target && external_only) {
+        /*
+         * This source cannot attach to a desktop GL_TEXTURE_2D framebuffer.
+         * Never hide a failed required GPU copy behind a CPU roundtrip.
+         */
+        ret = virtio_gpu_neptune_external_copy(g, copy, image, target,
+            target_width, target_height, info.width, info.height,
+            left, top, target_x, target_y, width, height, flip_target, opaque);
+        /*
+         * EGL image destruction needs no current GL context. The helper has
+         * completed source consumption before a restoration failure.
+         */
+        eglDestroyImageKHR(qemu_egl_display, image);
+        return ret;
+    }
+
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &old_texture);
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_framebuffer);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack_buffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &old_alignment);
+    glGetIntegerv(GL_PACK_ROW_LENGTH, &old_row_length);
+    glGetIntegerv(GL_PACK_SKIP_ROWS, &old_skip_rows);
+    glGetIntegerv(GL_PACK_SKIP_PIXELS, &old_skip_pixels);
+    if (desktop) {
+        glGetIntegerv(GL_PACK_SWAP_BYTES, &old_swap_bytes);
+        glGetIntegerv(GL_PACK_IMAGE_HEIGHT, &old_image_height);
+        glGetIntegerv(GL_PACK_SKIP_IMAGES, &old_skip_images);
+        glPixelStorei(GL_PACK_SWAP_BYTES, GL_FALSE);
+        glPixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
+        glPixelStorei(GL_PACK_SKIP_IMAGES, 0);
+    }
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+    if (glGetError() != GL_NO_ERROR) {
+        goto out_restore;
+    }
+    if (target) {
+        ret = virtio_gpu_neptune_copy_texture(texture, target,
+            left, top, left + width, top + height,
+            target_x, target_y, width, height, flip_target);
+        goto out_restore;
+    }
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, texture, 0);
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) ==
+        GL_FRAMEBUFFER_COMPLETE) {
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glPixelStorei(GL_PACK_ROW_LENGTH, stride / 4);
+        glPixelStorei(GL_PACK_SKIP_ROWS, 0);
+        glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
+        if (direct_read) {
+            /* Imported images may not support reliable framebuffer reads. */
+            glGetTextureSubImage(texture, 0, left, top, 0, width, height, 1,
+                                 format, GL_UNSIGNED_BYTE, end - offset,
+                                 surface_data(surface) + offset);
+        } else {
+            GLuint copy_texture, copy_framebuffer;
+            GLint old_draw_framebuffer, old_unpack_buffer;
+            GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+            bool copied = false;
+
+            /* Read an owned attachment on GLES and older desktop GL. */
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &old_draw_framebuffer);
+            glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &old_unpack_buffer);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            glGenTextures(1, &copy_texture);
+            glBindTexture(GL_TEXTURE_2D, copy_texture);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, old_unpack_buffer);
+            glGenFramebuffers(1, &copy_framebuffer);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, copy_framebuffer);
+            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, copy_texture, 0);
+            if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) ==
+                GL_FRAMEBUFFER_COMPLETE) {
+                glDisable(GL_SCISSOR_TEST);
+                glBlitFramebuffer(left, top, left + width, top + height,
+                                  0, 0, width, height, GL_COLOR_BUFFER_BIT,
+                                  GL_NEAREST);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, copy_framebuffer);
+                glReadBuffer(GL_COLOR_ATTACHMENT0);
+                glReadPixels(0, 0, width, height,
+                             desktop ? format : GL_RGBA, GL_UNSIGNED_BYTE,
+                             surface_data(surface) + offset);
+                copied = glGetError() == GL_NO_ERROR;
+                if (copied && !desktop && format == GL_BGRA) {
+                    for (uint32_t row = 0; row < height; row++) {
+                        uint8_t *pixels = surface_data(surface) + offset +
+                                          (uint64_t)row * stride;
+                        for (uint32_t col = 0; col < width; col++) {
+                            uint8_t red = pixels[col * 4];
+                            pixels[col * 4] = pixels[col * 4 + 2];
+                            pixels[col * 4 + 2] = red;
+                        }
+                    }
+                }
+            }
+            if (scissor) {
+                glEnable(GL_SCISSOR_TEST);
+            }
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, old_draw_framebuffer);
+            glDeleteFramebuffers(1, &copy_framebuffer);
+            glDeleteTextures(1, &copy_texture);
+            if (!copied) {
+                goto out_restore;
+            }
+        }
+        if (glGetError() == GL_NO_ERROR) {
+            ret = 0;
+        }
+    }
+out_restore:
+    /* Complete external image reads before the flush response permits reuse. */
+    if (!target) {
+        glFinish();
+    }
+    if (glGetError() != GL_NO_ERROR) {
+        ret = -EIO;
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, old_framebuffer);
+    glBindTexture(GL_TEXTURE_2D, old_texture);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, old_pack_buffer);
+    glPixelStorei(GL_PACK_ALIGNMENT, old_alignment);
+    glPixelStorei(GL_PACK_ROW_LENGTH, old_row_length);
+    glPixelStorei(GL_PACK_SKIP_ROWS, old_skip_rows);
+    glPixelStorei(GL_PACK_SKIP_PIXELS, old_skip_pixels);
+    if (desktop) {
+        glPixelStorei(GL_PACK_SWAP_BYTES, old_swap_bytes);
+        glPixelStorei(GL_PACK_IMAGE_HEIGHT, old_image_height);
+        glPixelStorei(GL_PACK_SKIP_IMAGES, old_skip_images);
+    }
+    glDeleteFramebuffers(1, &framebuffer);
+    glDeleteTextures(1, &texture);
+    eglDestroyImageKHR(qemu_egl_display, image);
+    return ret;
+}
+
+static int virtio_gpu_neptune_readback_dmabuf(
+    int fd, uint32_t resource_id,
+    const struct virtio_gpu_framebuffer *fb,
+    const struct virtio_gpu_rect *source,
+    uint32_t left, uint32_t top, uint32_t width, uint32_t height,
+    DisplaySurface *surface)
+{
+    return virtio_gpu_neptune_transfer_dmabuf(NULL, fd, resource_id, fb, source,
+        left, top, width, height, surface, 0, 0, 0, false,
+        NULL, 0, 0, false, NULL);
+}
+#endif
+
+/* Darwin shared textures use linear SHM; Linux DMA-BUFs use GPU readback. */
 static int virtio_gpu_neptune_readback_blob(
     const struct virtio_gpu_virgl_resource *res,
     const struct virtio_gpu_framebuffer *fb,
@@ -596,12 +1256,23 @@ static int virtio_gpu_neptune_readback_blob(
     if (ret) {
         return ret;
     }
-    if (fd < 0 || fd_type != VIRGL_RENDERER_BLOB_FD_TYPE_SHM ||
+    if (fd < 0) {
+        ret = -EINVAL;
+        goto out_close;
+    }
+#ifdef CONFIG_LINUX
+    if (fd_type == VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF) {
+        ret = virtio_gpu_neptune_readback_dmabuf(fd, res->base.resource_id,
+                                               fb, source, left, top,
+                                               width, height, surface);
+        goto out_close;
+    }
+#endif
+    if (fd_type != VIRGL_RENDERER_BLOB_FD_TYPE_SHM ||
         fstat(fd, &st) < 0 || st.st_size < 0) {
         ret = -EINVAL;
         goto out_close;
     }
-
     mapped_size = MIN(res->base.blob_size, (uint64_t)st.st_size);
     source_offset = (uint64_t)fb->offset +
                     (uint64_t)(top - source->y) * fb->stride +
@@ -627,18 +1298,214 @@ static int virtio_gpu_neptune_readback_blob(
         goto out_close;
     }
 
+
     dst = surface_data(surface) + surface_offset;
     for (uint32_t row = 0; row < height; row++) {
         memcpy(dst + (uint64_t)row * dst_stride,
                map + source_offset + (uint64_t)row * fb->stride,
                (size_t)width * fb->bytes_pp);
     }
-    munmap(map, map_len);
     ret = 0;
+    munmap(map, map_len);
 
 out_close:
     close(fd);
     return ret;
+}
+
+/* The producer has completed its GPU release before these commands arrive. */
+static int virtio_gpu_neptune_copy_resource(
+    VirtIOGPU *g,
+    const struct virtio_gpu_virgl_resource *res,
+    const struct virtio_gpu_framebuffer *fb,
+    const struct virtio_gpu_rect *source,
+    const struct virtio_gpu_rect *rect,
+    uint32_t target, uint32_t x, uint32_t y, bool flip_target,
+    struct VirtIOGPUExternalCopy **copy, uint32_t target_width,
+    uint32_t target_height, bool opaque, bool *gpu_required)
+{
+    *gpu_required = false;
+#ifdef CONFIG_LINUX
+    struct virgl_renderer_resource_info info = { 0 };
+    uint32_t fd_type;
+    int fd = -1, ret;
+    int top, bottom;
+
+    /* Only an explicitly exported SHM source permits CPU-origin upload. */
+    *gpu_required = true;
+    if (res->is_blob) {
+        ret = virgl_renderer_resource_export_blob(res->base.resource_id,
+                                                  &fd_type, &fd);
+        if (ret) {
+            return ret;
+        }
+        if (fd < 0) {
+            return -EINVAL;
+        }
+        if (fd_type == VIRGL_RENDERER_BLOB_FD_TYPE_SHM) {
+            *gpu_required = false;
+        }
+        ret = fd_type == VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF ?
+            virtio_gpu_neptune_transfer_dmabuf(g, fd, res->base.resource_id,
+                fb, source, rect->x, rect->y, rect->width, rect->height,
+                NULL, target, x, y, flip_target, copy,
+                target_width, target_height, opaque, gpu_required) : -ENOTSUP;
+        close(fd);
+        return ret;
+    }
+    if (!target) {
+        return -EINVAL;
+    }
+    ret = virgl_renderer_resource_get_info(res->base.resource_id, &info);
+    if (ret || !info.tex_id) {
+        return ret ? ret : -ENOTSUP;
+    }
+    if ((uint64_t)rect->x + rect->width > info.width ||
+        (uint64_t)rect->y + rect->height > info.height) {
+        return -EINVAL;
+    }
+    top = rect->y;
+    bottom = top + rect->height;
+    if (info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP) {
+        top = info.height - top;
+        bottom = info.height - bottom;
+    }
+    return virtio_gpu_neptune_copy_texture(info.tex_id, target,
+        rect->x, top, rect->x + rect->width, bottom,
+        x, y, rect->width, rect->height, flip_target);
+#else
+    return -ENOTSUP;
+#endif
+}
+
+#ifdef CONFIG_LINUX
+static int virtio_gpu_neptune_scanout_fallback(
+    VirtIOGPU *g, const struct virtio_gpu_virgl_resource *res,
+    const struct virtio_gpu_framebuffer *fb,
+    const struct virtio_gpu_rect *source, int status)
+{
+    bool gpu_required;
+
+    /* A zero target classifies SHM without issuing a GPU copy. */
+    virtio_gpu_neptune_copy_resource(g, res, fb, source, source,
+        0, 0, 0, false, NULL, 0, 0, false, &gpu_required);
+    return gpu_required ? status : 0;
+}
+#endif
+
+/* Positive: published; zero: legacy fallback allowed; negative: copy failed. */
+static int virtio_gpu_neptune_gpu_scanout(
+    VirtIOGPU *g, unsigned index,
+    const struct virtio_gpu_virgl_resource *res,
+    const struct virtio_gpu_rect *source,
+    const struct virtio_gpu_rect *dirty)
+{
+#ifdef CONFIG_LINUX
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[index];
+    GLuint texture = gl->scanout_texture[index];
+    GLuint old_texture = texture;
+    struct VirtIOGPUExternalCopy *new_copy = NULL;
+    struct VirtIOGPUExternalCopy *old_copy = gl->scanout_external_copy[index];
+    struct VirtIOGPUExternalCopy **copy;
+    struct virtio_gpu_rect rect;
+    uint32_t right, bottom;
+    GLint binding, unpack;
+    bool gpu_required;
+    int ret;
+    bool replace = !texture ||
+        gl->scanout_texture_width[index] != source->width ||
+        gl->scanout_texture_height[index] != source->height;
+
+    if (!console_has_gl(scanout->con) ||
+        !console_gl_texture_read_sync(scanout->con) ||
+        epoxy_gl_version() < 30 ||
+        !scanout->ds || surface_bytes_per_pixel(scanout->ds) != 4 ||
+        (surface_format(scanout->ds) != PIXMAN_LE_x8r8g8b8 &&
+         surface_format(scanout->ds) != PIXMAN_LE_a8r8g8b8 &&
+         surface_format(scanout->ds) != PIXMAN_LE_x8b8g8r8 &&
+         surface_format(scanout->ds) != PIXMAN_LE_a8b8g8r8)) {
+        return virtio_gpu_neptune_scanout_fallback(g, res, &scanout->fb,
+                                                  source, -ENOTSUP);
+    }
+    rect.x = MAX(source->x, dirty->x);
+    rect.y = MAX(source->y, dirty->y);
+    right = MIN(source->x + source->width, dirty->x + dirty->width);
+    bottom = MIN(source->y + source->height, dirty->y + dirty->height);
+    if (replace || !gl->scanout_gpu[index]) {
+        rect = *source;
+    } else if (right <= rect.x || bottom <= rect.y) {
+        return true;
+    } else {
+        rect.width = right - rect.x;
+        rect.height = bottom - rect.y;
+    }
+    if (replace) {
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &binding);
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpack);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        /* Display storage is opaque, including XRGB padding variants. */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, source->width, source->height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, binding);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, unpack);
+        if (glGetError() != GL_NO_ERROR) {
+            glDeleteTextures(1, &texture);
+            return virtio_gpu_neptune_scanout_fallback(g, res, &scanout->fb,
+                                                      source, -EIO);
+        }
+    }
+    copy = replace ? &new_copy : &gl->scanout_external_copy[index];
+    ret = virtio_gpu_neptune_copy_resource(g, res, &scanout->fb, source, &rect,
+            texture, rect.x - source->x, rect.y - source->y, false,
+            copy, source->width, source->height, true, &gpu_required);
+    if (ret) {
+        if (replace) {
+            if (gl->context_failure ||
+                !virtio_gpu_neptune_copy_destroy(g, &new_copy)) {
+                gl->scanout_pending_texture[index] = texture;
+                gl->scanout_pending_copy[index] = new_copy;
+                return -EOWNERDEAD;
+            }
+            glDeleteTextures(1, &texture);
+        }
+        return gpu_required ? ret : 0;
+    }
+    if (replace) {
+        gl->scanout_external_copy[index] = new_copy;
+    }
+    gl->scanout_texture[index] = texture;
+    gl->scanout_texture_width[index] = source->width;
+    gl->scanout_texture_height[index] = source->height;
+    gl->scanout_gpu[index] = true;
+    gl->scanout_needs_full_update[index] = false;
+    trace_virtio_gpu_neptune_gpu_scanout(res->base.resource_id,
+                                        rect.width, rect.height);
+    if (!console_gl_scanout_texture_is(scanout->con, texture)) {
+        dpy_gl_scanout_texture(scanout->con, texture, false,
+            source->width, source->height, 0, 0, source->width, source->height,
+            NO_NATIVE_TEXTURE, NULL);
+    }
+    dpy_gl_update(scanout->con, rect.x - source->x, rect.y - source->y,
+                   rect.width, rect.height);
+    /* Display callbacks change contexts. Delete in the renderer share group. */
+    virgl_renderer_force_ctx_0();
+    if (replace && old_texture) {
+        if (!virtio_gpu_neptune_copy_destroy(g, &old_copy)) {
+            gl->scanout_pending_texture[index] = old_texture;
+            gl->scanout_pending_copy[index] = old_copy;
+            return -EOWNERDEAD;
+        }
+        glDeleteTextures(1, &old_texture);
+    }
+    return true;
+#else
+    return false;
+#endif
 }
 
 static int virtio_gpu_neptune_readback_surface(
@@ -733,6 +1600,46 @@ static int virtio_gpu_neptune_readback_surface(
     return 0;
 }
 
+/* Binding selects a resource; the following RESOURCE_FLUSH publishes its
+ * pixels. Do not download the same frame twice or recreate a GL texture for
+ * each buffer in the flip chain. The guest waits for that flush to complete. */
+static bool virtio_gpu_neptune_prepare_scanout(
+    struct virtio_gpu_scanout *scanout,
+    const struct virtio_gpu_framebuffer *fb,
+    const struct virtio_gpu_rect *source)
+{
+    uint64_t stride = (uint64_t)source->width * fb->bytes_pp;
+    pixman_format_code_t format = fb->format;
+
+    /*
+     * Scanout is opaque. DWM and exclusive primaries can alternate alpha
+     * and padding variants of the same byte layout; retaining their alpha
+     * distinction reallocates the frontend texture on every transition.
+     * This applies only to display storage, never to blit snapshots.
+     */
+    if (format == PIXMAN_a8r8g8b8) {
+        format = PIXMAN_x8r8g8b8;
+    } else if (format == PIXMAN_a8b8g8r8) {
+        format = PIXMAN_x8b8g8r8;
+    }
+    if (!source->width || !source->height || !fb->bytes_pp || !fb->format ||
+        source->width > INT_MAX || source->height > INT_MAX ||
+        stride > INT_MAX) {
+        return false;
+    }
+    if (!scanout->ds ||
+        surface_width(scanout->ds) != source->width ||
+        surface_height(scanout->ds) != source->height ||
+        surface_format(scanout->ds) != format) {
+        DisplaySurface *surface = qemu_create_displaysurface_from(
+            source->width, source->height, format, stride, NULL);
+        dpy_gl_scanout_disable(scanout->con);
+        dpy_gfx_replace_surface(scanout->con, surface);
+        scanout->ds = qemu_console_surface(scanout->con);
+    }
+    return true;
+}
+
 static DisplaySurface *virtio_gpu_neptune_create_surface(
     uint32_t resource_id,
     const struct virtio_gpu_virgl_resource *res,
@@ -763,15 +1670,17 @@ static DisplaySurface *virtio_gpu_neptune_create_surface(
 }
 
 static int virtio_gpu_neptune_present_blt(
+    VirtIOGPU *g,
     const struct virtio_gpu_triton_present_blt *b,
     const struct virtio_gpu_virgl_resource *src,
-    const struct virtio_gpu_virgl_resource *dst)
+    struct virtio_gpu_virgl_resource *dst)
 {
     struct virtio_gpu_framebuffer fb = { 0 };
     struct virtio_gpu_box box = { 0 };
     struct iovec iov;
     DisplaySurface *snapshot;
     uint64_t offset;
+    int64_t begin_ns, snapshot_ns;
     int ret;
 
     if (!src || !dst || !src->is_blob || dst->is_blob || src == dst ||
@@ -804,11 +1713,45 @@ static int virtio_gpu_neptune_present_blt(
     fb.height = b->source_height;
     fb.stride = b->source_stride;
     fb.offset = offset;
+    begin_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+#ifdef CONFIG_LINUX
+    struct virgl_renderer_resource_info target_info = { 0 };
+    bool gpu_required;
+    int target_status;
+
+    target_status = virgl_renderer_resource_get_info(
+        b->destination_resource_id, &target_info);
+    if (target_status) {
+        memset(&target_info, 0, sizeof(target_info));
+    }
+    /*
+     * Classify the source even when destination metadata is unavailable.
+     * Only a confirmed SHM source may use the CPU-origin upload below.
+     */
+    ret = virtio_gpu_neptune_copy_resource(g, src, &fb, &b->source_rect,
+            &b->source_rect, target_info.tex_id,
+            b->destination_x,
+            target_info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP ?
+                target_info.height - b->destination_y : b->destination_y,
+            target_info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
+            &dst->external_copy, target_info.width, target_info.height,
+            dst->base.format == VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
+            &gpu_required);
+    if (!ret) {
+        trace_virtio_gpu_neptune_present_cost(b->source_resource_id, 0,
+            qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - begin_ns, 0);
+        return 0;
+    }
+    if (gpu_required) {
+        return target_status ? target_status : ret;
+    }
+#endif
     snapshot = virtio_gpu_neptune_create_surface(
         b->source_resource_id, src, &fb, &b->source_rect, fb.format, &ret);
     if (!snapshot) {
         return ret;
     }
+    snapshot_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
     /* transfer_write_iov consumes this private snapshot synchronously.
      * Pixels outside the box remain in the destination resource. The later
@@ -824,6 +1767,10 @@ static int virtio_gpu_neptune_present_blt(
         b->destination_resource_id, 0, 0, surface_stride(snapshot),
         iov.iov_len, (struct virgl_box *)&box, 0, &iov, 1);
     qemu_free_displaysurface(snapshot);
+    trace_virtio_gpu_neptune_present_cost(b->source_resource_id,
+        (uint64_t)b->source_rect.width * b->source_rect.height * 4,
+        snapshot_ns - begin_ns,
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - snapshot_ns);
     return ret;
 }
 
@@ -843,7 +1790,12 @@ static void virgl_cmd_triton_present_blt(VirtIOGPU *g,
     }
     src = virtio_gpu_virgl_find_resource(g, b.source_resource_id);
     dst = virtio_gpu_virgl_find_resource(g, b.destination_resource_id);
-    ret = virtio_gpu_neptune_present_blt(&b, src, dst);
+    triton_trace_record(TT_HOST_COPY_BEGIN, cmd->cmd_hdr.fence_id,
+        cmd->cmd_hdr.ctx_id, b.source_resource_id,
+        b.destination_resource_id, 0);
+    ret = virtio_gpu_neptune_present_blt(g, &b, src, dst);
+    triton_trace_record(TT_HOST_COPY_END, cmd->cmd_hdr.fence_id,
+        cmd->cmd_hdr.ctx_id, ret, 0, 0);
     cmd->error = ret ? virgl_status_to_virtio_error(ret) : 0;
 }
 
@@ -894,6 +1846,7 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
             struct virtio_gpu_scanout *scanout =
                 &g->parent_obj.scanout[i];
             struct virtio_gpu_rect source;
+            struct virtio_gpu_rect dirty = rf.r;
             struct virtio_gpu_rect updated;
             int ret;
 
@@ -913,14 +1866,66 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
             source.y = scanout->y;
             source.width = scanout->width;
             source.height = scanout->height;
+            if (VIRTIO_GPU_GL(g)->scanout_needs_full_update[i]) {
+                dirty = source;
+            }
+            ret = virtio_gpu_neptune_gpu_scanout(g, i, res, &source, &dirty);
+            if (ret < 0) {
+                cmd->error = virgl_status_to_virtio_error(ret);
+                return;
+            }
+            if (ret > 0) {
+                continue;
+            }
+            if (VIRTIO_GPU_GL(g)->scanout_gpu[i]) {
+                DisplaySurface *surface = qemu_create_displaysurface_from(
+                    source.width, source.height,
+                    surface_format(scanout->ds), surface_stride(scanout->ds),
+                    NULL);
+                VIRTIO_GPU_GL(g)->scanout_needs_full_update[i] = true;
+                dpy_gl_scanout_disable(scanout->con);
+                dpy_gfx_replace_surface(scanout->con, surface);
+                scanout->ds = qemu_console_surface(scanout->con);
+                VIRTIO_GPU_GL(g)->scanout_gpu[i] = false;
+                dirty = source;
+                virgl_renderer_force_ctx_0();
+                if (!virtio_gpu_neptune_copy_destroy(g,
+                        &VIRTIO_GPU_GL(g)->scanout_external_copy[i])) {
+                    cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
+                    return;
+                }
+                glDeleteTextures(1, &VIRTIO_GPU_GL(g)->scanout_texture[i]);
+                VIRTIO_GPU_GL(g)->scanout_texture[i] = 0;
+            }
+            triton_trace_record(TT_HOST_COPY_BEGIN, cmd->cmd_hdr.fence_id,
+                cmd->cmd_hdr.ctx_id, rf.resource_id,
+                (uint64_t)dirty.width * dirty.height * 4, 0);
             ret = virtio_gpu_neptune_readback_surface(
-                rf.resource_id, res, &scanout->fb, &source, &rf.r,
+                rf.resource_id, res, &scanout->fb, &source, &dirty,
                 scanout->ds, &updated);
+            triton_trace_record(TT_HOST_COPY_END, cmd->cmd_hdr.fence_id,
+                cmd->cmd_hdr.ctx_id, ret, 0, 0);
             if (ret) {
                 cmd->error = virgl_status_to_virtio_error(ret);
                 return;
             }
+            VIRTIO_GPU_GL(g)->scanout_needs_full_update[i] = false;
             if (updated.width && updated.height) {
+                if (trace_event_get_state_backends(
+                        TRACE_VIRTIO_GPU_NEPTUNE_SCANOUT_PIXEL) &&
+                    surface_bytes_per_pixel(scanout->ds) == 4) {
+                    uint32_t pixel;
+                    const uint8_t *center = surface_data(scanout->ds) +
+                        (surface_height(scanout->ds) / 2) *
+                            surface_stride(scanout->ds) +
+                        (surface_width(scanout->ds) / 2) * 4;
+                    memcpy(&pixel, center, sizeof(pixel));
+                    trace_virtio_gpu_neptune_scanout_pixel(
+                        rf.resource_id, scanout->fb.format,
+                        scanout->fb.stride, scanout->fb.offset, pixel);
+                }
+                triton_trace_scanout(scanout->con, cmd->cmd_hdr.fence_id,
+                                     cmd->cmd_hdr.ctx_id, rf.resource_id);
                 dpy_gfx_update(scanout->con, updated.x, updated.y,
                                updated.width, updated.height);
             }
@@ -942,6 +1947,24 @@ static void virgl_cmd_resource_flush(VirtIOGPU *g,
             }
         }
     }
+}
+
+static bool virtio_gpu_neptune_set_scanout(VirtIOGPU *g, unsigned scanout_id,
+                                          struct virtio_gpu_framebuffer *fb,
+                                          struct virtio_gpu_rect *source)
+{
+    struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[scanout_id];
+
+    if (!virtio_gpu_neptune_prepare_scanout(scanout, fb, source)) {
+        return false;
+    }
+    /*
+     * Reused storage can still contain a different resource or source crop.
+     * The first flush must refresh the whole binding even for a dirty rect.
+     */
+    VIRTIO_GPU_GL(g)->scanout_needs_full_update[scanout_id] = true;
+    triton_trace_invalidate(scanout->con);
+    return true;
 }
 
 static void virgl_cmd_set_scanout(VirtIOGPU *g,
@@ -1048,16 +2071,15 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
     scanout = &g->parent_obj.scanout[ss.scanout_id];
     virgl_renderer_force_ctx_0();
     if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
-        int readback_status;
-        DisplaySurface *surface = virtio_gpu_neptune_create_surface(
-            ss.resource_id, res, &fb, &ss.r, fb.format, &readback_status);
-        if (!surface) {
-            cmd->error = virgl_status_to_virtio_error(readback_status);
+        /*
+         * Ordinary fullscreen primaries switch through SET_SCANOUT too.
+         * Reuse the display surface just as for blob scanouts; RESOURCE_FLUSH
+         * performs the single readback and publishes the completed pixels.
+         */
+        if (!virtio_gpu_neptune_set_scanout(g, ss.scanout_id, &fb, &ss.r)) {
+            cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
             return;
         }
-        dpy_gl_scanout_disable(scanout->con);
-        dpy_gfx_replace_surface(scanout->con, surface);
-        scanout->ds = qemu_console_surface(scanout->con);
     } else {
         qemu_console_resize(scanout->con, ss.r.width, ss.r.height);
         dpy_gl_scanout_texture(scanout->con, info.tex_id,
@@ -1642,6 +2664,15 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
     }
 
     if (!virtio_gpu_scanout_blob_to_fb(&fb, &ss, res->base.blob_size)) {
+        static unsigned int invalid_fb_count;
+        if (invalid_fb_count++ < 8) {
+            error_report("triton-scanout-blob invalid-fb res=%u blob=%u "
+                         "size=%" PRIu64 " image=%ux%u format=%u "
+                         "rect=%u,%u,%u,%u stride=%u offset=%u",
+                         ss.resource_id, res->is_blob, res->base.blob_size,
+                         ss.width, ss.height, ss.format, ss.r.x, ss.r.y,
+                         ss.r.width, ss.r.height, ss.strides[0], ss.offsets[0]);
+        }
         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
         return;
     }
@@ -1656,19 +2687,10 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
 #endif
 
     if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
-        struct virtio_gpu_scanout *scanout =
-            &g->parent_obj.scanout[ss.scanout_id];
-        int readback_status;
-        DisplaySurface *surface = virtio_gpu_neptune_create_surface(
-            ss.resource_id, res, &fb, &ss.r, fb.format, &readback_status);
-
-        if (!surface) {
-            cmd->error = virgl_status_to_virtio_error(readback_status);
+        if (!virtio_gpu_neptune_set_scanout(g, ss.scanout_id, &fb, &ss.r)) {
+            cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
             return;
         }
-        dpy_gl_scanout_disable(scanout->con);
-        dpy_gfx_replace_surface(scanout->con, surface);
-        scanout->ds = qemu_console_surface(scanout->con);
         virtio_gpu_update_scanout(g, ss.scanout_id, &res->base, &fb, &ss.r);
         g->parent_obj.enable = 1;
         return;
@@ -1699,10 +2721,16 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
     bool cmd_suspended = false;
 
     VIRTIO_GPU_FILL_CMD(cmd->cmd_hdr);
+    triton_trace_record(TT_HOST_COMMAND_BEGIN, cmd->cmd_hdr.fence_id,
+        cmd->cmd_hdr.ctx_id, cmd->cmd_hdr.type, cmd->cmd_hdr.flags, 0);
 
     cmd->context_fence =
         virtio_gpu_virgl_legacy_neptune_context_fence(cmd);
 
+    if (VIRTIO_GPU_GL(g)->context_failure) {
+        cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
+        goto respond;
+    }
     virgl_renderer_force_ctx_0();
     switch (cmd->cmd_hdr.type) {
     case VIRTIO_GPU_CMD_TRITON_PRESENT_BLT:
@@ -1786,7 +2814,13 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
         break;
     }
 
+    if (VIRTIO_GPU_GL(g)->context_failure) {
+        cmd->error = VIRTIO_GPU_RESP_ERR_UNSPEC;
+    }
+respond:
     cmd->suspended = cmd_suspended;
+    triton_trace_record(TT_HOST_COMMAND_END, cmd->cmd_hdr.fence_id,
+        cmd->cmd_hdr.ctx_id, cmd->error, cmd_suspended, cmd->finished);
 
     if (cmd_suspended || cmd->finished) {
         return;
@@ -1893,6 +2927,8 @@ static void virgl_write_fence(void *opaque, uint32_t fence)
             continue;
         }
         trace_virtio_gpu_fence_resp(cmd->cmd_hdr.fence_id);
+        triton_trace_record(TT_HOST_FENCE, cmd->cmd_hdr.fence_id,
+            cmd->cmd_hdr.ctx_id, 0, 0, 0);
         virtio_gpu_ctrl_response_nodata(g, cmd, VIRTIO_GPU_RESP_OK_NODATA);
         QTAILQ_REMOVE(&g->fenceq, cmd, next);
         g_free(cmd);
@@ -1915,6 +2951,8 @@ static void virgl_write_context_fence(void *opaque, uint32_t ctx_id,
             cmd->cmd_hdr.ctx_id == ctx_id && cmd->cmd_hdr.ring_idx == ring_idx &&
             cmd->cmd_hdr.fence_id <= fence_id) {
             trace_virtio_gpu_fence_resp(cmd->cmd_hdr.fence_id);
+            triton_trace_record(TT_HOST_FENCE, cmd->cmd_hdr.fence_id,
+                cmd->cmd_hdr.ctx_id, 0, 0, 0);
             virtio_gpu_ctrl_response_nodata(g, cmd, VIRTIO_GPU_RESP_OK_NODATA);
             QTAILQ_REMOVE(&g->fenceq, cmd, next);
             g_free(cmd);
@@ -2001,18 +3039,17 @@ static void virtio_gpu_fence_poll(void *opaque)
     VirtIOGPU *g = opaque;
     VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
 
+    if (gl->context_failure) {
+        return;
+    }
     virgl_renderer_poll();
     virtio_gpu_process_cmdq(g);
-    if (!QTAILQ_EMPTY(&g->cmdq) || !QTAILQ_EMPTY(&g->fenceq)) {
+    if (!gl->context_failure &&
+        (!QTAILQ_EMPTY(&g->cmdq) || !QTAILQ_EMPTY(&g->fenceq))) {
         /*
-         * On the render-server path virgl_renderer_poll() is the only place a
-         * retired renderer fence is discovered: virgl_renderer_get_poll_fd()
-         * is vrend-only and VIRGL_RENDERER_ASYNC_FENCE_CB is not enabled, so
-         * nothing wakes QEMU when a fence signals.  This period is therefore a
-         * hard floor under every guest operation that blocks on a fence, so
-         * keep it at the millisecond-timer granularity.  The timer only
-         * re-arms while cmdq/fenceq are non-empty, so it costs nothing at
-         * idle.
+         * Per-context eventfds wake Neptune promptly. Keep this fallback for
+         * contexts without an eventfd and other pending command work. It
+         * only re-arms while commands or fences remain outstanding.
          */
         timer_mod(gl->fence_poll, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
     }
@@ -2023,17 +3060,155 @@ void virtio_gpu_virgl_fence_poll(VirtIOGPU *g)
     virtio_gpu_fence_poll(g);
 }
 
-void virtio_gpu_virgl_reset_scanout(VirtIOGPU *g)
+bool virtio_gpu_virgl_readback(VirtIOGPUBase *base, QemuConsole *con,
+                                Error **errp)
 {
+#ifdef CONFIG_LINUX
+    VirtIOGPU *g = VIRTIO_GPU(base);
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
+    struct virtio_gpu_scanout *scanout = NULL;
+    unsigned index;
+    GLint old_read, old_pack, value[7];
+    const GLenum pack[] = { GL_PACK_ALIGNMENT, GL_PACK_ROW_LENGTH,
+        GL_PACK_SKIP_ROWS, GL_PACK_SKIP_PIXELS, GL_PACK_SWAP_BYTES,
+        GL_PACK_IMAGE_HEIGHT, GL_PACK_SKIP_IMAGES };
+    GLuint fbo;
+    uint8_t *pixels;
+    DisplaySurface *surface;
+    unsigned width, height;
+    bool desktop = qemu_egl_mode == DISPLAY_GL_MODE_CORE;
+    bool ok;
+
+    if (gl->context_failure) {
+        error_setg(errp, "Neptune renderer stopped after EGL context failure");
+        return false;
+    }
+    for (index = 0; index < base->conf.max_outputs; index++) {
+        if (base->scanout[index].con == con) {
+            scanout = &base->scanout[index];
+            break;
+        }
+    }
+    if (!scanout || !scanout->resource_id || !gl->scanout_gpu[index]) {
+        return true;
+    }
+    surface = qemu_console_surface(con);
+    width = gl->scanout_texture_width[index];
+    height = gl->scanout_texture_height[index];
+    if (!surface || width != surface_width(surface) ||
+        height != surface_height(surface) ||
+        surface_bytes_per_pixel(surface) != 4 ||
+        (uint64_t)surface_stride(surface) < (uint64_t)width * 4 ||
+        (surface_format(surface) != PIXMAN_LE_x8r8g8b8 &&
+         surface_format(surface) != PIXMAN_LE_a8r8g8b8 &&
+         surface_format(surface) != PIXMAN_LE_x8b8g8r8 &&
+         surface_format(surface) != PIXMAN_LE_a8b8g8r8)) {
+        error_setg(errp, "Neptune scanout is changing dimensions");
+        return false;
+    }
+    virgl_renderer_force_ctx_0();
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &old_pack);
+    for (unsigned j = 0; j < (desktop ? 7 : 4); j++) {
+        glGetIntegerv(pack[j], &value[j]);
+        glPixelStorei(pack[j], j == 0 ? 1 : 0);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, gl->scanout_texture[index], 0);
+    pixels = g_malloc((size_t)width * height * 4);
+    ok = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) ==
+         GL_FRAMEBUFFER_COMPLETE;
+    if (ok) {
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        ok = glGetError() == GL_NO_ERROR;
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, old_read);
+    glDeleteFramebuffers(1, &fbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, old_pack);
+    for (unsigned j = 0; j < (desktop ? 7 : 4); j++) {
+        glPixelStorei(pack[j], value[j]);
+    }
+    if (ok) {
+        bool bgra = surface_format(surface) == PIXMAN_LE_x8r8g8b8 ||
+                    surface_format(surface) == PIXMAN_LE_a8r8g8b8;
+        for (unsigned y = 0; y < height; y++) {
+            uint8_t *out = surface_data(surface) + y * surface_stride(surface);
+            const uint8_t *in = pixels + (size_t)y * width * 4;
+            for (unsigned x = 0; x < width; x++) {
+                out[x * 4] = in[x * 4 + (bgra ? 2 : 0)];
+                out[x * 4 + 1] = in[x * 4 + 1];
+                out[x * 4 + 2] = in[x * 4 + (bgra ? 0 : 2)];
+                out[x * 4 + 3] = 255;
+            }
+        }
+    } else {
+        error_setg(errp, "Neptune scanout readback failed");
+    }
+    g_free(pixels);
+    return ok;
+#else
+    return true;
+#endif
+}
+
+bool virtio_gpu_virgl_reset_scanout(VirtIOGPU *g)
+{
+    VirtIOGPUGL *gl = VIRTIO_GPU_GL(g);
     int i;
 
+    if (gl->context_failure) {
+        return false;
+    }
     for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
         virtio_gpu_disable_scanout(g, i);
     }
+    virgl_renderer_force_ctx_0();
+    for (i = 0; i < g->parent_obj.conf.max_outputs; i++) {
+        if (!virtio_gpu_neptune_copy_destroy(g,
+                                            &gl->scanout_external_copy[i]) ||
+            !virtio_gpu_neptune_copy_destroy(g, &gl->scanout_pending_copy[i])) {
+            return false;
+        }
+        if (gl->scanout_pending_texture[i]) {
+            glDeleteTextures(1, &gl->scanout_pending_texture[i]);
+            gl->scanout_pending_texture[i] = 0;
+        }
+        if (gl->scanout_texture[i]) {
+            glDeleteTextures(1, &gl->scanout_texture[i]);
+            gl->scanout_texture[i] = 0;
+        }
+        gl->scanout_gpu[i] = false;
+    }
+    return true;
+}
+
+bool virtio_gpu_virgl_destroy_resource_copies(VirtIOGPU *g)
+{
+    struct virtio_gpu_simple_resource *res;
+
+    if (VIRTIO_GPU_GL(g)->context_failure) {
+        return false;
+    }
+    QTAILQ_FOREACH(res, &g->reslist, next) {
+        struct virtio_gpu_virgl_resource *vres =
+            container_of(res, struct virtio_gpu_virgl_resource, base);
+
+        if (!virtio_gpu_neptune_copy_destroy(g, &vres->external_copy)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void virtio_gpu_virgl_reset(VirtIOGPU *g)
 {
+    virtio_gpu_virgl_clear_fence_watches(g);
+    /* Scanout reset callbacks may have released the EGL context again. */
+    virgl_renderer_force_ctx_0();
     virgl_renderer_reset();
 }
 
@@ -2066,6 +3241,7 @@ int virtio_gpu_virgl_init(VirtIOGPU *g)
     if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
         flags |= VIRGL_RENDERER_NEPTUNE;
         flags |= VIRGL_RENDERER_RENDER_SERVER;
+        flags |= VIRGL_RENDERER_THREAD_SYNC;
     }
 #endif
 
@@ -2075,20 +3251,26 @@ int virtio_gpu_virgl_init(VirtIOGPU *g)
         return ret;
     }
 
-    gl->fence_poll = timer_new_ms(QEMU_CLOCK_VIRTUAL,
-                                  virtio_gpu_fence_poll, g);
+    if (!gl->fence_poll) {
+        gl->fence_poll = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                      virtio_gpu_fence_poll, g);
+    }
 
     if (virtio_gpu_stats_enabled(g->parent_obj.conf)) {
-        gl->print_stats = timer_new_ms(QEMU_CLOCK_VIRTUAL,
-                                       virtio_gpu_print_stats, g);
+        if (!gl->print_stats) {
+            gl->print_stats = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                           virtio_gpu_print_stats, g);
+        }
         timer_mod(gl->print_stats,
                   qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
     }
 
 #if VIRGL_VERSION_MAJOR >= 1
-    gl->cmdq_resume_bh = virtio_bh_io_new_guarded(DEVICE(g),
-                                                  virtio_gpu_virgl_resume_cmdq_bh,
-                                                  g);
+    if (!gl->cmdq_resume_bh) {
+        gl->cmdq_resume_bh =
+            virtio_bh_io_new_guarded(DEVICE(g),
+                                   virtio_gpu_virgl_resume_cmdq_bh, g);
+    }
 #endif
 
     return 0;

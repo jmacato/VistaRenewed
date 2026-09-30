@@ -2,15 +2,16 @@
  * Copyright 2026 Turing Software LLC
  * SPDX-License-Identifier: MIT
  *
- * GetDesc returns the cached descriptor; falls back to the
- * generated sync thunk when the wrapper came in via swapchain
- * GetBuffer / OpenSharedResource.  All dimensions share
+ * GetDesc returns the cached descriptor; imported wrappers hydrate it
+ * on first use. All dimensions share
  * npt_d3d11_texture but each family has its own vtbl storage.
  */
 
 #include "npt_com.h"
 #include "npt_overrides.h"
 #include "npt_resource.h"
+
+#include <string.h>
 
 #include "neptune-protocol/npt_protocol_defs.h"
 #include "neptune-protocol/npt_protocol_client_id3d11texture1d.h"
@@ -40,60 +41,90 @@ static void NPT_STDMETHODCALLTYPE
 tex1d_GetDesc_override(void *self, D3D11_TEXTURE1D_DESC *pDesc)
 {
    if (!pDesc) return;
+   /* Auxiliary allocation is optional: the host object remains usable. */
+   if (!((struct npt_com_base *)self)->aux) {
+      memset(pDesc, 0, sizeof(*pDesc));
+      npt_id3d11texture1d_default_GetDesc(self, pDesc);
+      return;
+   }
    struct npt_d3d11_texture *t = (struct npt_d3d11_texture *)self;
-   if (npt_d3d11_texture_has_desc(t)) {
+   if (npt_d3d11_texture_ensure_desc(t, D3D11_RESOURCE_DIMENSION_TEXTURE1D, false)) {
       npt_d3d11_texture_fill_desc1d(t, pDesc);
       return;
    }
-   npt_id3d11texture1d_default_GetDesc(self, pDesc);
+   memset(pDesc, 0, sizeof(*pDesc));
 }
 
 static void NPT_STDMETHODCALLTYPE
 tex2d_GetDesc_override(void *self, D3D11_TEXTURE2D_DESC *pDesc)
 {
    if (!pDesc) return;
+   /* Auxiliary allocation is optional: the host object remains usable. */
+   if (!((struct npt_com_base *)self)->aux) {
+      memset(pDesc, 0, sizeof(*pDesc));
+      npt_id3d11texture2d_default_GetDesc(self, pDesc);
+      return;
+   }
    struct npt_d3d11_texture *t = (struct npt_d3d11_texture *)self;
-   if (npt_d3d11_texture_has_desc(t)) {
+   if (npt_d3d11_texture_ensure_desc(t, D3D11_RESOURCE_DIMENSION_TEXTURE2D, false)) {
       npt_d3d11_texture_fill_desc2d(t, pDesc);
       return;
    }
-   npt_id3d11texture2d_default_GetDesc(self, pDesc);
+   memset(pDesc, 0, sizeof(*pDesc));
 }
 
 static void NPT_STDMETHODCALLTYPE
 tex2d1_GetDesc1_override(void *self, D3D11_TEXTURE2D_DESC1 *pDesc)
 {
    if (!pDesc) return;
+   /* Auxiliary allocation is optional: the host object remains usable. */
+   if (!((struct npt_com_base *)self)->aux) {
+      memset(pDesc, 0, sizeof(*pDesc));
+      npt_id3d11texture2d1_default_GetDesc1(self, pDesc);
+      return;
+   }
    struct npt_d3d11_texture *t = (struct npt_d3d11_texture *)self;
-   if (npt_d3d11_texture_has_desc(t)) {
+   if (npt_d3d11_texture_ensure_desc(t, D3D11_RESOURCE_DIMENSION_TEXTURE2D, true)) {
       npt_d3d11_texture_fill_desc2d1(t, pDesc);
       return;
    }
-   npt_id3d11texture2d1_default_GetDesc1(self, pDesc);
+   memset(pDesc, 0, sizeof(*pDesc));
 }
 
 static void NPT_STDMETHODCALLTYPE
 tex3d_GetDesc_override(void *self, D3D11_TEXTURE3D_DESC *pDesc)
 {
    if (!pDesc) return;
+   /* Auxiliary allocation is optional: the host object remains usable. */
+   if (!((struct npt_com_base *)self)->aux) {
+      memset(pDesc, 0, sizeof(*pDesc));
+      npt_id3d11texture3d_default_GetDesc(self, pDesc);
+      return;
+   }
    struct npt_d3d11_texture *t = (struct npt_d3d11_texture *)self;
-   if (npt_d3d11_texture_has_desc(t)) {
+   if (npt_d3d11_texture_ensure_desc(t, D3D11_RESOURCE_DIMENSION_TEXTURE3D, false)) {
       npt_d3d11_texture_fill_desc3d(t, pDesc);
       return;
    }
-   npt_id3d11texture3d_default_GetDesc(self, pDesc);
+   memset(pDesc, 0, sizeof(*pDesc));
 }
 
 static void NPT_STDMETHODCALLTYPE
 tex3d1_GetDesc1_override(void *self, D3D11_TEXTURE3D_DESC1 *pDesc)
 {
    if (!pDesc) return;
+   /* Auxiliary allocation is optional: the host object remains usable. */
+   if (!((struct npt_com_base *)self)->aux) {
+      memset(pDesc, 0, sizeof(*pDesc));
+      npt_id3d11texture3d1_default_GetDesc1(self, pDesc);
+      return;
+   }
    struct npt_d3d11_texture *t = (struct npt_d3d11_texture *)self;
-   if (npt_d3d11_texture_has_desc(t)) {
+   if (npt_d3d11_texture_ensure_desc(t, D3D11_RESOURCE_DIMENSION_TEXTURE3D, true)) {
       npt_d3d11_texture_fill_desc3d1(t, pDesc);
       return;
    }
-   npt_id3d11texture3d1_default_GetDesc1(self, pDesc);
+   memset(pDesc, 0, sizeof(*pDesc));
 }
 
 void

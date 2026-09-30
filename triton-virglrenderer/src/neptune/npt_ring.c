@@ -79,6 +79,15 @@ npt_ring_load_tail(const struct npt_ring *ring)
    return atomic_load_explicit(ring->control.tail, memory_order_acquire);
 }
 
+/* Both peers publish before checking the other peer. The seq_cst status
+ * update orders this store before the tail load, closing the sleep gap. */
+static bool
+npt_ring_prepare_wait(struct npt_ring *ring)
+{
+   npt_ring_set_status_bits(ring, NPT_RING_STATUS_IDLE_BIT);
+   return ring->buffer.cur == npt_ring_load_tail(ring);
+}
+
 static void
 npt_ring_unset_status_bits(struct npt_ring *ring, uint32_t mask)
 {
@@ -405,9 +414,8 @@ npt_ring_thread(void *arg)
             ring->feedback_notify || npt_ring_feedback_pending(ctx);
          ring->feedback_notify = false;
 
-         const bool wait = ring->buffer.cur == npt_ring_load_tail(ring);
+         const bool wait = npt_ring_prepare_wait(ring);
          if (wait) {
-            npt_ring_set_status_bits(ring, NPT_RING_STATUS_IDLE_BIT);
             if (ring->started) {
                if (poll_owed) {
                   /* Sleep straight to the next poll deadline instead of
@@ -417,8 +425,8 @@ npt_ring_thread(void *arg)
                   cnd_wait(&ring->cond, &ring->mutex);
                }
             }
-            npt_ring_unset_status_bits(ring, NPT_RING_STATUS_IDLE_BIT);
          }
+         npt_ring_unset_status_bits(ring, NPT_RING_STATUS_IDLE_BIT);
          /* Only a guest doorbell puts the thread back on the hot path.
           * A poll-cadence timeout or a feedback wake must not, or the
           * thread drops out of the idle regime into the relax spin the

@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Embedded keyboard input test</title>
+<style>body{background:#202630;color:white;font:24px sans-serif;padding:32px}input{font:32px monospace;width:600px;padding:12px}output{display:block;margin-top:24px}</style>
+<h1>IE / Supermium input test</h1>
+<label for="entry">Type into this field:</label><br>
+<input id="entry" autofocus autocomplete="off">
+<output id="result">No input received</output>
+<script>
+entry.addEventListener('input', () => {
+  result.textContent = 'Received: ' + entry.value;
+  document.title = 'Input: ' + entry.value;
+});
+</script>

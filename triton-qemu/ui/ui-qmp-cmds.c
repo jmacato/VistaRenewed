@@ -356,6 +356,9 @@ qmp_screendump(const char *filename, const char *device,
     }
 
     qemu_console_co_wait_update(con);
+    if (!graphic_hw_readback(con, errp)) {
+        return;
+    }
 
     /*
      * All pending coroutines are woken up, while the BQL is held.  No

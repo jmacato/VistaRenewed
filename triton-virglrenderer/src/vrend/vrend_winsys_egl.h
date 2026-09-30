@@ -70,6 +70,8 @@ int virgl_egl_get_attrs_for_texture(struct virgl_egl *egl, uint32_t tex_id, uint
                                     int *planes, uint64_t *modifier);
 
 int virgl_egl_get_fd_for_texture(struct virgl_egl *egl, uint32_t tex_id, int *fd);
+int virgl_egl_export_texture_query(struct virgl_egl *egl, uint32_t tex_id,
+                                  struct virgl_renderer_export_query *query);
 
 int virgl_egl_get_fd_for_texture2(struct virgl_egl *egl, uint32_t tex_id, int *fd, int *stride,
                                   int *offset);

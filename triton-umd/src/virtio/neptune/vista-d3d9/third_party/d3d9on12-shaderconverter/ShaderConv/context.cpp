@@ -427,14 +427,15 @@ CContext::TranslateInstructions()
             instr.ClearPredicateFlag();
 
             // If D3DSPSM_NOT is set, flip the order of dwSrcToken and SaveReg
-            const COperandBase operands[2] = { instr.CreateDstOperand(),
-                                               CTempOperand4( SREG_PRED ) };
+            const COperandBase destination = instr.CreateDstOperand();
+            const COperandBase operands[2] = {
+                CSwizzle(destination, __SWIZZLE_ALL), CTempOperand4(SREG_PRED) };
             const DWORD dwPredicate = instr.GetPredicate();
             const UINT srcSelect = ( dwPredicate & D3DSPSM_NOT ) ? 2 : 1;
 
             m_pShaderAsm->EmitInstruction(
                     CInstruction( D3D10_SB_OPCODE_MOVC,
-                                  operands[0],
+                                  destination,
                                   this->EmitPredOperand( instr ),
                                   operands[srcSelect & 1 ],
                                   operands[srcSelect >> 1] ) );
@@ -462,11 +463,13 @@ CContext::Translate_MOV( const CInstr& instr )
     const DWORD dwRegType = D3DSI_GETREGTYPE_RESOLVING_CONSTANTS( instr.GetDstToken() );
     if ( D3DSPR_ADDR == dwRegType )
     {
-        // round_ne s0, src0
-        // ftoi dest, s0
+        // VS 1.1 address MOV floors; later MOVA rounds to nearest.
+        // Keep this conversion separate from ordinary floating-point MOV.
 
         m_pShaderAsm->EmitInstruction(
-            CInstruction( D3D10_SB_OPCODE_ROUND_NE,
+            CInstruction( m_version < D3DVS_VERSION(2,0)
+                              ? D3D10_SB_OPCODE_ROUND_NI
+                              : D3D10_SB_OPCODE_ROUND_NE,
                           CTempOperandDst( SREG_TMP0 ),
                           src0 ) );
 
@@ -575,29 +578,12 @@ CContext::Translate_MUL( const CInstr& instr )
 void
 CContext::Translate_RSQ( const CInstr& instr )
 {
-    // mov  s0.z, abs( src0 )
-    // rsq  dest, src0
-    // movc dest, s0.z, dest, vec4( FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX )
-
     const COperandBase dest = instr.CreateDstOperand();
-    const COperandBase src0 = this->EmitSrcOperand( instr, 0 );
+    const COperandBase src0 = this->EmitSrcOperand(instr, 0);
+    // Shader model 1-3 takes abs first; zero yields positive infinity.
+    this->EmitDstInstruction(instr.GetModifiers(), D3D10_SB_OPCODE_RSQ,
+                            dest, CAbs(src0));
 
-    m_pShaderAsm->EmitInstruction(
-        CInstruction(D3D10_SB_OPCODE_MOV,
-            CTempOperandDst(SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_Z),
-            CAbs(src0)));
-
-    this->EmitDstInstruction( instr.GetModifiers(),
-                              D3D10_SB_OPCODE_RSQ,
-                              dest,
-                              CAbs( src0 ) );
-
-    this->EmitDstInstruction( instr.GetModifiers(),
-                              D3D10_SB_OPCODE_MOVC,
-                              dest,
-                              CTempOperand4( SREG_TMP0, __SWIZZLE_Z ),
-                              dest,
-                              COperand( FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX ) );
 }
 
 ///---------------------------------------------------------------------------
@@ -1511,50 +1497,14 @@ CContext::Translate_DP2ADD( const CInstr& instr )
 void
 CContext::Translate_RCP( const CInstr& instr )
 {
-    // div  dest, vec4( 1.0f ), src0
-
+    // Preserve IEEE zero behavior and apply destination modifiers once. Using
+    // a destination-mask operand as a MOVC source is invalid DXBC and also
+    // reads the overwritten source for rcp r0.x, r0.x.
     const COperandBase dest = instr.CreateDstOperand();
-    const COperandBase src0 = this->EmitSrcOperand( instr, 0 );
-    const DWORD dwToken = instr.GetSrcToken( 0 );
-    const DWORD dwModifier = ( dwToken & D3DSP_SRCMOD_MASK );
+    const COperandBase src0 = this->EmitSrcOperand(instr, 0);
+    this->EmitDstInstruction(instr.GetModifiers(), D3D10_SB_OPCODE_DIV,
+                            dest, COperand(1.0f), src0);
 
-    this->EmitDstInstruction( instr.GetModifiers(),
-                              D3D10_SB_OPCODE_DIV,
-                              dest,
-                              COperand( 1.0f ),
-                              src0 );
-
-    // movc doesn't allow modifiers on the comparison param, so if src0 has modifiers we need to apply those and mov into a temp register
-    // note that according to spec, rcp can only act on scalar values, so we just mov into r0.z
-    if ( dwModifier != D3DSPSM_NONE ) 
-    {
-        // mov  r0.z, src0
-        // movc dest, r0.z, dest, src0
-
-
-        m_pShaderAsm->EmitInstruction(
-            CInstruction( D3D10_SB_OPCODE_MOV,
-                CTempOperandDst( SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_Z ),
-                src0 ) );
-
-        this->EmitDstInstruction( instr.GetModifiers(),
-                                  D3D10_SB_OPCODE_MOVC,
-                                  dest,
-                                  CTempOperand4( SREG_TMP0, __SWIZZLE_Z ),
-                                  dest,
-                                  src0 );
-    }
-    else
-    {
-        // movc dest, src0, dest, src0
-
-        this->EmitDstInstruction( instr.GetModifiers(),
-                                  D3D10_SB_OPCODE_MOVC,
-                                  dest,
-                                  src0,
-                                  dest,
-                                  src0 );
-    }
 }
 
 ///---------------------------------------------------------------------------
@@ -1657,29 +1607,16 @@ CContext::Translate_SGE( const CInstr& instr )
 void
 CContext::Translate_LOG( const CInstr& instr )
 {
-    // mov  s0.x, abs( src0 )
-    // log  dest, abs( src0 )
-    // movc dest, s0.x, dest, vec4( -FLT_MAX, -FLT_MAX, -FLT_MAX,-FLT_MAX )
-
     const COperandBase dest = instr.CreateDstOperand();
-    const COperandBase src0 = this->EmitSrcOperand( instr, 0 );
+    const COperandBase src0 = this->EmitSrcOperand(instr, 0);
+    m_pShaderAsm->EmitInstruction(CInstruction(D3D10_SB_OPCODE_MOV,
+        CTempOperandDst(SREG_TMP1), CAbs(src0)));
+    m_pShaderAsm->EmitInstruction(CInstruction(D3D10_SB_OPCODE_LOG,
+        CTempOperandDst(SREG_TMP2), CTempOperand4(SREG_TMP1)));
+    this->EmitDstInstruction(instr.GetModifiers(), D3D10_SB_OPCODE_MOVC,
+        dest, CTempOperand4(SREG_TMP1), CTempOperand4(SREG_TMP2),
+        COperand(-FLT_MAX));
 
-    m_pShaderAsm->EmitInstruction(
-        CInstruction(D3D10_SB_OPCODE_MOV,
-            CTempOperandDst(SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_X),
-            CAbs(src0)));
-
-    this->EmitDstInstruction( instr.GetModifiers(),
-                              D3D10_SB_OPCODE_LOG,
-                              dest,
-                              CAbs( src0 ) );
-
-    this->EmitDstInstruction( instr.GetModifiers(),
-                              D3D10_SB_OPCODE_MOVC,
-                              dest,
-                              CTempOperand4( SREG_TMP0, __SWIZZLE_X ),
-                              dest,
-                              COperand( -(FLT_MAX), -(FLT_MAX), -(FLT_MAX), -(FLT_MAX) ) );
 }
 
 ///---------------------------------------------------------------------------
@@ -1879,6 +1816,8 @@ CContext::Translate_PHASE( const CInstr& /*instr*/ )
 void
 CContext::Translate_LABEL( const CInstr& instr )
 {
+    m_functionLoopBank = m_functionRanks[D3DSI_GETREGNUM(instr.GetSrcToken(0))] *
+        D3DVS20_MAX_STATICFLOWCONTROLDEPTH;
     // label #n
 
     m_pShaderAsm->EmitInstruction(
@@ -1899,6 +1838,7 @@ CContext::Translate_REP( const CInstr& instr )
     ++m_controlFlowDepth;
     ++m_loopNestingDepth;
 
+    m_countedLoops[m_loopNestingDepth] = false;
     this->AllocateLoopRegister();
 
     const COperandBase src0 = this->EmitSrcOperand( instr, 0 );
@@ -1941,6 +1881,7 @@ CContext::Translate_ENDREP( const CInstr& /*instr*/ )
 
     --m_loopNestingDepth;
     --m_controlFlowDepth;
+    this->RestoreLoopAddress();
 }
 
 ///---------------------------------------------------------------------------
@@ -1958,6 +1899,7 @@ CContext::Translate_LOOP( const CInstr& instr )
     ++m_controlFlowDepth;
     ++m_loopNestingDepth;
 
+    m_countedLoops[m_loopNestingDepth] = true;
     this->AllocateLoopRegister();
 
     const COperandBase src1 = this->EmitSrcOperand( instr, 1 );
@@ -2019,15 +1961,7 @@ CContext::Translate_ENDLOOP( const CInstr& /*instr*/ )
     --m_loopNestingDepth;
     --m_controlFlowDepth;
 
-    if ( m_loopNestingDepth != 0xff &&
-         m_inputRegs.aL != INVALID_INDEX )
-    {
-        // Restore the loop counter register value
-        m_pShaderAsm->EmitInstruction(
-            CInstruction( D3D10_SB_OPCODE_MOV,
-                          CTempOperandDst( m_inputRegs.aL ),
-                          CTempOperand4( this->GetLoopRegister(), __SWIZZLE_Y ) ) );
-    }
+    this->RestoreLoopAddress();
 }
 
 ///---------------------------------------------------------------------------
@@ -2041,6 +1975,7 @@ CContext::Translate_CALL( const CInstr& instr )
 
     m_pShaderAsm->EmitInstruction(
         CCallInstruction( D3DSI_GETREGNUM( instr.GetSrcToken( 0 ) ) ) );
+    this->RestoreLoopAddress();
 }
 
 ///---------------------------------------------------------------------------
@@ -2065,6 +2000,7 @@ CContext::Translate_CALLNZ( const CInstr& instr )
                             D3D10_SB_INSTRUCTION_TEST_NONZERO,
                         CSingleComponent(src1, (D3D10_SB_4_COMPONENT_NAME)src1.SwizzleComponent(0)),
                         src0 ) );
+    this->RestoreLoopAddress();
 }
 
 ///---------------------------------------------------------------------------
@@ -2864,12 +2800,13 @@ CContext::Translate_TEXM3x3TEX( const CInstr& instr )
 void
 CContext::Translate_TEXM3x3SPEC( const CInstr& instr )
 {
-    // RF = 2.0f * N.E * N - E * N.N
+    // RF = 2.0f * (N.E / N.N) * N - E
 
     // dp3 s0.z, src0, src1
     // dp3 s1.w, s0, s0
-    // mul s1, src2, s1.w
+    // mov s1.xyz, src2
     // dp3 s0.w, s0, src2
+    // div s0.w, s0.w, s1.w
     // mul s0, s0, s0.w
     // mad s0, vec4(2.0f), s0, -s1
     // sample dest, s0, t#i, s#i
@@ -2897,16 +2834,23 @@ CContext::Translate_TEXM3x3SPEC( const CInstr& instr )
                       CTempOperand4( SREG_TMP0 ) ) );
 
     m_pShaderAsm->EmitInstruction(
-        CInstruction( D3D10_SB_OPCODE_MUL,
-                      CTempOperandDst( SREG_TMP1 ),
-                      src2,
-                      CTempOperand4( SREG_TMP1, __SWIZZLE_W ) ) );
+        CInstruction( D3D10_SB_OPCODE_MOV,
+                      CTempOperandDst( SREG_TMP1, __WRITEMASK_XYZ ),
+                      src2 ) );
 
     m_pShaderAsm->EmitInstruction(
         CInstruction( D3D10_SB_OPCODE_DP3,
                       CTempOperandDst( SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_W ),
                       CTempOperand4( SREG_TMP0 ),
                       src2 ) );
+
+    // Normal length cancels only for cube addressing. Volume reflection
+    // requires the complete documented coordinate, including this divisor.
+    m_pShaderAsm->EmitInstruction(
+        CInstruction( D3D10_SB_OPCODE_DIV,
+                      CTempOperandDst( SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_W ),
+                      CTempOperand4( SREG_TMP0, __SWIZZLE_W ),
+                      CTempOperand4( SREG_TMP1, __SWIZZLE_W ) ) );
 
     m_pShaderAsm->EmitInstruction(
         CInstruction( D3D10_SB_OPCODE_MUL,
@@ -2945,7 +2889,7 @@ GetTextureRegisterIndex([[maybe_unused]] UINT version, DWORD dwRegNum)
 void
 CContext::Translate_TEXM3x3VSPEC( const CInstr& instr )
 {
-    // RF = 2.0f * N.E * N - E * N.N
+    // RF = 2.0f * (N.E / N.N) * N - E
 
     // dp3 s0.z, src0, src1
     // mov s1.x, TC[stage-2].w
@@ -2953,7 +2897,7 @@ CContext::Translate_TEXM3x3VSPEC( const CInstr& instr )
     // mov s1.z, TC[stage].w
     // dp3 s0.w, s0, s1
     // dp3 s1.w, s0, s0
-    // mul s1, s1, s1.w
+    // div s0.w, s0.w, s1.w
     // mul s0, s0, s0.w
     // mad s0, vec4(2.0f), s0, -s1
     // sample dest, s0, t#i, s#i
@@ -3002,9 +2946,9 @@ CContext::Translate_TEXM3x3VSPEC( const CInstr& instr )
                       CTempOperand4( SREG_TMP0 ) ) );
 
     m_pShaderAsm->EmitInstruction(
-        CInstruction( D3D10_SB_OPCODE_MUL,
-                      CTempOperandDst( SREG_TMP1 ),
-                      CTempOperand4( SREG_TMP1 ),
+        CInstruction( D3D10_SB_OPCODE_DIV,
+                      CTempOperandDst( SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_W ),
+                      CTempOperand4( SREG_TMP0, __SWIZZLE_W ),
                       CTempOperand4( SREG_TMP1, __SWIZZLE_W ) ) );
 
     m_pShaderAsm->EmitInstruction(
@@ -3311,7 +3255,7 @@ CContext::Translate_TEXBEM( const CInstr& instr )
     m_pShaderAsm->EmitInstruction(
         CInstruction( D3D10_SB_OPCODE_MAD,
                       CTempOperandDst( SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_X ),
-                      CCBOperand2D( CB_PS_EXT2, i, __SWIZZLE_Y ),
+                      CCBOperand2D( CB_PS_EXT2, i, __SWIZZLE_Z ),
                       CSwizzle( src1, __SWIZZLE_Y ),
                       CTempOperand4( SREG_TMP0, __SWIZZLE_X ) ) );
 
@@ -3324,7 +3268,7 @@ CContext::Translate_TEXBEM( const CInstr& instr )
     m_pShaderAsm->EmitInstruction(
         CInstruction( D3D10_SB_OPCODE_MUL,
                       CTempOperandDst( SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_Y ),
-                      CCBOperand2D( CB_PS_EXT2, i, __SWIZZLE_Z ),
+                      CCBOperand2D( CB_PS_EXT2, i, __SWIZZLE_Y ),
                       CSwizzle( src1, __SWIZZLE_X ) ) );
 
     m_pShaderAsm->EmitInstruction(
@@ -3383,7 +3327,7 @@ CContext::Translate_TEXBEML( const CInstr& instr )
     m_pShaderAsm->EmitInstruction(
         CInstruction( D3D10_SB_OPCODE_MAD,
                       CTempOperandDst( SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_X ),
-                      CCBOperand2D( CB_PS_EXT2, i, __SWIZZLE_Y ),
+                      CCBOperand2D( CB_PS_EXT2, i, __SWIZZLE_Z ),
                       CSwizzle( src1, __SWIZZLE_Y ),
                       CTempOperand4( SREG_TMP0, __SWIZZLE_X ) ) );
 
@@ -3396,7 +3340,7 @@ CContext::Translate_TEXBEML( const CInstr& instr )
     m_pShaderAsm->EmitInstruction(
         CInstruction( D3D10_SB_OPCODE_MUL,
                       CTempOperandDst( SREG_TMP0, D3D10_SB_OPERAND_4_COMPONENT_MASK_Y ),
-                      CCBOperand2D( CB_PS_EXT2, i, __SWIZZLE_Z ),
+                      CCBOperand2D( CB_PS_EXT2, i, __SWIZZLE_Y ),
                       CSwizzle( src1, __SWIZZLE_X ) ) );
 
     m_pShaderAsm->EmitInstruction(
@@ -3421,7 +3365,7 @@ CContext::Translate_TEXBEML( const CInstr& instr )
                       resOperand,
                       COperand( D3D10_SB_OPERAND_TYPE_SAMPLER, dwStage ) ) );
 
-    UINT samplerSwizzle = (m_rasterStates.SamplerSwizzleMask >> (dwStage * SAMPLER_SWIZZLE_BITS)) & SAMPLER_SWIZZLE_MASK;
+    UINT samplerSwizzle = m_rasterStates.GetSamplerSwizzle(m_version, dwStage);
 
     if (samplerSwizzle)
     {
@@ -3438,7 +3382,7 @@ CContext::Translate_TEXBEML( const CInstr& instr )
         CInstruction( D3D10_SB_OPCODE_MAD,
                       CTempOperandDst( SREG_TMP1, D3D10_SB_OPERAND_4_COMPONENT_MASK_X ),
                       CCBOperand2D( CB_PS_EXT2, j, __SWIZZLE_X ),
-                      CSwizzle( src0, __SWIZZLE_Z ),
+                      CSwizzle( src1, __SWIZZLE_Z ),
                       CCBOperand2D( CB_PS_EXT2, j, __SWIZZLE_Y ) ) );
 
     this->EmitDstInstruction( instr.GetModifiers(),
@@ -3610,6 +3554,32 @@ CContext::EmitSamplerSwizzle( const COperandBase& dstOperand,
             swizzledSrc.m_Swizzle[2] = swizzledSrc.m_Swizzle[3];
             break;
         
+        case SAMPLER_SWIZZLE_RRRG:
+            swizzledSrc.m_Swizzle[3] = swizzledSrc.m_Swizzle[1];
+            swizzledSrc.m_Swizzle[1] = swizzledSrc.m_Swizzle[0];
+            swizzledSrc.m_Swizzle[2] = swizzledSrc.m_Swizzle[0];
+            break;
+
+        case SAMPLER_SWIZZLE_BGRA:
+            std::swap(swizzledSrc.m_Swizzle[0], swizzledSrc.m_Swizzle[2]);
+            break;
+
+        case SAMPLER_SWIZZLE_RGB1: {
+            // Sampler fixups run through a full temporary before destination
+            // masks/modifiers. Keep RGB, and ignore the storage alpha byte.
+            COperandBase rgbDst(dstOperand);
+            rgbDst.m_WriteMask &= D3D10_SB_OPERAND_4_COMPONENT_MASK_X |
+                                  D3D10_SB_OPERAND_4_COMPONENT_MASK_Y |
+                                  D3D10_SB_OPERAND_4_COMPONENT_MASK_Z;
+            m_pShaderAsm->EmitInstruction(
+                CInstruction(D3D10_SB_OPCODE_MOV, rgbDst, swizzledSrc));
+            COperandBase alphaDst(dstOperand);
+            alphaDst.m_WriteMask &= D3D10_SB_OPERAND_4_COMPONENT_MASK_W;
+            m_pShaderAsm->EmitInstruction(
+                CInstruction(D3D10_SB_OPCODE_MOV, alphaDst, COperand(1.0f)));
+            return;
+        }
+
         default:
             SHADER_CONV_ASSERT(false);
     }
@@ -3725,7 +3695,7 @@ CContext::EmitDstInstruction( const Modifiers& modifiers,
                                      (opCode == D3D10_SB_OPCODE_SAMPLE_D) ||
                                      (opCode == D3D10_SB_OPCODE_SAMPLE_L);
 
-    const UINT samplerSwizzle = (m_rasterStates.SamplerSwizzleMask >> (stage * SAMPLER_SWIZZLE_BITS)) & SAMPLER_SWIZZLE_MASK;
+    const UINT samplerSwizzle = m_rasterStates.GetSamplerSwizzle(m_version, stage);
 
     const bool needsSamplerSwizzle = isSampleInstruction && (samplerSwizzle != 0);
 
@@ -3894,6 +3864,22 @@ CContext::EmitSrcOperand( const CInstr& instr,
                               CTempOperand4( SREG_TMP2, __SWIZZLE_W ) ) );
             break;
         }
+        // PS1 projective modifiers define x/y as one when the divisor is
+        // zero. Preserve that finite value before later ALU instructions;
+        // relying on final color or sampler clamping hides infinities.
+        m_pShaderAsm->EmitInstruction(
+            CInstruction( D3D10_SB_OPCODE_NE,
+                          CTempOperandDst( SREG_TMP2, D3D10_SB_OPERAND_4_COMPONENT_MASK_X ),
+                          CTempOperand4( SREG_TMP2,
+                              dwModifier == D3DSPSM_DZ ? __SWIZZLE_Z : __SWIZZLE_W ),
+                          COperand( 0.0f ) ) );
+        m_pShaderAsm->EmitInstruction(
+            CInstruction( D3D10_SB_OPCODE_MOVC,
+                          CTempOperandDst( SREG_MOD0 + dwIndex,
+                              dwModifier == D3DSPSM_DZ ? __WRITEMASK_XY : __WRITEMASK_XYZ ),
+                          CTempOperand4( SREG_TMP2, __SWIZZLE_X ),
+                          CTempOperand4( SREG_MOD0 + dwIndex ),
+                          COperand( 1.0f ) ) );
         srcOperand = CTempOperand4( SREG_MOD0 + dwIndex );
         break;
 
@@ -4031,14 +4017,18 @@ CContext::EmitImmOperand( COperandBase& srcOperand, DWORD dwModifier, UINT swizz
     {
     case D3DSPSM_DZ:
         // div  m[i].xy, s2.xy, s2.zz
-        srcOperand.m_Valuef[0] /= srcOperand.m_Valuef[2];
-        srcOperand.m_Valuef[1] /= srcOperand.m_Valuef[2];
+        srcOperand.m_Valuef[0] = srcOperand.m_Valuef[2] == 0.0f
+            ? 1.0f : srcOperand.m_Valuef[0] / srcOperand.m_Valuef[2];
+        srcOperand.m_Valuef[1] = srcOperand.m_Valuef[2] == 0.0f
+            ? 1.0f : srcOperand.m_Valuef[1] / srcOperand.m_Valuef[2];
         break;
 
     case D3DSPSM_DW:
         // div  m[i].xy, s2.xy, s2.ww
-        srcOperand.m_Valuef[0] /= srcOperand.m_Valuef[3];
-        srcOperand.m_Valuef[1] /= srcOperand.m_Valuef[3];
+        srcOperand.m_Valuef[0] = srcOperand.m_Valuef[3] == 0.0f
+            ? 1.0f : srcOperand.m_Valuef[0] / srcOperand.m_Valuef[3];
+        srcOperand.m_Valuef[1] = srcOperand.m_Valuef[3] == 0.0f
+            ? 1.0f : srcOperand.m_Valuef[1] / srcOperand.m_Valuef[3];
         break;
 
     case D3DSPSM_BIASNEG:

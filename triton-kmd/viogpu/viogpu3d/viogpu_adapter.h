@@ -154,6 +154,10 @@ class VioGpuAdapter final : public HandleBase<"VIOGADAP"_M, VioGpuAdapter>, IVio
     HANDLE m_ResolutionEventHandle;
 
     VioGpuObj *m_pCursorBuf;
+    UINT m_PointerResource;
+    INT m_PointerX, m_PointerY;
+    BOOLEAN m_PointerVisible, m_PointerFailed;
+    NTSTATUS PointerCommand(const void *, UINT, BOOLEAN, PGPU_MEM_ENTRY, UINT);
     VioGpuMemSegment m_CursorSegment;
 
     ULONG m_PciBus;
@@ -167,6 +171,8 @@ class VioGpuAdapter final : public HandleBase<"VIOGADAP"_M, VioGpuAdapter>, IVio
   public:
     VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject);
     ~VioGpuAdapter(void);
+    NTSTATUS SetPointerPosition(const DXGKARG_SETPOINTERPOSITION *);
+    NTSTATUS SetPointerShape(const DXGKARG_SETPOINTERSHAPE *);
 #pragma code_seg(push)
 #pragma code_seg()
 

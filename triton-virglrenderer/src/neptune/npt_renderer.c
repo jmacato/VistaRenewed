@@ -180,7 +180,8 @@ npt_renderer_create_resource(uint32_t ctx_id,
                              enum virgl_resource_fd_type *out_fd_type,
                              int *out_res_fd,
                              uint32_t *out_map_info,
-                             uint32_t *out_export_format)
+                             uint32_t *out_export_format,
+                             struct virgl_attachment_layout *out_layout)
 {
    struct npt_context *ctx = npt_renderer_lookup_context(ctx_id);
    if (!ctx)
@@ -194,6 +195,7 @@ npt_renderer_create_resource(uint32_t ctx_id,
    *out_res_fd = blob.u.fd;
    *out_map_info = blob.map_info;
    *out_export_format = blob.export_format;
+   *out_layout = blob.export_layout;
 
    return true;
 }
@@ -210,6 +212,17 @@ npt_renderer_import_resource(uint32_t ctx_id,
       return false;
 
    return npt_context_import_resource(ctx, res_id, fd_type, fd, size);
+}
+
+bool
+npt_renderer_import_resource_layout(uint32_t ctx_id, uint32_t res_id,
+    enum virgl_resource_fd_type fd_type, int fd, uint64_t size,
+    const struct virgl_attachment_layout *layout)
+{
+   struct npt_context *ctx = npt_renderer_lookup_context(ctx_id);
+   if (!ctx)
+      return false;
+   return npt_context_import_resource_layout(ctx, res_id, fd_type, fd, size, layout);
 }
 
 void

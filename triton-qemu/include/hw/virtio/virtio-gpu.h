@@ -171,6 +171,7 @@ struct VirtIOGPUBaseClass {
     VirtioDeviceClass parent;
 
     void (*gl_flushed)(VirtIOGPUBase *g);
+    bool (*gl_readback)(VirtIOGPUBase *g, QemuConsole *con, Error **errp);
 };
 
 #define VIRTIO_GPU_BASE_PROPERTIES(_state, _conf)                       \
@@ -235,6 +236,9 @@ struct VirtIOGPU {
 struct VirtIOGPUClass {
     VirtIOGPUBaseClass parent;
 
+    /* Optional main-loop reset hook, called before resources are destroyed. */
+    /* False retains renderer resources after a controlled host failure. */
+    bool (*reset)(VirtIOGPU *g);
     void (*handle_ctrl)(VirtIODevice *vdev, VirtQueue *vq);
     void (*process_cmd)(VirtIOGPU *g, struct virtio_gpu_ctrl_command *cmd);
     void (*update_cursor_data)(VirtIOGPU *g,
@@ -267,6 +271,17 @@ struct VirtIOGPUGL {
     bool neptune_capset;
 
     QEMUTimer *fence_poll;
+    GHashTable *context_fence_watches;
+    bool scanout_needs_full_update[VIRTIO_GPU_MAX_SCANOUTS];
+    uint32_t scanout_texture[VIRTIO_GPU_MAX_SCANOUTS];
+    uint32_t scanout_texture_width[VIRTIO_GPU_MAX_SCANOUTS];
+    uint32_t scanout_texture_height[VIRTIO_GPU_MAX_SCANOUTS];
+    struct VirtIOGPUExternalCopy
+        *scanout_external_copy[VIRTIO_GPU_MAX_SCANOUTS];
+    uint32_t scanout_pending_texture[VIRTIO_GPU_MAX_SCANOUTS];
+    struct VirtIOGPUExternalCopy *scanout_pending_copy[VIRTIO_GPU_MAX_SCANOUTS];
+    struct VirtIOGPUExternalContext *context_failure;
+    bool scanout_gpu[VIRTIO_GPU_MAX_SCANOUTS];
     QEMUTimer *print_stats;
 
     QEMUBH *cmdq_resume_bh;
@@ -406,7 +421,12 @@ void virtio_gpu_disable_scanout(VirtIOGPU *g, int scanout_id);
 void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
                                   struct virtio_gpu_ctrl_command *cmd);
 void virtio_gpu_virgl_fence_poll(VirtIOGPU *g);
-void virtio_gpu_virgl_reset_scanout(VirtIOGPU *g);
+void virtio_gpu_virgl_clear_fence_watches(VirtIOGPU *g);
+bool virtio_gpu_virgl_readback(VirtIOGPUBase *g, QemuConsole *con,
+                             Error **errp);
+bool virtio_gpu_virgl_reset_scanout(VirtIOGPU *g);
+bool virtio_gpu_virgl_destroy_resource_copies(VirtIOGPU *g);
+bool virtio_gpu_virgl_recover_context(VirtIOGPU *g);
 void virtio_gpu_virgl_reset(VirtIOGPU *g);
 void virtio_gpu_virgl_resource_destroy(VirtIOGPU *g,
                                        struct virtio_gpu_simple_resource *res,

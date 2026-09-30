@@ -3,7 +3,7 @@ name: Vista driver ISO
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, public/vista-preview]
     tags: ['v*']
   pull_request:
 
@@ -15,6 +15,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  host-and-cpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Restore pinned host sources
+        run: |
+          python3 scripts/bootstrap_sources.py
+          python3 scripts/bootstrap_qemu_sources.py
+      - name: Build Linux toolchain image
+        env:
+          CONTAINER_ENGINE: docker
+        run: bash scripts/dev-container.sh build
+      - name: Run CPU regression suite
+        env:
+          CONTAINER_ENGINE: docker
+        run: bash scripts/dev-container.sh run python3 scripts/test_public.py --output test-artifacts/ci-cpu
+      - name: Build host renderer and QEMU
+        env:
+          CONTAINER_ENGINE: docker
+        run: |
+          mkdir -p ci-logs
+          set -o pipefail
+          bash scripts/dev-container.sh run bash scripts/build_linux_graphics.sh 2>&1 | tee ci-logs/host-graphics.log
+          bash scripts/dev-container.sh run bash scripts/build_linux_qemu.sh 2>&1 | tee ci-logs/qemu.log
+      - name: Upload host build and CPU evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: host-cpu-evidence-${{ github.sha }}
+          path: |
+            test-artifacts/ci-cpu/
+            ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -39,12 +78,16 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: triton-vista-x64-${{ github.sha }}
+          name: triton-vista-${{ github.sha }}
           path: |
             dist/triton-vista-x64.iso
             dist/SHA256SUMS
             dist/build-info.json
             dist/INSTALL.txt
+            dist/x86/triton-vista-x86.iso
+            dist/x86/SHA256SUMS
+            dist/x86/build-info.json
+            dist/x86/INSTALL.txt
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

@@ -76,6 +76,15 @@ static void virtio_gpu_update_display(void *opaque)
 {
 }
 
+static bool virtio_gpu_readback_display(void *opaque, QemuConsole *con,
+                                      Error **errp)
+{
+    VirtIOGPUBase *g = opaque;
+    VirtIOGPUBaseClass *k = VIRTIO_GPU_BASE_GET_CLASS(g);
+
+    return !k->gl_readback || k->gl_readback(g, con, errp);
+}
+
 static void virtio_gpu_text_update(void *opaque, console_ch_t *chardata)
 {
 }
@@ -162,6 +171,7 @@ static const GraphicHwOps virtio_gpu_ops = {
     .get_flags = virtio_gpu_get_flags,
     .invalidate = virtio_gpu_invalidate_display,
     .gfx_update = virtio_gpu_update_display,
+    .gfx_readback = virtio_gpu_readback_display,
     .text_update = virtio_gpu_text_update,
     .ui_info = virtio_gpu_ui_info,
     .gl_block = virtio_gpu_gl_block,

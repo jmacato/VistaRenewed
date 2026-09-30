@@ -104,6 +104,7 @@ VioGpuDevice::VioGpuDevice(VioGpuAdapter *pAdapter) : m_Context(pAdapter), m_Vir
     m_hUM = NULL;
     m_hKM = NULL;
     m_pBlit = NULL;
+    m_presentTraceCount = 0;
 
     m_pAdapter = pAdapter;
 }
@@ -115,6 +116,48 @@ VioGpuDevice::~VioGpuDevice()
 
     if (m_hUM) ObDereferenceObject(m_hUM);
     if (m_hKM) ObDereferenceObject(m_hKM);
+}
+
+NTSTATUS VioGpuDevice::EnsureVirglAttachment(VioGpuDeviceAllocation *allocation)
+{
+    if (allocation == NULL || allocation->GetDevice() != this ||
+        allocation->GetAllocation() == NULL)
+        return STATUS_INVALID_PARAMETER;
+    if (m_Virgl.IsEmpty())
+    {
+        bool has_virgl  = !!(m_pAdapter->m_supportedCapsetIDs & (1llu << VIRTIO_GPU_CAPSET_VIRGL));
+        bool has_virgl2 = !!(m_pAdapter->m_supportedCapsetIDs & (1llu << VIRTIO_GPU_CAPSET_VIRGL2));
+        if (has_virgl || has_virgl2)
+        {
+            VIOGPU_CTX_INIT_REQ VirglCtx;
+            memset(&VirglCtx, 0, sizeof(VirglCtx));
+            VirglCtx.CapsetID = has_virgl2 ? VIRTIO_GPU_CAPSET_VIRGL2 : VIRTIO_GPU_CAPSET_VIRGL;
+            VirglCtx.NumRings = 64;
+            memcpy(VirglCtx.DebugName, "virgl-gdi-blt", sizeof("virgl-gdi-blt") - 1);
+            NTSTATUS contextStatus = m_Virgl.Init(&VirglCtx);
+            if (!NT_SUCCESS(contextStatus))
+            {
+                DbgPrint(TRACE_LEVEL_ERROR,
+                         ("%s failed to create lazy virgl context: 0x%X\n",
+                          __FUNCTION__, contextStatus));
+                return contextStatus;
+            }
+        }
+        else
+        {
+            DbgPrint(TRACE_LEVEL_ERROR, ("%s no virgl capset for blt present\n", __FUNCTION__));
+            return STATUS_UNSUCCESSFUL;
+        }
+    }
+
+    if (!allocation->m_AttachedToVirgl) {
+        NTSTATUS status = GetCtrlQueue()->CtxResource(
+            true, m_Virgl.GetId(), allocation->GetAllocation()->GetId());
+        if (!NT_SUCCESS(status))
+            return status;
+        allocation->m_AttachedToVirgl = true;
+    }
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent,
@@ -140,7 +183,7 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent,
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s\n", __FUNCTION__));
 
-    DbgPrint(TRACE_LEVEL_WARNING,
+    DbgPrint(TRACE_LEVEL_VERBOSE,
              ("<--> %s src=%d dst=%d srcPrim=%d dstPrim=%d srcBlob=%d dstBlob=%d "
              "srcCoherent=%d dstCoherent=%d needsInitial=%d\n",
               __FUNCTION__, src->GetId(), dst->GetId(), src->IsPrimary(),
@@ -157,7 +200,7 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent,
                   __FUNCTION__, src->GetId(), dst->GetId()));
         return STATUS_INVALID_PARAMETER;
     }
-    DbgPrint(TRACE_LEVEL_WARNING,
+    DbgPrint(TRACE_LEVEL_VERBOSE,
              ("%s dimensions src=%ux%u dst=%ux%u rects=%u "
               "srcRect=%ld,%ld,%ld,%ld dstRect=%ld,%ld,%ld,%ld\n",
               __FUNCTION__, srcWidth, srcHeight, dstWidth, dstHeight,
@@ -387,52 +430,12 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent,
     // behind it -- every CtxResource attach and SUBMIT below is silently
     // dropped by the host and the primary never receives the blt (frozen
     // black desktop). Create the host context lazily on first use.
-    if (m_Virgl.IsEmpty())
-    {
-        bool has_virgl  = !!(m_pAdapter->m_supportedCapsetIDs & (1llu << VIRTIO_GPU_CAPSET_VIRGL));
-        bool has_virgl2 = !!(m_pAdapter->m_supportedCapsetIDs & (1llu << VIRTIO_GPU_CAPSET_VIRGL2));
-        if (has_virgl || has_virgl2)
-        {
-            VIOGPU_CTX_INIT_REQ VirglCtx;
-            memset(&VirglCtx, 0, sizeof(VirglCtx));
-            VirglCtx.CapsetID = has_virgl2 ? VIRTIO_GPU_CAPSET_VIRGL2 : VIRTIO_GPU_CAPSET_VIRGL;
-            VirglCtx.NumRings = 64;
-            memcpy(VirglCtx.DebugName, "virgl-gdi-blt", sizeof("virgl-gdi-blt") - 1);
-            NTSTATUS contextStatus = m_Virgl.Init(&VirglCtx);
-            if (!NT_SUCCESS(contextStatus))
-            {
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s failed to create lazy virgl context: 0x%X\n",
-                          __FUNCTION__, contextStatus));
-                return contextStatus;
-            }
-        }
-        else
-        {
-            DbgPrint(TRACE_LEVEL_ERROR, ("%s no virgl capset for blt present\n", __FUNCTION__));
-            return STATUS_UNSUCCESSFUL;
-        }
-    }
-
-    // Finish all fallible control-queue work before writing the DMA packet.
-    // A failed attach can then return without leaving a partially generated
-    // packet or falsely recording a PIPE_RESOURCE_SET_TYPE command as sent.
-    if (!srcDev->m_AttachedToVirgl)
-    {
-        NTSTATUS attachStatus =
-            GetCtrlQueue()->CtxResource(true, m_Virgl.GetId(), src->GetId());
-        if (!NT_SUCCESS(attachStatus))
-            return attachStatus;
-        srcDev->m_AttachedToVirgl = true;
-    }
-    if (!dstDev->m_AttachedToVirgl)
-    {
-        NTSTATUS attachStatus =
-            GetCtrlQueue()->CtxResource(true, m_Virgl.GetId(), dst->GetId());
-        if (!NT_SUCCESS(attachStatus))
-            return attachStatus;
-        dstDev->m_AttachedToVirgl = true;
-    }
+    NTSTATUS attachStatus = EnsureVirglAttachment(srcDev);
+    if (!NT_SUCCESS(attachStatus))
+        return attachStatus;
+    attachStatus = EnsureVirglAttachment(dstDev);
+    if (!NT_SUCCESS(attachStatus))
+        return attachStatus;
 
     INT dx = (INT)copyDx64;
     INT dy = (INT)copyDy64;
@@ -894,6 +897,17 @@ NTSTATUS VioGpuDevice::GenerateBltPresentUM(DXGKARG_PRESENT *pPresent, VioGpuAll
     return STATUS_SUCCESS;
 }
 
+void VioGpuDevice::TracePresent(ULONG stage, ULONG flags, ULONG source,
+                               LONG generation, BOOLEAN armed)
+{
+    if (m_presentTraceCount >= 24 ||
+        InterlockedIncrement(&m_presentTraceCount) > 24)
+        return;
+    DbgPrint(TRACE_LEVEL_WARNING,
+             ("TRITON-PRESENT ctx=%u stage=%u flags=%x src=%u gen=%ld armed=%u\n",
+              m_Context.GetId(), stage, flags, source, generation, armed));
+}
+
 NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 {
     PAGED_CODE();
@@ -914,6 +928,9 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
         return STATUS_INVALID_PARAMETER;
     }
 
+    TracePresent(0, pPresent->Flags.Value, 0,
+                 m_pAdapter->vidpn.GetScanoutSourceGeneration(), FALSE);
+
     // DMA buffers (and their private-data area) are RECYCLED by dxgkrnl.
     // Every path below that returns without storing a VioGpuCommand*
     // (windowed flips with no present bytes, error exits) would leave a
@@ -928,7 +945,17 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 
     if (pPresent->Flags.Flip)
     {
-        if (pPresent->Flags.Value != 0x4)
+        static LONG flipTraceBudget = 32;
+        if (InterlockedDecrement(&flipTraceBudget) >= 0)
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("TRITON-FLIP-INTERVAL interval=%u flags=%x\n",
+                      (UINT)pPresent->FlipInterval, pPresent->Flags.Value));
+        // Vista RTM submits immediate fullscreen presents as Flip together
+        // with FlipWithNoWait, even with FlipCaps.Value == 0. Both use our
+        // ordered DMA retirement path. FlipInterval, rather than the flags,
+        // selects immediate retirement or a synchronized vblank wait.
+        // Continue rejecting unrelated blt, colour-key and rotation flags.
+        if ((pPresent->Flags.Value & ~0xcu) != 0)
         {
             return STATUS_NOT_SUPPORTED;
         }
@@ -936,11 +963,11 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
         // SetVidPnSourceAddress only executes MMIO flips; Vista's caps here
         // deliberately select the DMA path. Never latch during translation.
         VioGpuAllocation *srcAlloc = NULL;
+        VioGpuDeviceAllocation *srcDev = NULL;
         DXGK_ALLOCATIONLIST *dxgk_src = &pPresent->pAllocationList[DXGK_PRESENT_SOURCE_INDEX];
         if (dxgk_src->hDeviceSpecificAllocation)
         {
-            VioGpuDeviceAllocation *srcDev =
-                VioGpuDeviceAllocation::FromHandle(dxgk_src->hDeviceSpecificAllocation);
+            srcDev = VioGpuDeviceAllocation::FromHandle(dxgk_src->hDeviceSpecificAllocation);
             if (srcDev == NULL || srcDev->GetDevice() != this)
             {
                 return STATUS_INVALID_PARAMETER;
@@ -956,16 +983,40 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
             return STATUS_INVALID_PARAMETER;
         }
 
+        // The standard primary has a separate CPU-visible backing store.
+        // Rendering through its imported GPU image does not update those
+        // bytes. Retire a download before publishing the flip, so CDD's
+        // software cursor and other CPU readers see the displayed pixels.
+#if defined(VIOGPU_TARGET_VISTA)
+        const bool downloadPrimary = !srcAlloc->IsBlob();
+#else
+        const bool downloadPrimary = false;
+#endif
+        UINT primaryWidth = 0, primaryHeight = 0;
+        ULONG primaryStride = 0;
+        ULONGLONG primaryOffset = 0;
+        if (downloadPrimary &&
+            (!srcAlloc->GetDimensions(&primaryWidth, &primaryHeight) ||
+             !srcAlloc->GetTransferLayout(0, 0, &primaryStride, &primaryOffset)))
+            return STATUS_INVALID_PARAMETER;
+        const UINT packetSize = sizeof(VIOGPU_COMMAND_HDR) +
+            (downloadPrimary ? sizeof(VIOGPU_TRANSFER_CMD) : 0);
+
         // Vista's checked SubmitPresent requires a successful Present to
         // consume DMA bytes, including flips. Queue a real scheduler packet
         // whose retirement latches the requested source for the display thread.
         if (pPresent->pDmaBuffer == NULL ||
-            pPresent->DmaSize < sizeof(VIOGPU_COMMAND_HDR) ||
+            pPresent->DmaSize < packetSize ||
             pPresent->PatchLocationListOutSize < 1 ||
             pPresent->pPatchLocationListOut == NULL)
         {
             pPresent->MultipassOffset = 0;
             return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+        }
+        if (downloadPrimary) {
+            NTSTATUS status = EnsureVirglAttachment(srcDev);
+            if (!NT_SUCCESS(status))
+                return status;
         }
         VioGpuCommand *cmd = new (VIOGPU_NONPAGED_POOL)
             VioGpuCommand(m_pAdapter, this);
@@ -981,19 +1032,33 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
         if (dxgk_src->SegmentId != 0)
             srcAlloc->m_SegmentAddress = dxgk_src->PhysicalAddress;
         cmd->SetScanoutSourceCompletion(srcAlloc,
-            m_pAdapter->vidpn.GetScanoutSourceGeneration(), TRUE);
+            m_pAdapter->vidpn.GetScanoutSourceGeneration(), TRUE, (UINT)pPresent->FlipInterval);
+        TracePresent(1, pPresent->Flags.Value, srcAlloc->GetId(),
+                     m_pAdapter->vidpn.GetScanoutSourceGeneration(), FALSE);
         cmd->SetDmaBuf((char *)pPresent->pDmaBuffer);
         VIOGPU_COMMAND_HDR *packet =
             (VIOGPU_COMMAND_HDR *)pPresent->pDmaBuffer;
         RtlZeroMemory(packet, sizeof(*packet));
-        packet->type = VIOGPU_CMD_NOP;
+        packet->type = downloadPrimary ? VIOGPU_CMD_TRANSFER_FROM_HOST : VIOGPU_CMD_NOP;
+        if (downloadPrimary) {
+            packet->size = sizeof(VIOGPU_TRANSFER_CMD);
+            packet->flags = VIOGPU_EXECBUF_VIRGL;
+            VIOGPU_TRANSFER_CMD *transfer = (VIOGPU_TRANSFER_CMD *)(packet + 1);
+            RtlZeroMemory(transfer, sizeof(*transfer));
+            transfer->res_id = srcAlloc->GetId();
+            transfer->box.width = primaryWidth;
+            transfer->box.height = primaryHeight;
+            transfer->box.depth = 1;
+            transfer->stride = primaryStride;
+            transfer->offset = primaryOffset;
+        }
         D3DDDI_PATCHLOCATIONLIST *patch = pPresent->pPatchLocationListOut;
         RtlZeroMemory(patch, sizeof(*patch));
         patch->AllocationIndex = DXGK_PRESENT_SOURCE_INDEX;
         patch->DriverId = 1;
         patch->SlotId = 1;
         *(void **)pPresent->pDmaBufferPrivateData = cmd->ToHandle();
-        pPresent->pDmaBuffer = (UCHAR *)pPresent->pDmaBuffer + sizeof(*packet);
+        pPresent->pDmaBuffer = (UCHAR *)pPresent->pDmaBuffer + packetSize;
         pPresent->pPatchLocationListOut = patch + 1;
         return STATUS_SUCCESS;
     }

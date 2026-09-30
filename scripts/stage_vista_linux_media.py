@@ -21,12 +21,16 @@ args = parser.parse_args()
 package = args.package.resolve()
 files_by_arch = {
     'x64': ['viogpu3d-diagnostic.inf', 'viogpu3d-vista-x64.cat', 'viogpu3d.sys',
-            'neptune_d3d9.dll', 'neptune_d3d9_wow.dll', 'triton-vista-deploy.exe',
+            'neptune_d3d9.dll', 'neptune_d3d10.dll', 'neptune_d3d9_wow.dll', 'neptune_d3d10_wow.dll', 'triton-vista-deploy.exe',
             'triton9_runtime_probe_x64.exe'],
     'x86': ['viogpu3d-diagnostic.inf', 'viogpu3d-vista-x86.cat', 'viogpu3d.sys',
-            'neptune_d3d9.dll', 'triton-vista-deploy.exe',
+            'neptune_d3d9.dll', 'neptune_d3d10.dll', 'triton-vista-deploy.exe',
             'triton9_runtime_probe_x86.exe'],
 }
+for package_arch in ('x64', 'x86'):
+    for probe_arch in (('x64', 'x86') if package_arch == 'x64' else ('x86',)):
+        files_by_arch[package_arch] += [f'triton10_{probe}_probe_{probe_arch}.exe'
+                                        for probe in ('runtime', 'present')]
 files = files_by_arch[args.arch]
 probe_name = f'triton9_runtime_probe_{args.arch}.exe'
 def sha(path):
@@ -51,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix='.stage-', dir=publications) as temp:
     payload.mkdir()
     for name in files+['package-manifest.sha256']:
         shutil.copy2(package/name, payload/name)
-    for name in ['triton-vista-deploy.exe', probe_name]:
+    for name in ['triton-vista-deploy.exe', probe_name] + [n for n in files if n.startswith('triton10_')]:
         shutil.copy2(package/name, tree/name)
     cert = args.certificate.resolve()
     cert_name = 'triton-vista-linux-signing.cer'

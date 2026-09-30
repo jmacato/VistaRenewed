@@ -156,7 +156,14 @@ npt_library_load_dxvk_clear_api(struct npt_d3d_library *lib)
          .p = npt_library_sym(lib->d3d11_module,
                               "dxvk_d3d11_clear_depth_stencil_rects")
       }).f;
-   if (lib->pfn_clear_depth_stencil_rects)
+   lib->pfn_copy_color =
+      ((union {
+         void *p;
+         HRESULT (*f)(void *, void *, void *);
+      }){
+         .p = npt_library_sym(lib->d3d11_module, "dxvk_d3d11_copy_color")
+      }).f;
+   if (lib->pfn_clear_depth_stencil_rects || lib->pfn_copy_color)
       lib->backend = NPT_BACKEND_DXVK;
 }
 #endif

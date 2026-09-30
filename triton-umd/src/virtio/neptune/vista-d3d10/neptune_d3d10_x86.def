@@ -1,0 +1,4 @@
+LIBRARY neptune_d3d10.dll
+EXPORTS
+    OpenAdapter10=OpenAdapter10@4
+    OpenAdapter10_2=OpenAdapter10_2@4

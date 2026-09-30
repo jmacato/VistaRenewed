@@ -14,6 +14,10 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter, VioGpuDevice *device)
     m_pCommander = &adapter->commander;
     m_pDevice = NULL;
     m_pExpectedDevice = device;
+    m_traceTag = device ? device->traceTag : VioGpuTraceTag{};
+    if (m_traceTag.run != VioGpuTraceRun()) m_traceTag = VioGpuTraceTag{};
+    m_traceTag.command = m_traceTag.run ? VioGpuTraceNextCommand() : 0;
+    VioGpuTraceRecord(TT_COMMAND_CREATE, m_traceTag);
 
     m_FenceId = 0;
     m_NodeOrdinal = 0;
@@ -27,6 +31,7 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter, VioGpuDevice *device)
     m_pScanoutSourceCompletion = NULL;
     m_scanoutSourceGeneration = 0;
     m_scanoutSourceIsDmaFlip = FALSE;
+    m_scanoutFlipInterval = 0;
     m_pRenderEvent = NULL;
     m_pDmaBuffer = NULL;
     m_pCommand = NULL;
@@ -121,12 +126,13 @@ void VioGpuCommand::SetInitialPresentCompletion(VioGpuAllocation *allocation)
 
 void VioGpuCommand::SetScanoutSourceCompletion(VioGpuAllocation *allocation,
                                                LONG sourceGeneration,
-                                               BOOLEAN dmaFlip)
+                                               BOOLEAN dmaFlip, UINT flipInterval)
 {
     ASSERT(allocation != NULL);
     m_pScanoutSourceCompletion = allocation;
     m_scanoutSourceGeneration = sourceGeneration;
     m_scanoutSourceIsDmaFlip = dmaFlip;
+    m_scanoutFlipInterval = flipInterval;
 }
 
 void VioGpuCommand::RecordFailure(NTSTATUS status)
@@ -178,6 +184,7 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand,
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s", __FUNCTION__));
 
     m_FenceId = pSubmitCommand->SubmissionFenceId;
+    VioGpuTraceRecord(TT_COMMAND_SUBMIT, m_traceTag, m_FenceId);
 #if defined(VIOGPU_TARGET_VISTA)
     // WDDM 1.0 has one node.  Its submit argument reports only the engine.
     m_NodeOrdinal = 0;
@@ -207,6 +214,8 @@ PAGED_CODE_SEG_BEGIN
 
 void VioGpuCommand::Run()
 {
+    VioGpuTraceScope traceScope(m_traceTag);
+    VioGpuTraceRecord(TT_COMMAND_RUN, m_traceTag);
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
 
@@ -429,8 +438,9 @@ void VioGpuCommand::Run()
                     // Render accepted this only as the terminal packet and
                     // stored a referenced PKEVENT on this command.  We reach
                     // it only after all preceding host work has returned to
-                    // the serialized commander, so it is an ordered GPU-done
-                    // completion point rather than a CPU submission ack.
+                    // the serialized commander. This retires the transport
+                    // commands; GPU work enqueued asynchronously by host APIs
+                    // still requires its own execution-completion fence.
                     SignalRenderEvent();
                     break;
                 }
@@ -582,19 +592,36 @@ end:
     }
     m_pInitialPresentCompletion = NULL;
 
+    BOOLEAN synchronizedFlip = FALSE;
+    if (NT_SUCCESS((NTSTATUS)InterlockedCompareExchange(&m_failureStatus, 0, 0)) &&
+        m_pScanoutSourceCompletion != NULL && m_scanoutFlipInterval)
+    {
+        VioGpuTraceRecord(TT_SYNC_BEGIN, m_traceTag, m_scanoutFlipInterval);
+        NTSTATUS waitStatus = m_pAdapter->vidpn.BeginSynchronizedFlip(m_scanoutFlipInterval);
+        VioGpuTraceRecord(TT_SYNC_END, m_traceTag, (ULONG)waitStatus);
+        synchronizedFlip = NT_SUCCESS(waitStatus);
+        if (!NT_SUCCESS(waitStatus))
+            RecordFailure(waitStatus);
+    }
     if (NT_SUCCESS((NTSTATUS)InterlockedCompareExchange(&m_failureStatus, 0, 0)) &&
         m_pScanoutSourceCompletion != NULL)
     {
         // Read the segment address at retirement, after any Patch callback.
         // Host blt presentation preserves the current address; DMA flips
-        // report their own allocation's address on the following vsync.
+        // report their own allocation's address when vblank is notified.
         BOOLEAN armed = m_pAdapter->vidpn.SetScanoutSourceIfGeneration(
             m_pScanoutSourceCompletion, m_scanoutSourceGeneration,
             m_scanoutSourceIsDmaFlip);
+        if (m_pExpectedDevice != NULL)
+            m_pExpectedDevice->TracePresent(2, m_scanoutSourceIsDmaFlip,
+                m_pScanoutSourceCompletion->GetId(),
+                m_scanoutSourceGeneration, armed);
         if (armed && m_scanoutSourceIsDmaFlip) {
             // Do not let DMA completion or a following render-event marker
             // release the source while the display thread still reads it.
+            VioGpuTraceRecord(TT_COPY_BEGIN, m_traceTag, m_pScanoutSourceCompletion->GetId());
             NTSTATUS status = m_pAdapter->vidpn.CompletePendingFlip();
+            VioGpuTraceRecord(TT_COPY_END, m_traceTag, (ULONG)status);
             if (!NT_SUCCESS(status)) {
                 RecordFailure(status);
             } else {
@@ -613,6 +640,10 @@ end:
     // Report completion only after the worker has performed all ordered local
     // work and released the in-flight allocation references.
     NotifyCompletion();
+    // The corresponding CRTC notification follows the DMA completion. The
+    // timer must not publish this flip while its DMA is still outstanding.
+    if (synchronizedFlip)
+        m_pAdapter->vidpn.EndSynchronizedFlip();
 
     m_pCommander->CommandFinished(this);
 
@@ -713,6 +744,7 @@ void VioGpuCommand::NotifyCompletion()
     DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt = {};
     NTSTATUS failure =
         (NTSTATUS)InterlockedCompareExchange(&m_failureStatus, 0, 0);
+    VioGpuTraceRecord(TT_COMMAND_COMPLETE, m_traceTag, m_FenceId, (ULONG)failure);
     if (m_Preemption)
     {
         // This marker runs behind every earlier submission. Only now may

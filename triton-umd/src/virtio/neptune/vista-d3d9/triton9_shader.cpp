@@ -11,6 +11,7 @@
 #include "triton9.h"
 #include "triton9_draw_contract.h"
 #include "triton9_shader_token_contract.h"
+#include "triton9_fixed.h"
 
 #include "../triton/tritonDxbc.h"
 #include "../triton/tritonDxbcSignature.h"
@@ -27,6 +28,7 @@
 #define D3DHAL_SAMPLER_MAXSAMP 16
 #endif
 #include "ShaderConv.h"
+#include "ShaderValidation.h"
 
 namespace {
 
@@ -155,10 +157,11 @@ struct Triton9Shader {
     UINT64 conversionEpoch = 0;
     std::vector<Triton9ShaderVariant *> variants;
     BOOL transformedFixedFunction = FALSE;
+    BOOL internalFixedFunction = FALSE;
 };
 
-/* These shaders are not exposed as D3D9 handles.  They only cover the small
- * null-stage path used while bringing up the Vista compositor. */
+/* Internal shader objects implement the D3D9 fixed-function stages. Their
+ * program and constant state is isolated from application shader handles. */
 struct Triton9FixedFunctionShaders {
     Triton9Shader *vertexShader = nullptr;
     Triton9Shader *pixelShader = nullptr;
@@ -169,6 +172,14 @@ struct Triton9FixedFunctionShaders {
     const Triton9Shader *pixelVertexShader = nullptr;
     UINT64 pixelVertexInstanceSerial = 0;
     UINT64 pixelVertexGeneration = 0;
+    ID3D11GeometryShader *geometryShader = nullptr;
+    Triton9Shader *geometryLinkage = nullptr;
+    const Triton9Shader *geometryVertex = nullptr;
+    UINT64 geometryInstanceSerial = 0;
+    UINT64 geometryGeneration = 0;
+    ShaderConv::RasterStates geometryRaster;
+    Triton9Fixed::State *vertexSnapshot = nullptr;
+    Triton9Fixed::State *pixelSnapshot = nullptr;
 };
 
 Triton9VertexDeclaration::~Triton9VertexDeclaration()
@@ -185,103 +196,12 @@ struct Triton9InputElement {
 
 static volatile LONG gTriton9DeclarationSerial;
 
-static UINT
-triton9LegacyInstructionLength(UINT token, UINT version)
-{
-    const UINT opcode = token & D3DSI_OPCODE_MASK;
-
-    if (opcode == D3DSIO_COMMENT)
-        return ((token & D3DSI_COMMENTSIZE_MASK) >>
-                D3DSI_COMMENTSIZE_SHIFT) + 1;
-    if (opcode == D3DSIO_DEF || opcode == D3DSIO_DEFI)
-        return 6;
-    if (opcode == D3DSIO_DEFB)
-        return 3;
-    if ((version & 0xffff0000u) == 0xffff0000u ||
-        version >= D3DVS_VERSION(2, 0))
-        return ((token & D3DSI_INSTLENGTH_MASK) >>
-                D3DSI_INSTLENGTH_SHIFT) + 1;
-
-    /* Shader model 1 vertex instructions do not carry a reliable encoded
-     * length.  Keep this table equal to ShaderConverter's parser. */
-    switch (opcode) {
-    case D3DSIO_DCL:
-        return 3;
-    case D3DSIO_END:
-    case D3DSIO_NOP:
-        return 1;
-    case D3DSIO_EXP:
-    case D3DSIO_EXPP:
-    case D3DSIO_FRC:
-    case D3DSIO_LIT:
-    case D3DSIO_LOG:
-    case D3DSIO_LOGP:
-    case D3DSIO_MOV:
-    case D3DSIO_RCP:
-    case D3DSIO_RSQ:
-        return 3;
-    case D3DSIO_ADD:
-    case D3DSIO_DP3:
-    case D3DSIO_DP4:
-    case D3DSIO_DST:
-    case D3DSIO_M4x4:
-    case D3DSIO_M4x3:
-    case D3DSIO_M3x4:
-    case D3DSIO_M3x3:
-    case D3DSIO_M3x2:
-    case D3DSIO_MAX:
-    case D3DSIO_MIN:
-    case D3DSIO_MUL:
-    case D3DSIO_SGE:
-    case D3DSIO_SLT:
-        return 4;
-    case D3DSIO_MAD:
-        return 5;
-    default:
-        return 0;
-    }
-}
-
 static bool
 triton9ValidateLegacyShader(const UINT *tokens, UINT byteCount,
                             Triton9ShaderStage stage)
 {
-    const UINT expectedType = stage == Triton9ShaderStage::Vertex
-                                  ? 0xfffe0000u : 0xffff0000u;
-    const UINT words = byteCount / sizeof(*tokens);
-    const UINT version = tokens ? tokens[0] : 0;
-    const UINT major = (version >> 8) & 0xffu;
-    const UINT minor = version & 0xffu;
-
-    if (!tokens || byteCount < 2 * sizeof(*tokens) ||
-        (byteCount & (sizeof(*tokens) - 1)) || byteCount > (4u << 20) ||
-        (version & 0xffff0000u) != expectedType)
-        return false;
-    if (stage == Triton9ShaderStage::Vertex) {
-        if (!((major == 1 && minor == 1) ||
-              (major == 2 && minor == 0) ||
-              (major == 3 && minor == 0)))
-            return false;
-    } else if (!((major == 1 && minor >= 1 && minor <= 4) ||
-                 (major == 2 && minor == 0) ||
-                 (major == 3 && minor == 0))) {
-        return false;
-    }
-
-    for (UINT index = 1; index < words;) {
-        const UINT token = tokens[index];
-        UINT length;
-
-        if (token == 0x0000ffffu)
-            return index + 1 == words;
-        if ((token & D3DSI_OPCODE_MASK) == D3DSIO_END)
-            return false;
-        length = triton9LegacyInstructionLength(token, version);
-        if (!length || length > words - index)
-            return false;
-        index += length;
-    }
-    return false;
+    return ShaderConv::ValidateLegacyShader(tokens, byteCount,
+                                            stage == Triton9ShaderStage::Vertex);
 }
 
 static DXGI_FORMAT
@@ -391,6 +311,7 @@ triton9SemanticName(UINT usage)
     case D3DDECLUSAGE_VPOS:         return "SV_Position";
     case D3DDECLUSAGE_VFACE:        return "SV_IsFrontFace";
     case D3DDECLUSAGE_CLIPDISTANCE: return "SV_ClipDistance";
+    case D3DDECLUSAGE_POINTSPRITE:  return "POINTSPRITE";
     default:                         return "ATTRIB";
     }
 }
@@ -669,8 +590,12 @@ triton9ConvertShader(TRITON9_DEVICE *device, Triton9Shader *shader,
                      const Triton9VertexDeclaration *declaration,
                      const Triton9Shader *linkedVertexShader)
 {
+    if (!device || !device->hostDevice || !shader || shader->legacyTokens.empty())
+        return E_INVALIDARG;
     ShaderConv::ConvertShaderArgs args(
-        9, ShaderConv::AnythingTimes0Equals0, shader->rasterStates);
+        9, ShaderConv::AnythingTimes0Equals0 |
+           (shader->internalFixedFunction ? ShaderConv::InternalFixedFunction : 0),
+        shader->rasterStates);
     ShaderConv::VSInputDecls convertedInputs(ShaderConv::MAX_VS_INPUT_REGS);
     ShaderConv::VSOutputDecls convertedOutputs;
     ShaderConv::VSOutputDecls emptyOutputs;
@@ -679,8 +604,6 @@ triton9ConvertShader(TRITON9_DEVICE *device, Triton9Shader *shader,
     ShaderConv::ByteCode converted;
     HRESULT hr;
 
-    if (!device || !device->hostDevice || !shader || shader->legacyTokens.empty())
-        return E_INVALIDARG;
     if (shader->stage == Triton9ShaderStage::Pixel && linkedVertexShader &&
         linkedVertexShader->stage != Triton9ShaderStage::Vertex)
         return E_INVALIDARG;
@@ -689,8 +612,12 @@ triton9ConvertShader(TRITON9_DEVICE *device, Triton9Shader *shader,
     if (hr != S_FALSE)
         return hr;
 
-    if (declaration)
-        convertedInputs = declaration->inputDecls;
+    try {
+        if (declaration)
+            convertedInputs = declaration->inputDecls;
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
     args.type = shader->stage == Triton9ShaderStage::Vertex
                     ? ShaderConv::ConvertShaderArgs::SHADER_TYPE::SHADER_TYPE_VERTEX
                     : ShaderConv::ConvertShaderArgs::SHADER_TYPE::SHADER_TYPE_PIXEL;
@@ -738,6 +665,23 @@ triton9ConvertShader(TRITON9_DEVICE *device, Triton9Shader *shader,
         }
     }
 
+    if (shader->stage == Triton9ShaderStage::Pixel) {
+        try {
+            for (const auto &semantic : args.AddedSystemSemantics) {
+                TRITON_DXBC_SIGNATURE signature = {};
+                signature.semanticName = triton9LinkageSemanticName(semantic.Usage);
+                signature.semanticIndex = semantic.UsageIndex;
+                signature.systemValue = triton9SemanticSystemValue(semantic.Usage);
+                signature.registerIdx = semantic.RegIndex;
+                signature.mask = semantic.WriteMask;
+                signature.componentType = semantic.Usage == D3DDECLUSAGE_VFACE ? 1 : 3;
+                inputSignatures.push_back(signature);
+            }
+        } catch (...) {
+            ShaderConv::ShaderConverterAPI::CleanUpConvertedShader(converted);
+            return E_OUTOFMEMORY;
+        }
+    }
     triton9DropConvertedShader(shader);
     shader->dxbc = tritonBuildDxbc(
         static_cast<const UINT *>(converted.m_pByteCode),
@@ -769,7 +713,7 @@ triton9ConvertShader(TRITON9_DEVICE *device, Triton9Shader *shader,
     for (UINT slot = 0; slot < 3; ++slot)
         shader->inlineConstants[slot] = std::move(args.m_inlineConsts[slot]);
     if (shader->stage == Triton9ShaderStage::Vertex) {
-        shader->inputDecls = convertedInputs;
+        shader->inputDecls = std::move(convertedInputs);
         shader->outputDecls = convertedOutputs;
         shader->conversionDeclaration = declaration;
         shader->conversionDeclarationSerial = declaration ? declaration->serial : 0;
@@ -797,21 +741,23 @@ triton9ConvertTransformedVertexShader(TRITON9_DEVICE *device,
                                       Triton9Shader *shader,
                                       Triton9VertexDeclaration *declaration)
 {
-    ShaderConv::VSOutputDecls convertedOutputs;
-    std::vector<TRITON_DXBC_SIGNATURE> inputSignatures;
-    std::vector<TRITON_DXBC_SIGNATURE> outputSignatures;
-    ShaderConv::ByteCode converted;
-    ShaderConv::ConvertTLShaderArgs args(
-        9, ShaderConv::AnythingTimes0Equals0, declaration->inputDecls,
-        convertedOutputs);
-    HRESULT hr;
-
     if (!device || !device->hostDevice || !shader || !declaration ||
         shader->stage != Triton9ShaderStage::Vertex ||
         !declaration->hasTransformedPosition)
         return E_INVALIDARG;
 
+    ShaderConv::VSInputDecls convertedInputs(ShaderConv::MAX_VS_INPUT_REGS);
+    ShaderConv::VSOutputDecls convertedOutputs;
+    std::vector<TRITON_DXBC_SIGNATURE> inputSignatures;
+    std::vector<TRITON_DXBC_SIGNATURE> outputSignatures;
+    ShaderConv::ByteCode converted;
+    ShaderConv::ConvertTLShaderArgs args(
+        9, ShaderConv::AnythingTimes0Equals0, convertedInputs,
+        convertedOutputs);
+    HRESULT hr;
+
     try {
+        convertedInputs = declaration->inputDecls;
         hr = shader->converter.ConvertTLShader(args);
     } catch (...) {
         return E_OUTOFMEMORY;
@@ -821,7 +767,7 @@ triton9ConvertTransformedVertexShader(TRITON9_DEVICE *device,
         return FAILED(hr) ? hr : E_FAIL;
 
     converted = args.convertedByteCode;
-    hr = triton9BuildVsInputSignatures(declaration, declaration->inputDecls,
+    hr = triton9BuildVsInputSignatures(declaration, convertedInputs,
                                        &inputSignatures);
     if (SUCCEEDED(hr))
         hr = triton9BuildVsOutputSignatures(convertedOutputs, &outputSignatures);
@@ -850,7 +796,7 @@ triton9ConvertTransformedVertexShader(TRITON9_DEVICE *device,
         return FAILED(hr) ? hr : E_FAIL;
     }
 
-    shader->inputDecls = declaration->inputDecls;
+    shader->inputDecls = std::move(convertedInputs);
     shader->outputDecls = convertedOutputs;
     shader->conversionDeclaration = declaration;
     shader->conversionDeclarationSerial = declaration->serial;
@@ -877,27 +823,19 @@ triton9GetInputSlotFrequency(const TRITON9_DEVICE *device, UINT stream,
                              UINT *stepRate)
 {
     UINT frequency;
-    UINT value;
 
     if (!device || !slotClass || !stepRate || stream >= TRITON9_MAX_VERTEX_STREAMS)
         return E_INVALIDARG;
     frequency = device->streamSourceFrequencies[stream];
-    if (frequency == 1) {
-        *slotClass = D3D11_INPUT_PER_VERTEX_DATA;
-        *stepRate = 0;
-        return S_OK;
-    }
-    value = frequency & kTriton9StreamFrequencyValueMask;
-    if (stream == 0 && (frequency & D3DSTREAMSOURCE_INDEXEDDATA) &&
-        !(frequency & D3DSTREAMSOURCE_INSTANCEDATA) && value) {
+    if (!(frequency & D3DSTREAMSOURCE_INSTANCEDATA)) {
         *slotClass = D3D11_INPUT_PER_VERTEX_DATA;
         *stepRate = 0;
         return S_OK;
     }
     if (stream != 0 && (frequency & D3DSTREAMSOURCE_INSTANCEDATA) &&
-        !(frequency & D3DSTREAMSOURCE_INDEXEDDATA) && value) {
+        !(frequency & D3DSTREAMSOURCE_INDEXEDDATA)) {
         *slotClass = D3D11_INPUT_PER_INSTANCE_DATA;
-        *stepRate = value;
+        *stepRate = frequency & kTriton9StreamFrequencyValueMask;
         return S_OK;
     }
     return D3DDDIERR_INVALIDCALL;
@@ -926,9 +864,9 @@ triton9GetStreamElementRange(const TRITON9_DEVICE *device, UINT stream,
         *elementCount = vertexCount;
         return S_OK;
     }
-    /* D3D11 advances a per-instance element after each step-rate group. */
+    /* A zero per-instance step rate always reads the first element. */
     *firstElement = 0;
-    *elementCount = (instanceCount - 1u) / stepRate + 1u;
+    *elementCount = stepRate ? (instanceCount - 1u) / stepRate + 1u : 1u;
     return S_OK;
 }
 
@@ -939,20 +877,10 @@ triton9GetInstanceCount(const TRITON9_DEVICE *device,
                         const Triton9VertexDeclaration *declaration,
                         UINT *instanceCount)
 {
-    UINT streamZeroFrequency;
+    BOOL hasInstanceInput = FALSE;
 
     if (!device || !shader || !declaration || !instanceCount)
         return E_INVALIDARG;
-    streamZeroFrequency = device->streamSourceFrequencies[0];
-    if (streamZeroFrequency == 1) {
-        *instanceCount = 1;
-    } else if ((streamZeroFrequency & D3DSTREAMSOURCE_INDEXEDDATA) &&
-               !(streamZeroFrequency & D3DSTREAMSOURCE_INSTANCEDATA) &&
-               (streamZeroFrequency & kTriton9StreamFrequencyValueMask)) {
-        *instanceCount = streamZeroFrequency & kTriton9StreamFrequencyValueMask;
-    } else {
-        return D3DDDIERR_INVALIDCALL;
-    }
     for (UINT i = 0; i < shader->inputDecls.GetSize(); ++i) {
         const ShaderConv::VSInputDecl &input = shader->inputDecls[i];
         const D3DDDIVERTEXELEMENT *element = triton9FindDeclarationElement(
@@ -967,7 +895,12 @@ triton9GetInstanceCount(const TRITON9_DEVICE *device,
                                            &stepRate);
         if (FAILED(hr))
             return hr;
+        hasInstanceInput |= slotClass == D3D11_INPUT_PER_INSTANCE_DATA;
     }
+    *instanceCount = hasInstanceInput ?
+        device->streamSourceFrequencies[0] & kTriton9StreamFrequencyValueMask : 1u;
+    if (!*instanceCount)
+        *instanceCount = 1;
     return S_OK;
 }
 
@@ -1086,53 +1019,95 @@ triton9EnsureTransformedVertexShader(TRITON9_DEVICE *device,
     return S_OK;
 }
 
+static BYTE
+triton9SamplerSwizzle(const TRITON9_RESOURCE *resource)
+{
+    const auto *owner = (resource && resource->textureOwner ? resource->textureOwner : resource);
+    if (!owner)
+        return ShaderConv::SAMPLER_SWIZZLE_NONE;
+    switch (UINT(owner->format)) {
+    case D3DFMT_L8: case D3DFMT_L16:
+        return ShaderConv::SAMPLER_SWIZZLE_RRRA;
+    case D3DFMT_A8L8:
+        return ShaderConv::SAMPLER_SWIZZLE_RRRG;
+    case D3DFMT_X8B8G8R8: case D3DFMT_X1R5G5B5: case D3DFMT_X4R4G4B4:
+        return ShaderConv::SAMPLER_SWIZZLE_RGB1;
+    case D3DFMT_R16F: case D3DFMT_R32F:
+        return ShaderConv::SAMPLER_SWIZZLE_RAAA;
+    case D3DFMT_V8U8: case D3DFMT_V16U16:
+    case D3DFMT_G16R16: case D3DFMT_G16R16F: case D3DFMT_G32R32F:
+        return ShaderConv::SAMPLER_SWIZZLE_RGAA;
+    default:
+        return ShaderConv::SAMPLER_SWIZZLE_NONE;
+    }
+}
+
+static ShaderConv::RasterStates
+triton9RasterStates(const TRITON9_DEVICE *device, UINT primitive, BOOL transformed)
+{
+    ShaderConv::RasterStates raster;
+    raster.TCIMapping = ShaderConv::TCIMASK_PASSTHRU;
+    raster.AlphaTestEnable = device->renderStates[D3DDDIRS_ALPHATESTENABLE] != 0;
+    raster.AlphaFunc = raster.AlphaTestEnable
+        ? device->renderStates[D3DDDIRS_ALPHAFUNC] : D3DCMP_ALWAYS;
+    raster.FogEnable = device->renderStates[D3DDDIRS_FOGENABLE] != 0;
+    raster.FogTableMode = device->renderStates[D3DDDIRS_FOGTABLEMODE];
+    raster.WFogEnable = device->wFogEnable;
+    raster.UserClipPlanes = transformed ? 0 : device->renderStates[D3DDDIRS_CLIPPLANEENABLE] & 63;
+    raster.FillMode = device->renderStates[D3DDDIRS_FILLMODE];
+    raster.ShadeMode = device->renderStates[D3DDDIRS_SHADEMODE];
+    raster.PrimitiveType = primitive;
+    raster.PointSizeEnable = primitive == D3DPT_POINTLIST || raster.FillMode == D3DFILL_POINT;
+    raster.PointSpriteEnable = device->renderStates[D3DDDIRS_POINTSPRITEENABLE] != 0;
+    raster.HasTLVertices = transformed;
+    for (UINT stage = 0; stage < ShaderConv::MAX_PS_SAMPLER_REGS; ++stage) {
+        const auto *resource = triton9ResourceRoot(device->textures[stage]);
+        raster.PSSamplers[stage].TextureType = resource && resource->isCube
+            ? ShaderConv::TEXTURETYPE_CUBE : resource && resource->isVolume
+            ? ShaderConv::TEXTURETYPE_VOLUME : ShaderConv::TEXTURETYPE_2D;
+        UINT wrapState = stage < 8 ? D3DDDIRS_WRAP0 + stage : D3DDDIRS_WRAP8 + stage - 8;
+        raster.PSSamplers[stage].TexCoordWrap = device->renderStates[wrapState] & 15;
+        raster.PSSamplerSwizzles[stage] = triton9SamplerSwizzle(resource);
+    }
+    for (UINT stage = 0; stage < ShaderConv::MAX_VS_SAMPLER_REGS; ++stage)
+        raster.VSSamplerSwizzles[stage] = triton9SamplerSwizzle(
+            device->textures[TRITON9_VERTEX_SAMPLER_BASE + stage]);
+    return raster;
+}
+
 static HRESULT
 triton9PrepareVertexShader(TRITON9_DEVICE *device, Triton9Shader *shader,
-                           Triton9VertexDeclaration *declaration)
+                           Triton9VertexDeclaration *declaration,
+                           const ShaderConv::RasterStates &raster)
 {
     const UINT64 serial = declaration ? declaration->serial : 0;
     HRESULT hr;
-
     if (!shader || shader->stage != Triton9ShaderStage::Vertex)
         return E_INVALIDARG;
-    if (shader->conversionDeclarationSerial != serial || !shader->vertexShader) {
+    const bool changed = memcmp(&shader->rasterStates, &raster, sizeof(raster));
+    shader->rasterStates = raster;
+    // ConvertTLShader has no raster-dependent instructions. Its clip/point
+    // work is performed by the geometry shader and the viewport extension.
+    if (!shader->transformedFixedFunction && (changed ||
+        shader->conversionDeclarationSerial != serial || !shader->vertexShader)) {
         hr = triton9ConvertShader(device, shader, declaration, nullptr);
         if (FAILED(hr))
             return hr;
     }
-    if (!declaration)
-        return S_OK;
-    return triton9EnsureInputLayout(device, shader, declaration);
+    return declaration ? triton9EnsureInputLayout(device, shader, declaration) : S_OK;
 }
 
 static HRESULT
 triton9PreparePixelShader(TRITON9_DEVICE *device, Triton9Shader *shader,
-                          const Triton9Shader *vertexShader)
+                          const Triton9Shader *vertexShader,
+                          ShaderConv::RasterStates raster)
 {
-    const BOOL alphaTest = device &&
-        device->renderStates[D3DDDIRS_ALPHATESTENABLE] != 0;
-    const UINT alphaFunc = alphaTest
-        ? device->renderStates[D3DDDIRS_ALPHAFUNC] : D3DCMP_ALWAYS;
-    const BOOL fogEnable = device &&
-        device->renderStates[D3DDDIRS_FOGENABLE] != 0;
-    BOOL rasterStateChanged;
-
-    if (!shader || shader->stage != Triton9ShaderStage::Pixel)
+    if (!shader || shader->stage != Triton9ShaderStage::Pixel || !vertexShader)
         return E_INVALIDARG;
-    rasterStateChanged = shader->rasterStates.AlphaTestEnable !=
-                             (UINT)alphaTest ||
-                         shader->rasterStates.AlphaFunc != alphaFunc ||
-                         shader->rasterStates.FogEnable != (UINT)fogEnable ||
-                         shader->rasterStates.FogTableMode != D3DFOG_NONE ||
-                         shader->rasterStates.WFogEnable != 0;
-    shader->rasterStates.AlphaTestEnable = alphaTest;
-    shader->rasterStates.AlphaFunc = alphaFunc;
-    shader->rasterStates.FogEnable = fogEnable;
-    shader->rasterStates.FogTableMode = D3DFOG_NONE;
-    shader->rasterStates.WFogEnable = FALSE;
-    if (!vertexShader)
-        return S_OK;
-    if (rasterStateChanged || shader->linkedVertexShader != vertexShader ||
+    raster.FixedFunctionPixel = shader->internalFixedFunction;
+    const bool changed = memcmp(&shader->rasterStates, &raster, sizeof(raster));
+    shader->rasterStates = raster;
+    if (changed || shader->linkedVertexShader != vertexShader ||
         shader->linkedVertexInstanceSerial != vertexShader->instanceSerial ||
         shader->linkedVertexGeneration != vertexShader->generation ||
         !shader->pixelShader)
@@ -1181,6 +1156,26 @@ triton9UploadPixelExtensionConstants(TRITON9_DEVICE *device)
         memcpy(constants->data, &extension, sizeof(extension));
         constants->dirty = TRUE;
     }
+    ShaderConv::PSCBExtension2 bump = {};
+    const UINT matrixStates[] = {D3DDDITSS_BUMPENVMAT00, D3DDDITSS_BUMPENVMAT01,
+                                 D3DDDITSS_BUMPENVMAT10, D3DDDITSS_BUMPENVMAT11};
+    for (UINT stage = 0; stage < 8; ++stage) {
+        const UINT *values = device->textureStageStates[stage];
+        for (UINT component = 0; component < 4; ++component)
+            memcpy(&bump.vBumpEnvMat[stage][component],
+                   &values[matrixStates[component]], sizeof(FLOAT));
+        memcpy(&bump.vBumpEnvL[stage][0], &values[D3DDDITSS_BUMPENVLSCALE], sizeof(FLOAT));
+        memcpy(&bump.vBumpEnvL[stage][1], &values[D3DDDITSS_BUMPENVLOFFSET], sizeof(FLOAT));
+    }
+    constants = &device->pixelConstants[ShaderConv::CB_PS_EXT2];
+    hr = triton9EnsureConstantData(
+        constants, triton9ConstantBufferSize(FALSE, ShaderConv::CB_PS_EXT2));
+    if (FAILED(hr))
+        return hr;
+    if (memcmp(constants->data, &bump, sizeof(bump))) {
+        memcpy(constants->data, &bump, sizeof(bump));
+        constants->dirty = TRUE;
+    }
     return S_OK;
 }
 
@@ -1193,9 +1188,8 @@ triton9ConstantBufferSize(BOOL vertex, UINT slot)
         return 16u * 4u * sizeof(INT);
     if (slot == 2)
         return 16u * sizeof(BOOL);
-    /* ShaderConverter reserves the remaining slots for state extensions.
-     * Keep zero-filled buffers bound until the corresponding state path is
-     * implemented. This avoids an unbound cbuffer for ordinary shaders. */
+    /* ShaderConverter reserves the remaining slots for viewport, fog, alpha,
+     * bump and color-key extensions. Unused extension bytes remain zero. */
     return 4096;
 }
 
@@ -1252,15 +1246,12 @@ triton9RequiredConstantBytes(const Triton9Shader *shader, BOOL vertex, UINT slot
     if (slot < 3) {
         const UINT components = slot == ShaderConv::CB_BOOL ? 1 : 4;
         for (const ShaderConv::ShaderConst &constant : shader->inlineConstants[slot]) {
-            UINT firstScalar;
-            UINT scalarCount;
-
-            if (!triton9_shader_constant_scalar_range(
-                    constant.RegIndex, components, &firstScalar, &scalarCount) ||
-                firstScalar > UINT_MAX - scalarCount)
+            /* ShaderConverter stores inline offsets in scalar units. */
+            const UINT firstScalar = constant.RegIndex;
+            if (firstScalar > UINT_MAX - components)
                 return UINT_MAX;
             inlineScalarCount = std::max(inlineScalarCount,
-                                         firstScalar + scalarCount);
+                                         firstScalar + components);
         }
     }
     switch (slot) {
@@ -1300,13 +1291,9 @@ triton9ApplyInlineConstants(TRITON9_CONSTANT_BUFFER *buffer,
     for (const ShaderConv::ShaderConst &constant : shader->inlineConstants[slot]) {
         UINT byteOffset;
         UINT byteCount;
-        UINT firstScalar;
-        UINT ignoredScalarCount;
+        const UINT firstScalar = constant.RegIndex;
 
-        if (!triton9_shader_constant_scalar_range(
-                constant.RegIndex, scalarCount, &firstScalar,
-                &ignoredScalarCount) ||
-            firstScalar > UINT_MAX / bytesPerScalar ||
+        if (firstScalar > UINT_MAX / bytesPerScalar ||
             scalarCount > UINT_MAX / bytesPerScalar)
             return D3DDDIERR_INVALIDCALL;
         byteOffset = firstScalar * bytesPerScalar;
@@ -1328,7 +1315,7 @@ triton9BindStageConstants(TRITON9_DEVICE *device, const Triton9Shader *shader,
 {
     TRITON9_CONSTANT_BUFFER *constants;
     ID3D11Buffer *buffers[TRITON9_MAX_CONSTANT_BUFFERS] = {};
-    BYTE inlineData[4096];
+    std::vector<BYTE> inlineData;
     const UINT count = vertex ? 4 : TRITON9_MAX_CONSTANT_BUFFERS;
     HRESULT hr;
 
@@ -1355,8 +1342,31 @@ triton9BindStageConstants(TRITON9_DEVICE *device, const Triton9Shader *shader,
         }
         depthRange = viewport.MaxDepth - viewport.MinDepth;
         if (viewport.Width <= 0.0f || viewport.Height <= 0.0f ||
-            depthRange <= 0.0f)
+            depthRange < 0.0f)
             return D3DDDIERR_INVALIDCALL;
+        memcpy(&extension.vPointSize[0], &device->renderStates[D3DDDIRS_POINTSIZE], sizeof(FLOAT));
+        memcpy(&extension.vPointSize[1], &device->renderStates[D3DDDIRS_POINTSIZE_MIN], sizeof(FLOAT));
+        memcpy(&extension.vPointSize[2], &device->renderStates[D3DDDIRS_POINTSIZE_MAX], sizeof(FLOAT));
+        extension.vPointSize[0] = std::max(extension.vPointSize[0], 1.0f);
+        extension.vPointSize[1] = std::max(extension.vPointSize[1], 1.0f);
+        if (extension.vPointSize[2] <= 0)
+            extension.vPointSize[2] = 64.0f;
+        memcpy(extension.vClipPlanes, device->clipPlanes, sizeof(extension.vClipPlanes));
+        if (shader->internalFixedFunction && shader->rasterStates.UserClipPlanes) {
+            D3DMATRIX viewProjection, inverse;
+            Triton9Fixed::multiply(device->viewTransform, device->projectionTransform,
+                                   viewProjection);
+            if (!Triton9Fixed::inverse(viewProjection, inverse))
+                return D3DDDIERR_INVALIDCALL;
+            for (UINT plane = 0; plane < 6; ++plane) {
+                for (UINT row = 0; row < 4; ++row) {
+                    extension.vClipPlanes[plane][row] = 0;
+                    for (UINT column = 0; column < 4; ++column)
+                        extension.vClipPlanes[plane][row] +=
+                            inverse.m[row][column] * device->clipPlanes[plane][column];
+                }
+            }
+        }
         extension.vViewPortScale[0] = 1.0f / viewport.Width;
         extension.vViewPortScale[1] = -1.0f / viewport.Height;
         extension.vScreenToClipOffset[0] =
@@ -1366,7 +1376,7 @@ triton9BindStageConstants(TRITON9_DEVICE *device, const Triton9Shader *shader,
         extension.vScreenToClipOffset[2] = -viewport.MinDepth;
         extension.vScreenToClipScale[0] = 2.0f / viewport.Width;
         extension.vScreenToClipScale[1] = -2.0f / viewport.Height;
-        extension.vScreenToClipScale[2] = 1.0f / depthRange;
+        extension.vScreenToClipScale[2] = depthRange ? 1.0f / depthRange : 0.0f;
         extension.vScreenToClipScale[3] = 1.0f;
         hr = triton9EnsureConstantData(extensionBuffer,
                                        triton9ConstantBufferSize(TRUE, 3));
@@ -1388,7 +1398,9 @@ triton9BindStageConstants(TRITON9_DEVICE *device, const Triton9Shader *shader,
         const UINT needed = triton9RequiredConstantBytes(shader, vertex, slot);
         if (!needed)
             continue;
-        const UINT capacity = triton9ConstantBufferSize(vertex, slot);
+        const UINT capacity = slot == 0 && vertex && shader->internalFixedFunction
+            ? buffer->byteCount :
+              triton9ConstantBufferSize(vertex, slot);
         if (needed > capacity)
             return D3DDDIERR_INVALIDCALL;
         hr = triton9EnsureConstantBuffer(device, buffer, capacity);
@@ -1398,16 +1410,18 @@ triton9BindStageConstants(TRITON9_DEVICE *device, const Triton9Shader *shader,
             /* DEF/DEFI/DEFB belong to this shader, not to the runtime's
              * saved constant registers. Overlay an upload copy so a later
              * shader can recover the runtime values without another SetConst. */
-            if (capacity > sizeof(inlineData))
-                return E_FAIL;
-            memcpy(inlineData, buffer->data, capacity);
+            try {
+                inlineData.assign(buffer->data, buffer->data + capacity);
+            } catch (...) {
+                return E_OUTOFMEMORY;
+            }
             TRITON9_CONSTANT_BUFFER upload = *buffer;
-            upload.data = inlineData;
+            upload.data = inlineData.data();
             hr = triton9ApplyInlineConstants(&upload, shader, slot);
             if (FAILED(hr))
                 return hr;
             device->hostContext->UpdateSubresource(buffer->hostBuffer, 0,
-                                                    nullptr, inlineData, 0, 0);
+                                                    nullptr, inlineData.data(), 0, 0);
             /* Host bytes now differ from the canonical runtime registers. */
             buffer->dirty = TRUE;
         } else if (buffer->dirty) {
@@ -1419,7 +1433,10 @@ triton9BindStageConstants(TRITON9_DEVICE *device, const Triton9Shader *shader,
         buffers[slot] = buffer->hostBuffer;
     }
     if (vertex)
+    {
         device->hostContext->VSSetConstantBuffers(0, count, buffers);
+        device->hostContext->GSSetConstantBuffers(3, 1, &buffers[3]);
+    }
     else
         device->hostContext->PSSetConstantBuffers(0, count, buffers);
     return S_OK;
@@ -1431,7 +1448,6 @@ triton9SetConstants(TRITON9_DEVICE *device, BOOL vertex, UINT slot,
                     UINT maxRegisters, UINT bytesPerRegister)
 {
     TRITON9_CONSTANT_BUFFER *constants;
-    Triton9Shader *shader;
     UINT byteCount;
     HRESULT hr;
 
@@ -1453,13 +1469,10 @@ triton9SetConstants(TRITON9_DEVICE *device, BOOL vertex, UINT slot,
         memcpy(constants[slot].data + registerIndex * bytesPerRegister,
                data, byteCount);
         constants[slot].dirty = TRUE;
-        shader = static_cast<Triton9Shader *>(vertex ? device->activeVertexShader :
-                                                       device->activePixelShader);
-        /* Creation-time constants are D3D9 state, just like a null shader
-         * binding.  Keep them dirty until a draw acquires the proxy; binding
-         * them here would re-enter the runtime during CreateDeviceEx. */
-        if (shader && device->hostContext)
-            hr = triton9BindStageConstants(device, shader, vertex);
+        /* Draw preparation uploads these canonical runtime registers and
+         * overlays that draw's shader-local DEF values. Deferring the host
+         * binding coalesces consecutive SetConstants calls and also avoids
+         * re-entering the runtime while CreateDeviceEx initializes state. */
     }
     if (SUCCEEDED(hr) && device->hostContext)
         hr = triton9CheckHostDevice(device);
@@ -1467,708 +1480,127 @@ triton9SetConstants(TRITON9_DEVICE *device, BOOL vertex, UINT slot,
     return triton9MapDeviceFailure(device, hr);
 }
 
-static UINT
-triton9FixedInstruction(UINT opcode, UINT parameterCount, UINT control = 0)
-{
-    return opcode | (parameterCount << D3DSI_INSTLENGTH_SHIFT) | control;
-}
-
-static UINT
-triton9FixedRegisterType(D3DSHADER_PARAM_REGISTER_TYPE type)
-{
-    return ((UINT)type << D3DSP_REGTYPE_SHIFT & D3DSP_REGTYPE_MASK) |
-           ((UINT)type << D3DSP_REGTYPE_SHIFT2 & D3DSP_REGTYPE_MASK2);
-}
-
-static UINT
-triton9FixedDestination(D3DSHADER_PARAM_REGISTER_TYPE type, UINT index,
-                        UINT writeMask = D3DSP_WRITEMASK_ALL)
-{
-    return 0x80000000u | triton9FixedRegisterType(type) |
-           (index & D3DSP_REGNUM_MASK) | writeMask;
-}
-
-static UINT
-triton9FixedSource(D3DSHADER_PARAM_REGISTER_TYPE type, UINT index,
-                   UINT swizzle = D3DSP_NOSWIZZLE)
-{
-    return 0x80000000u | triton9FixedRegisterType(type) |
-           (index & D3DSP_REGNUM_MASK) | swizzle;
-}
-
-static UINT
-triton9FixedNegatedSource(D3DSHADER_PARAM_REGISTER_TYPE type, UINT index,
-                          UINT swizzle = D3DSP_NOSWIZZLE)
-{
-    return triton9FixedSource(type, index, swizzle) |
-           D3DSPSM_NEG;
-}
-
-static void
-triton9FixedDcl(std::vector<UINT> *tokens, UINT usage, UINT usageIndex,
-                D3DSHADER_PARAM_REGISTER_TYPE type, UINT registerIndex)
-{
-    tokens->push_back(triton9FixedInstruction(D3DSIO_DCL, 2));
-    tokens->push_back(triton9_sm2_dcl_semantic(usage, usageIndex));
-    tokens->push_back(triton9FixedDestination(type, registerIndex));
-}
-
-static void
-triton9FixedDef(std::vector<UINT> *tokens, UINT registerIndex,
-                UINT x, UINT y, UINT z, UINT w)
-{
-    tokens->push_back(D3DSIO_DEF);
-    tokens->push_back(triton9FixedDestination(D3DSPR_CONST, registerIndex));
-    tokens->push_back(x);
-    tokens->push_back(y);
-    tokens->push_back(z);
-    tokens->push_back(w);
-}
-
-static const ShaderConv::VSInputDecl *
-triton9FixedInput(const Triton9VertexDeclaration *declaration, UINT usage,
-                  UINT usageIndex)
-{
-    return declaration ? declaration->inputDecls.FindInputDecl(usage, usageIndex)
-                       : nullptr;
-}
-
-static bool
-triton9FixedVertexOutput(const Triton9Shader *shader, UINT usage,
-                         UINT usageIndex)
-{
-    return shader && shader->outputDecls.FindOutputDecl(usage, usageIndex);
-}
-
 static UINT64
-triton9FixedVertexStateKey(const TRITON9_DEVICE *device)
+triton9FixedTokenKey(const std::vector<UINT> &tokens)
 {
-    if (!device || !device->renderStates[D3DDDIRS_FOGENABLE])
-        return 0;
-    return UINT64_C(0x100000000) |
-           device->renderStates[D3DDDIRS_FOGVERTEXMODE];
-}
-
-static HRESULT
-triton9BuildFixedVertexTokens(const TRITON9_DEVICE *device,
-                              const Triton9VertexDeclaration *declaration,
-                              std::vector<UINT> *tokens)
-{
-    const ShaderConv::VSInputDecl *position;
-    const ShaderConv::VSInputDecl *diffuse;
-    const ShaderConv::VSInputDecl *specular;
-    const ShaderConv::VSInputDecl *texcoords[TRITON9_FIXED_TEXTURE_STAGES] = {};
-    const D3DDDIVERTEXELEMENT *positionElement;
-    const UINT fogMode = device && device->renderStates[D3DDDIRS_FOGENABLE]
-        ? device->renderStates[D3DDDIRS_FOGVERTEXMODE] : D3DFOG_NONE;
-
-    if (!declaration || !tokens || declaration->hasTransformedPosition)
-        return E_INVALIDARG;
-    position = triton9FixedInput(declaration, D3DDECLUSAGE_POSITION, 0);
-    positionElement = triton9FindDeclarationElement(declaration,
-                                                    D3DDECLUSAGE_POSITION, 0);
-    if (!position || !positionElement ||
-        (positionElement->Type != D3DDECLTYPE_FLOAT3 &&
-         positionElement->Type != D3DDECLTYPE_FLOAT4))
-        return D3DDDIERR_NOTAVAILABLE;
-    for (const D3DDDIVERTEXELEMENT &element : declaration->elements) {
-        if (element.Usage == D3DDECLUSAGE_POSITION && element.UsageIndex == 0)
-            continue;
-        if (element.Usage == D3DDECLUSAGE_COLOR && element.UsageIndex <= 1)
-            continue;
-        if (element.Usage == D3DDECLUSAGE_TEXCOORD &&
-            element.UsageIndex < TRITON9_FIXED_TEXTURE_STAGES)
-            continue;
-        return D3DDDIERR_NOTAVAILABLE;
-    }
-
-    diffuse = triton9FixedInput(declaration, D3DDECLUSAGE_COLOR, 0);
-    specular = triton9FixedInput(declaration, D3DDECLUSAGE_COLOR, 1);
-    for (UINT stage = 0; stage < TRITON9_FIXED_TEXTURE_STAGES; ++stage)
-        texcoords[stage] = triton9FixedInput(declaration, D3DDECLUSAGE_TEXCOORD, stage);
-    try {
-        tokens->clear();
-        tokens->push_back(D3DVS_VERSION(2, 0));
-        triton9FixedDcl(tokens, D3DDECLUSAGE_POSITION, 0, D3DSPR_INPUT,
-                        position->RegIndex);
-        if (diffuse)
-            triton9FixedDcl(tokens, D3DDECLUSAGE_COLOR, 0, D3DSPR_INPUT,
-                            diffuse->RegIndex);
-        if (specular)
-            triton9FixedDcl(tokens, D3DDECLUSAGE_COLOR, 1, D3DSPR_INPUT,
-                            specular->RegIndex);
-        for (UINT stage = 0; stage < TRITON9_FIXED_TEXTURE_STAGES; ++stage) {
-            if (texcoords[stage])
-                triton9FixedDcl(tokens, D3DDECLUSAGE_TEXCOORD, stage,
-                                D3DSPR_INPUT, texcoords[stage]->RegIndex);
-        }
-        tokens->push_back(triton9FixedInstruction(D3DSIO_M4x4, 3));
-        tokens->push_back(triton9FixedDestination(D3DSPR_RASTOUT,
-                                                   D3DSRO_POSITION));
-        tokens->push_back(triton9FixedSource(D3DSPR_INPUT, position->RegIndex));
-        tokens->push_back(triton9FixedSource(D3DSPR_CONST, 0));
-        if (fogMode != D3DFOG_NONE) {
-            const UINT replicateX = D3DVS_X_X | D3DVS_Y_X |
-                                    D3DVS_Z_X | D3DVS_W_X;
-            const UINT replicateY = D3DVS_X_Y | D3DVS_Y_Y |
-                                    D3DVS_Z_Y | D3DVS_W_Y;
-            const UINT replicateZ = D3DVS_X_Z | D3DVS_Y_Z |
-                                    D3DVS_Z_Z | D3DVS_W_Z;
-
-            tokens->push_back(triton9FixedInstruction(D3DSIO_M4x4, 3));
-            tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0));
-            tokens->push_back(triton9FixedSource(D3DSPR_INPUT,
-                                                  position->RegIndex));
-            tokens->push_back(triton9FixedSource(D3DSPR_CONST, 4));
-            tokens->push_back(triton9FixedInstruction(D3DSIO_ABS, 2));
-            tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0,
-                                                       D3DSP_WRITEMASK_0));
-            tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0, replicateZ));
-            if (fogMode == D3DFOG_LINEAR) {
-                tokens->push_back(triton9FixedInstruction(D3DSIO_ADD, 3));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0,
-                                                           D3DSP_WRITEMASK_0));
-                tokens->push_back(triton9FixedSource(D3DSPR_CONST, 8,
-                                                      replicateY));
-                tokens->push_back(triton9FixedNegatedSource(D3DSPR_TEMP, 0,
-                                                             replicateX));
-                tokens->push_back(triton9FixedInstruction(D3DSIO_MUL, 3));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0,
-                                                           D3DSP_WRITEMASK_0));
-                tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0,
-                                                      replicateX));
-                tokens->push_back(triton9FixedSource(D3DSPR_CONST, 8,
-                                                      replicateZ));
-            } else if (fogMode == D3DFOG_EXP2) {
-                tokens->push_back(triton9FixedInstruction(D3DSIO_MUL, 3));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0,
-                                                           D3DSP_WRITEMASK_0));
-                tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0,
-                                                      replicateX));
-                tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0,
-                                                      replicateX));
-                tokens->push_back(triton9FixedInstruction(D3DSIO_MUL, 3));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0,
-                                                           D3DSP_WRITEMASK_0));
-                tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0,
-                                                      replicateX));
-                tokens->push_back(triton9FixedSource(D3DSPR_CONST, 8,
-                                                      replicateX));
-            } else if (fogMode == D3DFOG_EXP) {
-                tokens->push_back(triton9FixedInstruction(D3DSIO_MUL, 3));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0,
-                                                           D3DSP_WRITEMASK_0));
-                tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0,
-                                                      replicateX));
-                tokens->push_back(triton9FixedSource(D3DSPR_CONST, 8,
-                                                      replicateX));
-            } else {
-                return D3DDDIERR_NOTAVAILABLE;
-            }
-            if (fogMode == D3DFOG_EXP || fogMode == D3DFOG_EXP2) {
-                tokens->push_back(triton9FixedInstruction(D3DSIO_EXPP, 2));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0,
-                                                           D3DSP_WRITEMASK_0));
-                tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0,
-                                                      replicateX));
-            }
-            tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-            tokens->push_back(triton9FixedDestination(D3DSPR_RASTOUT,
-                                                       D3DSRO_FOG,
-                                                       D3DSP_WRITEMASK_0) |
-                              D3DSPDM_SATURATE);
-            tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0,
-                                                  replicateX));
-        }
-        if (diffuse) {
-            tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-            tokens->push_back(triton9FixedDestination(D3DSPR_ATTROUT, 0));
-            tokens->push_back(triton9FixedSource(D3DSPR_INPUT, diffuse->RegIndex));
-        }
-        if (specular) {
-            tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-            tokens->push_back(triton9FixedDestination(D3DSPR_ATTROUT, 1));
-            tokens->push_back(triton9FixedSource(D3DSPR_INPUT, specular->RegIndex));
-        }
-        for (UINT stage = 0; stage < TRITON9_FIXED_TEXTURE_STAGES; ++stage) {
-            if (!texcoords[stage])
-                continue;
-            tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-            tokens->push_back(triton9FixedDestination(D3DSPR_TEXCRDOUT, stage));
-            tokens->push_back(triton9FixedSource(D3DSPR_INPUT, texcoords[stage]->RegIndex));
-        }
-        tokens->push_back(D3DVS_END());
-    } catch (...) {
-        return E_OUTOFMEMORY;
-    }
-    return S_OK;
-}
-
-enum class Triton9FixedSource {
-    Current,
-    Diffuse,
-    Specular,
-    Texture,
-    TextureFactor,
-    White,
-    Zero,
-};
-
-static HRESULT
-triton9FixedSourceFromArgument(UINT argument, BOOL hasDiffuse, BOOL hasSpecular,
-                               BOOL hasTexture, UINT stage,
-                               Triton9FixedSource *source)
-{
-    if (!source || stage >= TRITON9_FIXED_TEXTURE_STAGES || (argument & ~D3DTA_SELECTMASK))
-        return D3DDDIERR_NOTAVAILABLE;
-    switch (argument & D3DTA_SELECTMASK) {
-    case D3DTA_DIFFUSE:
-        *source = hasDiffuse ? Triton9FixedSource::Diffuse
-                             : Triton9FixedSource::White;
-        return S_OK;
-    case D3DTA_SPECULAR:
-        /* FVF COLOR1 is the D3D9 fixed-function specular input.  It is
-         * explicitly exercised by Vista MIL's Level-1 device test; an
-         * absent COLOR1 has the documented black default rather than being
-         * silently treated as diffuse. */
-        *source = hasSpecular ? Triton9FixedSource::Specular
-                              : Triton9FixedSource::Zero;
-        return S_OK;
-    case D3DTA_CURRENT:
-        *source = Triton9FixedSource::Current;
-        return S_OK;
-    case D3DTA_TEXTURE:
-        *source = !hasTexture ? Triton9FixedSource::Zero
-                              : Triton9FixedSource::Texture;
-        return S_OK;
-    case D3DTA_TFACTOR:
-        *source = Triton9FixedSource::TextureFactor;
-        return S_OK;
-    default:
-        return D3DDDIERR_NOTAVAILABLE;
-    }
-}
-
-static bool
-triton9FixedUsesTexture(UINT argument)
-{
-    return !(argument & ~D3DTA_SELECTMASK) &&
-           (argument & D3DTA_SELECTMASK) == D3DTA_TEXTURE;
-}
-
-static bool
-triton9FixedOperationUsesArgument(UINT operation, UINT argumentIndex)
-{
-    if (operation == D3DTOP_MODULATE)
-        return true;
-    if (operation == D3DTOP_SELECTARG1)
-        return argumentIndex == 0;
-    if (operation == D3DTOP_SELECTARG2)
-        return argumentIndex == 1;
-    return false;
-}
-
-static UINT
-triton9FixedSourceToken(Triton9FixedSource source)
-{
-    switch (source) {
-    case Triton9FixedSource::Current:
-        return triton9FixedSource(D3DSPR_TEMP, 0);
-    case Triton9FixedSource::Diffuse:
-        return triton9FixedSource(D3DSPR_INPUT, 0);
-    case Triton9FixedSource::Specular:
-        return triton9FixedSource(D3DSPR_INPUT, 1);
-    case Triton9FixedSource::Texture:
-        return triton9FixedSource(D3DSPR_TEMP, 1);
-    case Triton9FixedSource::TextureFactor:
-        return triton9FixedSource(D3DSPR_CONST, 0);
-    case Triton9FixedSource::White:
-        return triton9FixedSource(D3DSPR_CONST, 2);
-    case Triton9FixedSource::Zero:
-        return triton9FixedSource(D3DSPR_CONST, 4);
-    }
-    return 0;
-}
-
-static HRESULT
-triton9FixedOperation(UINT value)
-{
-    return value == D3DTOP_SELECTARG1 || value == D3DTOP_SELECTARG2 ||
-           value == D3DTOP_MODULATE || value == D3DTOP_DISABLE
-               ? S_OK : D3DDDIERR_NOTAVAILABLE;
-}
-
-static void
-triton9FixedEmitOperation(std::vector<UINT> *tokens, UINT operation,
-                          UINT writeMask, Triton9FixedSource argument1,
-                          Triton9FixedSource argument2)
-{
-    const UINT source1 = triton9FixedSourceToken(argument1);
-    const UINT source2 = triton9FixedSourceToken(argument2);
-
-    if (operation == D3DTOP_SELECTARG2)
-        tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-    else if (operation == D3DTOP_MODULATE)
-        tokens->push_back(triton9FixedInstruction(D3DSIO_MUL, 3));
-    else
-        tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-    tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0, writeMask));
-    tokens->push_back(operation == D3DTOP_SELECTARG2 ? source2 : source1);
-    if (operation == D3DTOP_MODULATE)
-        tokens->push_back(source2);
-}
-
-static UINT64
-triton9FixedHash(UINT64 hash, UINT value)
-{
-    return (hash ^ value) * UINT64_C(1099511628211);
-}
-
-static HRESULT
-triton9FixedAlphaComparison(UINT comparison, UINT *result)
-{
-    if (!result)
-        return E_INVALIDARG;
-    switch (comparison) {
-    case D3DCMP_NEVER:        *result = D3DSPC_RESERVED0; return S_OK;
-    case D3DCMP_LESS:         *result = D3DSPC_LT; return S_OK;
-    case D3DCMP_EQUAL:        *result = D3DSPC_EQ; return S_OK;
-    case D3DCMP_LESSEQUAL:    *result = D3DSPC_LE; return S_OK;
-    case D3DCMP_GREATER:      *result = D3DSPC_GT; return S_OK;
-    case D3DCMP_NOTEQUAL:     *result = D3DSPC_NE; return S_OK;
-    case D3DCMP_GREATEREQUAL: *result = D3DSPC_GE; return S_OK;
-    case D3DCMP_ALWAYS:       *result = D3DSPC_RESERVED1; return S_OK;
-    default: return D3DDDIERR_NOTAVAILABLE;
-    }
-}
-
-static HRESULT
-triton9BuildFixedPixelTokens(TRITON9_DEVICE *device,
-                             const Triton9Shader *vertexShader,
-                             std::vector<UINT> *tokens, UINT64 *stateKey)
-{
-    const BOOL hasDiffuse = triton9FixedVertexOutput(vertexShader,
-                                                      D3DDECLUSAGE_COLOR, 0);
-    const BOOL hasSpecular = triton9FixedVertexOutput(vertexShader,
-                                                       D3DDECLUSAGE_COLOR, 1);
-    const BOOL hasFog = triton9FixedVertexOutput(vertexShader,
-                                                  D3DDECLUSAGE_FOG, 0);
-    BOOL usesTexture[TRITON9_FIXED_TEXTURE_STAGES] = {};
-    BOOL activeStage[TRITON9_FIXED_TEXTURE_STAGES] = {};
-    const BOOL fogFromVertexMode = device && hasFog &&
-        device->renderStates[D3DDDIRS_FOGVERTEXMODE] != D3DFOG_NONE;
-    const BOOL fogFromTransformedSpecular = hasSpecular &&
-        vertexShader && vertexShader->transformedFixedFunction;
-    const BOOL fogEnabled = device &&
-        device->renderStates[D3DDDIRS_FOGENABLE] &&
-        (fogFromVertexMode || fogFromTransformedSpecular);
     UINT64 key = UINT64_C(1469598103934665603);
-    UINT alphaComparison = D3DSPC_RESERVED1;
-
-    if (!device || !vertexShader || !tokens || !stateKey)
-        return E_INVALIDARG;
-    key = triton9FixedHash(key, hasDiffuse);
-    key = triton9FixedHash(key, hasSpecular);
-    key = triton9FixedHash(key, device->renderStates[D3DDDIRS_ALPHATESTENABLE]);
-    key = triton9FixedHash(key, device->renderStates[D3DDDIRS_ALPHAFUNC]);
-    key = triton9FixedHash(key, fogEnabled);
-    for (UINT stage = 0; stage < TRITON9_FIXED_TEXTURE_STAGES; ++stage) {
-        const UINT *states = device->textureStageStates[stage];
-        const UINT colorOperation = states[D3DDDITSS_COLOROP];
-        const UINT alphaOperation = states[D3DDDITSS_ALPHAOP];
-        const BOOL hasTexture = device->textures[stage] != nullptr;
-        BOOL colorUsesTexture = FALSE;
-        BOOL alphaUsesTexture = FALSE;
-        HRESULT hr = triton9FixedOperation(colorOperation);
-
-        if (FAILED(hr))
-            return hr;
-        key = triton9FixedHash(key, colorOperation);
-        key = triton9FixedHash(key, hasTexture);
-        if (colorOperation == D3DTOP_DISABLE)
-            break;
-        if (FAILED(triton9FixedOperation(alphaOperation)))
-            return D3DDDIERR_NOTAVAILABLE;
-        key = triton9FixedHash(key, alphaOperation);
-        const UINT argumentStates[] = {
-            D3DDDITSS_COLORARG1, D3DDDITSS_COLORARG2,
-            D3DDDITSS_ALPHAARG1, D3DDDITSS_ALPHAARG2,
-        };
-        for (UINT argumentIndex = 0; argumentIndex < 4; ++argumentIndex) {
-            const UINT state = argumentStates[argumentIndex];
-            const UINT operation = argumentIndex < 2 ? colorOperation
-                                                     : alphaOperation;
-            key = triton9FixedHash(key, states[state]);
-            if (operation != D3DTOP_DISABLE &&
-                triton9FixedOperationUsesArgument(operation, argumentIndex & 1u) &&
-                triton9FixedUsesTexture(states[state])) {
-                if (argumentIndex < 2)
-                    colorUsesTexture = TRUE;
-                else
-                    alphaUsesTexture = TRUE;
-            }
-        }
-        /* Native D3D9 disables this stage and every later stage when an
-         * active color argument needs an unbound texture. An alpha-only
-         * reference to an unbound texture reads zero. */
-        if (colorUsesTexture && !hasTexture)
-            break;
-        activeStage[stage] = TRUE;
-        usesTexture[stage] = hasTexture &&
-                             (colorUsesTexture || alphaUsesTexture);
-        if (usesTexture[stage] &&
-            !triton9FixedVertexOutput(vertexShader, D3DDECLUSAGE_TEXCOORD,
-                                      stage))
-            return D3DDDIERR_NOTAVAILABLE;
+    for (UINT token : tokens) {
+        key ^= token;
+        key *= UINT64_C(1099511628211);
     }
-    if (device->renderStates[D3DDDIRS_ALPHATESTENABLE]) {
-        HRESULT hr = triton9FixedAlphaComparison(
-            device->renderStates[D3DDDIRS_ALPHAFUNC], &alphaComparison);
-        if (FAILED(hr))
-            return hr;
-    }
-
-    try {
-        Triton9FixedSource colorArguments[2] = {
-            Triton9FixedSource::White, Triton9FixedSource::White,
-        };
-        Triton9FixedSource alphaArguments[2] = {
-            Triton9FixedSource::White, Triton9FixedSource::White,
-        };
-
-        tokens->clear();
-        tokens->push_back(D3DPS_VERSION(3, 0));
-        if (hasDiffuse)
-            triton9FixedDcl(tokens, D3DDECLUSAGE_COLOR, 0, D3DSPR_INPUT, 0);
-        if (hasSpecular)
-            triton9FixedDcl(tokens, D3DDECLUSAGE_COLOR, 1, D3DSPR_INPUT, 1);
-        for (UINT stage = 0; stage < TRITON9_FIXED_TEXTURE_STAGES; ++stage) {
-            if (!usesTexture[stage])
-                continue;
-            triton9FixedDcl(tokens, D3DDECLUSAGE_TEXCOORD, stage,
-                            D3DSPR_INPUT, stage + 2);
-            triton9FixedDcl(tokens, D3DSTT_2D, 0, D3DSPR_SAMPLER, stage);
-        }
-        if (fogFromVertexMode)
-            triton9FixedDcl(tokens, D3DDECLUSAGE_FOG, 0, D3DSPR_INPUT, TRITON9_FIXED_TEXTURE_STAGES + 2);
-        triton9FixedDef(tokens, 2, 0x3f800000u, 0x3f800000u,
-                        0x3f800000u, 0x3f800000u);
-        triton9FixedDef(tokens, 3, 0xbf800000u, 0xbf800000u,
-                        0xbf800000u, 0xbf800000u);
-        triton9FixedDef(tokens, 4, 0, 0, 0, 0);
-        tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-        tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 0));
-        tokens->push_back(triton9FixedSourceToken(hasDiffuse
-            ? Triton9FixedSource::Diffuse : Triton9FixedSource::White));
-        for (UINT stage = 0; stage < TRITON9_FIXED_TEXTURE_STAGES; ++stage) {
-            const UINT *states = device->textureStageStates[stage];
-            const UINT colorOperation = states[D3DDDITSS_COLOROP];
-            const UINT alphaOperation = states[D3DDDITSS_ALPHAOP];
-            const BOOL hasTexture = device->textures[stage] != nullptr;
-            HRESULT hr;
-
-            if (!activeStage[stage] || colorOperation == D3DTOP_DISABLE)
-                break;
-            hr = S_OK;
-            if (triton9FixedOperationUsesArgument(colorOperation, 0))
-                hr = triton9FixedSourceFromArgument(states[D3DDDITSS_COLORARG1],
-                                                    hasDiffuse, hasSpecular,
-                                                    hasTexture, stage,
-                                                    &colorArguments[0]);
-            if (SUCCEEDED(hr) &&
-                triton9FixedOperationUsesArgument(colorOperation, 1))
-                hr = triton9FixedSourceFromArgument(states[D3DDDITSS_COLORARG2],
-                                                    hasDiffuse, hasSpecular,
-                                                    hasTexture, stage,
-                                                    &colorArguments[1]);
-            if (SUCCEEDED(hr) && alphaOperation != D3DTOP_DISABLE &&
-                triton9FixedOperationUsesArgument(alphaOperation, 0))
-                hr = triton9FixedSourceFromArgument(states[D3DDDITSS_ALPHAARG1],
-                                                    hasDiffuse, hasSpecular,
-                                                    hasTexture, stage,
-                                                    &alphaArguments[0]);
-            if (SUCCEEDED(hr) && alphaOperation != D3DTOP_DISABLE &&
-                triton9FixedOperationUsesArgument(alphaOperation, 1))
-                hr = triton9FixedSourceFromArgument(states[D3DDDITSS_ALPHAARG2],
-                                                    hasDiffuse, hasSpecular,
-                                                    hasTexture, stage,
-                                                    &alphaArguments[1]);
-            if (FAILED(hr))
-                return hr;
-            if (usesTexture[stage]) {
-                tokens->push_back(triton9FixedInstruction(D3DSIO_TEX, 3));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 1));
-                tokens->push_back(triton9FixedSource(D3DSPR_INPUT, stage + 2));
-                tokens->push_back(triton9FixedSource(D3DSPR_SAMPLER, stage));
-            }
-            triton9FixedEmitOperation(tokens, colorOperation,
-                                      D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 |
-                                      D3DSP_WRITEMASK_2, colorArguments[0],
-                                      colorArguments[1]);
-            if (alphaOperation != D3DTOP_DISABLE)
-                triton9FixedEmitOperation(tokens, alphaOperation,
-                                          D3DSP_WRITEMASK_3, alphaArguments[0],
-                                          alphaArguments[1]);
-        }
-        if (fogEnabled) {
-            const UINT replicateX = D3DVS_X_X | D3DVS_Y_X |
-                                    D3DVS_Z_X | D3DVS_W_X;
-
-            tokens->push_back(triton9FixedInstruction(D3DSIO_ADD, 3));
-            tokens->push_back(triton9FixedDestination(
-                D3DSPR_TEMP, 3, D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 |
-                                     D3DSP_WRITEMASK_2));
-            tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0));
-            tokens->push_back(triton9FixedNegatedSource(D3DSPR_CONST, 5));
-            tokens->push_back(triton9FixedInstruction(D3DSIO_MAD, 4));
-            tokens->push_back(triton9FixedDestination(
-                D3DSPR_TEMP, 0, D3DSP_WRITEMASK_0 | D3DSP_WRITEMASK_1 |
-                                     D3DSP_WRITEMASK_2));
-            tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 3));
-            tokens->push_back(triton9FixedSource(
-                D3DSPR_INPUT, fogFromVertexMode ? TRITON9_FIXED_TEXTURE_STAGES + 2 : 1,
-                fogFromVertexMode ? replicateX
-                                  : (D3DVS_X_W | D3DVS_Y_W |
-                                     D3DVS_Z_W | D3DVS_W_W)));
-            tokens->push_back(triton9FixedSource(D3DSPR_CONST, 5));
-        }
-        if (device->renderStates[D3DDDIRS_ALPHATESTENABLE]) {
-            if (device->renderStates[D3DDDIRS_ALPHAFUNC] == D3DCMP_NEVER) {
-                tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 3));
-                tokens->push_back(triton9FixedSource(D3DSPR_CONST, 3));
-            } else if (device->renderStates[D3DDDIRS_ALPHAFUNC] != D3DCMP_ALWAYS) {
-                const UINT alphaSwizzle = D3DVS_X_W | D3DVS_Y_W | D3DVS_Z_W |
-                                          D3DVS_W_W;
-                tokens->push_back(triton9FixedInstruction(
-                    D3DSIO_IFC, 2,
-                    alphaComparison << D3DSP_OPCODESPECIFICCONTROL_SHIFT));
-                tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0,
-                                                      alphaSwizzle));
-                tokens->push_back(triton9FixedSource(D3DSPR_CONST, 1,
-                                                      alphaSwizzle));
-                tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 3));
-                tokens->push_back(triton9FixedSource(D3DSPR_CONST, 2));
-                tokens->push_back(D3DSIO_ELSE);
-                tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-                tokens->push_back(triton9FixedDestination(D3DSPR_TEMP, 3));
-                tokens->push_back(triton9FixedSource(D3DSPR_CONST, 3));
-                tokens->push_back(D3DSIO_ENDIF);
-            }
-            if (device->renderStates[D3DDDIRS_ALPHAFUNC] != D3DCMP_ALWAYS) {
-                tokens->push_back(triton9FixedInstruction(D3DSIO_TEXKILL, 1));
-                tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 3));
-            }
-        }
-        tokens->push_back(triton9FixedInstruction(D3DSIO_MOV, 2));
-        tokens->push_back(triton9FixedDestination(D3DSPR_COLOROUT, 0));
-        tokens->push_back(triton9FixedSource(D3DSPR_TEMP, 0));
-        tokens->push_back(D3DPS_END());
-    } catch (...) {
-        return E_OUTOFMEMORY;
-    }
-    *stateKey = key;
-    return S_OK;
+    return key;
 }
 
 static void
-triton9FixedMultiplyMatrix(const D3DMATRIX &left, const D3DMATRIX &right,
-                           D3DMATRIX *result)
+triton9FixedSnapshot(const TRITON9_DEVICE *device,
+                     const Triton9VertexDeclaration *declaration,
+                     const Triton9Shader *vertexShader, Triton9Fixed::State &state)
 {
-    D3DMATRIX value = {};
-
-    for (UINT row = 0; row < 4; ++row)
-        for (UINT column = 0; column < 4; ++column)
-            for (UINT index = 0; index < 4; ++index)
-                value.m[row][column] += left.m[row][index] * right.m[index][column];
-    *result = value;
-}
-
-static HRESULT
-triton9UploadFixedVertexConstants(TRITON9_DEVICE *device)
-{
-    D3DMATRIX worldView;
-    D3DMATRIX worldViewProjection;
-    FLOAT constantsData[9][4] = {};
-    TRITON9_CONSTANT_BUFFER *constants;
-    HRESULT hr;
-
-    if (!device)
-        return E_INVALIDARG;
-    triton9FixedMultiplyMatrix(device->worldTransform, device->viewTransform,
-                               &worldView);
-    triton9FixedMultiplyMatrix(worldView, device->projectionTransform,
-                               &worldViewProjection);
-    /* D3D9 matrices use row-vector notation. The legacy m4x4 instruction
-     * computes dot products against c0-c3, so upload the transpose. */
-    for (UINT row = 0; row < 4; ++row) {
-        for (UINT column = 0; column < 4; ++column) {
-            constantsData[row][column] =
-                worldViewProjection.m[column][row];
-            constantsData[row + 4u][column] = worldView.m[column][row];
+    static_assert(sizeof(state.render) >= sizeof(device->renderStates),
+                  "Fixed render-state snapshot must include all DDI states");
+    memcpy(state.render, device->renderStates, sizeof(device->renderStates));
+    memcpy(state.world, device->worldTransforms, sizeof(state.world));
+    state.view = device->viewTransform;
+    state.projection = device->projectionTransform;
+    memcpy(state.texture, device->textureTransforms, sizeof(state.texture));
+    static_assert(sizeof(state.material) == sizeof(device->material),
+                  "D3D9 material layout");
+    memcpy(&state.material, &device->material, sizeof(state.material));
+    state.viewportHeight = device->viewportSet ? device->viewport.Height :
+        device->renderTarget ? FLOAT(device->renderTarget->height) : 1.0f;
+    std::vector<const TRITON9_LIGHT *> lights;
+    for (const auto *light = device->lights; light; light = light->next)
+        if (light->enabled)
+            lights.push_back(light);
+    std::sort(lights.begin(), lights.end(), [](const TRITON9_LIGHT *a,
+                                             const TRITON9_LIGHT *b) {
+        return a->index < b->index;
+    });
+    for (const auto *light : lights) {
+        D3DLIGHT9 value;
+        static_assert(sizeof(value) == sizeof(light->data), "D3D9 light layout");
+        memcpy(&value, &light->data, sizeof(value));
+        state.lights.push_back(value);
+    }
+    if (declaration) {
+        for (UINT i = 0; i < declaration->inputDecls.GetSize(); ++i) {
+            const auto &input = declaration->inputDecls[i];
+            const auto *element = triton9FindDeclarationElement(
+                declaration, input.Usage, input.UsageIndex);
+            UINT components = element && element->Type <= D3DDECLTYPE_FLOAT4
+                ? element->Type - D3DDECLTYPE_FLOAT1 + 1 : 4;
+            if (input.Usage == D3DDECLUSAGE_BLENDINDICES && element)
+                state.normalizedBlendIndices = element->Type == D3DDECLTYPE_D3DCOLOR ||
+                                               element->Type == D3DDECLTYPE_UBYTE4N;
+            state.inputs.push_back({input.Usage, input.UsageIndex,
+                                    input.RegIndex, components});
         }
     }
-    {
-        const DWORD startBits = device->renderStates[D3DDDIRS_FOGSTART];
-        const DWORD endBits = device->renderStates[D3DDDIRS_FOGEND];
-        const DWORD densityBits = device->renderStates[D3DDDIRS_FOGDENSITY];
-        FLOAT start;
-        FLOAT end;
-        FLOAT density;
-        FLOAT distance;
-
-        memcpy(&start, &startBits, sizeof(start));
-        memcpy(&end, &endBits, sizeof(end));
-        memcpy(&density, &densityBits, sizeof(density));
-        distance = end - start;
-        constantsData[8][0] = -density * 1.4426950408889634f;
-        if (device->renderStates[D3DDDIRS_FOGVERTEXMODE] == D3DFOG_EXP2)
-            constantsData[8][0] *= density;
-        constantsData[8][1] = end;
-        constantsData[8][2] = distance != 0.0f ? 1.0f / distance : 0.0f;
+    if (vertexShader) {
+        state.transformed = vertexShader->transformedFixedFunction;
+        state.diffuse = vertexShader->outputDecls.FindOutputDecl(D3DDECLUSAGE_COLOR, 0);
+        state.specular = vertexShader->outputDecls.FindOutputDecl(D3DDECLUSAGE_COLOR, 1);
+        state.texcoords = vertexShader->outputDecls.TexCoords;
     }
-    constants = &device->fixedVertexFloatConstants;
-    hr = triton9EnsureConstantData(constants,
-                                   triton9ConstantBufferSize(TRUE, 0));
-    if (FAILED(hr))
-        return hr;
-    if (memcmp(constants->data, constantsData, sizeof(constantsData))) {
-        memcpy(constants->data, constantsData, sizeof(constantsData));
-        constants->dirty = TRUE;
+    for (UINT i = 0; i < Triton9Fixed::StageCount; ++i) {
+        const UINT *values = device->textureStageStates[i];
+        auto &stage = state.stages[i];
+        stage.colorOp = values[D3DDDITSS_COLOROP];
+        stage.alphaOp = values[D3DDDITSS_ALPHAOP];
+        stage.colorArg[0] = values[D3DDDITSS_COLORARG0];
+        stage.colorArg[1] = values[D3DDDITSS_COLORARG1];
+        stage.colorArg[2] = values[D3DDDITSS_COLORARG2];
+        stage.alphaArg[0] = values[D3DDDITSS_ALPHAARG0];
+        stage.alphaArg[1] = values[D3DDDITSS_ALPHAARG1];
+        stage.alphaArg[2] = values[D3DDDITSS_ALPHAARG2];
+        stage.result = values[D3DDDITSS_RESULTARG];
+        stage.texcoord = values[D3DDDITSS_TEXCOORDINDEX];
+        stage.transform = values[D3DDDITSS_TEXTURETRANSFORMFLAGS];
+        if (vertexShader) {
+            // FFP VS already applied TEXCOORDINDEX; a programmable VS always
+            // supplies TEXCOORD[stage]. POSITIONT bypasses texture transforms.
+            if (!vertexShader->transformedFixedFunction)
+                stage.texcoord = i;
+            else
+                stage.transform = D3DTTFF_DISABLE;
+        }
+        stage.constant = values[D3DDDITSS_CONSTANT];
+        stage.bound = device->textures[i] != nullptr;
+        const auto *texture = triton9ResourceRoot(device->textures[i]);
+        stage.textureType = texture && texture->isCube ? D3DSTT_CUBE :
+            texture && texture->isVolume ? D3DSTT_VOLUME : D3DSTT_2D;
+        const UINT bumpStates[] = {D3DDDITSS_BUMPENVMAT00, D3DDDITSS_BUMPENVMAT01,
+            D3DDDITSS_BUMPENVMAT10, D3DDDITSS_BUMPENVMAT11};
+        for (UINT j = 0; j < 4; ++j)
+            memcpy(&stage.bump[j], &values[bumpStates[j]], sizeof(FLOAT));
+        memcpy(&stage.bumpScale, &values[D3DDDITSS_BUMPENVLSCALE], sizeof(FLOAT));
+        memcpy(&stage.bumpOffset, &values[D3DDDITSS_BUMPENVLOFFSET], sizeof(FLOAT));
     }
-    return S_OK;
 }
 
 static HRESULT
-triton9UploadFixedPixelConstants(TRITON9_DEVICE *device)
+triton9UploadFixedProgram(TRITON9_DEVICE *device, BOOL vertex,
+                          const Triton9Fixed::Program &program)
 {
-    FLOAT constantsData[24] = {};
-    TRITON9_CONSTANT_BUFFER *constants;
-    UINT color;
-    HRESULT hr;
-
-    if (!device)
-        return E_INVALIDARG;
-    color = device->renderStates[D3DDDIRS_TEXTUREFACTOR];
-    constantsData[0] = (FLOAT)((color >> 16) & 0xffu) / 255.0f;
-    constantsData[1] = (FLOAT)((color >> 8) & 0xffu) / 255.0f;
-    constantsData[2] = (FLOAT)(color & 0xffu) / 255.0f;
-    constantsData[3] = (FLOAT)((color >> 24) & 0xffu) / 255.0f;
-    constantsData[4] = constantsData[5] = constantsData[6] = constantsData[7] =
-        (FLOAT)(device->renderStates[D3DDDIRS_ALPHAREF] & 0xffu) / 255.0f;
-    color = device->renderStates[D3DDDIRS_FOGCOLOR];
-    constantsData[20] = (FLOAT)((color >> 16) & 0xffu) / 255.0f;
-    constantsData[21] = (FLOAT)((color >> 8) & 0xffu) / 255.0f;
-    constantsData[22] = (FLOAT)(color & 0xffu) / 255.0f;
-    constants = &device->fixedPixelFloatConstants;
-    hr = triton9EnsureConstantData(constants,
-                                   triton9ConstantBufferSize(FALSE, 0));
+    auto *buffer = vertex ? &device->fixedVertexFloatConstants :
+                           &device->fixedPixelFloatConstants;
+    const UINT size = vertex ? (UINT)program.constants.size() * 16 :
+                              triton9ConstantBufferSize(FALSE, 0);
+    if (buffer->byteCount && buffer->byteCount != size) {
+        if (buffer->hostBuffer)
+            buffer->hostBuffer->Release();
+        HeapFree(GetProcessHeap(), 0, buffer->data);
+        *buffer = {};
+    }
+    HRESULT hr = triton9EnsureConstantData(buffer, size);
     if (FAILED(hr))
         return hr;
-    if (memcmp(constants->data, constantsData, sizeof(constantsData))) {
-        memcpy(constants->data, constantsData, sizeof(constantsData));
-        constants->dirty = TRUE;
+    const size_t bytes = program.constants.size() * sizeof(Triton9Fixed::Constant);
+    if (bytes > size)
+        return E_INVALIDARG;
+    if (memcmp(buffer->data, program.constants.data(), bytes)) {
+        memcpy(buffer->data, program.constants.data(), bytes);
+        buffer->dirty = TRUE;
     }
     return S_OK;
 }
@@ -2191,41 +1623,81 @@ triton9FixedShaders(TRITON9_DEVICE *device)
 }
 
 static HRESULT
+triton9RememberFixedState(Triton9Fixed::State **snapshot,
+                          Triton9Fixed::State &&state)
+{
+    try {
+        if (!*snapshot)
+            *snapshot = new Triton9Fixed::State;
+        **snapshot = std::move(state);
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
+    return S_OK;
+}
+
+static HRESULT
 triton9EnsureFixedVertexShader(TRITON9_DEVICE *device,
                                Triton9VertexDeclaration *declaration,
                                Triton9Shader **outShader)
 {
     Triton9FixedFunctionShaders *shaders;
     Triton9Shader *shader;
-    std::vector<UINT> tokens;
-    const UINT64 stateKey = triton9FixedVertexStateKey(device);
+    Triton9Fixed::State state;
+    Triton9Fixed::Program program;
+    UINT64 stateKey;
     HRESULT hr;
 
     if (!device || !declaration || !outShader)
         return E_INVALIDARG;
     if (declaration->hasTransformedPosition)
         return triton9EnsureTransformedVertexShader(device, declaration, outShader);
-    if (device->renderStates[D3DDDIRS_LIGHTING])
-        return D3DDDIERR_NOTAVAILABLE;
+    try {
+        triton9FixedSnapshot(device, declaration, nullptr, state);
+        shaders = triton9FixedShaders(device);
+        if (!shaders)
+            return E_OUTOFMEMORY;
+        if (shaders->vertexShader && shaders->vertexSnapshot &&
+            shaders->vertexDeclaration == declaration &&
+            shaders->vertexDeclarationSerial == declaration->serial &&
+            Triton9Fixed::equal(*shaders->vertexSnapshot, state)) {
+            hr = triton9EnsureInputLayout(device, shaders->vertexShader, declaration);
+            if (SUCCEEDED(hr))
+                *outShader = shaders->vertexShader;
+            return hr;
+        }
+        hr = Triton9Fixed::vertex(state, program);
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
+    if (FAILED(hr))
+        return hr;
+    delete shaders->vertexSnapshot;
+    shaders->vertexSnapshot = nullptr;
+    hr = triton9UploadFixedProgram(device, TRUE, program);
+    if (FAILED(hr))
+        return hr;
+    stateKey = triton9FixedTokenKey(program.tokens);
     shaders = triton9FixedShaders(device);
     if (!shaders)
         return E_OUTOFMEMORY;
     if (shaders->vertexShader && shaders->vertexDeclaration == declaration &&
         shaders->vertexDeclarationSerial == declaration->serial &&
-        shaders->vertexStateKey == stateKey) {
+        shaders->vertexStateKey == stateKey &&
+        shaders->vertexShader->legacyTokens == program.tokens) {
         hr = triton9EnsureInputLayout(device, shaders->vertexShader, declaration);
         if (SUCCEEDED(hr))
             *outShader = shaders->vertexShader;
+        if (SUCCEEDED(hr))
+            hr = triton9RememberFixedState(&shaders->vertexSnapshot, std::move(state));
         return hr;
     }
-    hr = triton9BuildFixedVertexTokens(device, declaration, &tokens);
-    if (FAILED(hr))
-        return hr;
     shader = new (std::nothrow) Triton9Shader(Triton9ShaderStage::Vertex);
     if (!shader)
         return E_OUTOFMEMORY;
     try {
-        shader->legacyTokens = std::move(tokens);
+        shader->legacyTokens = std::move(program.tokens);
+        shader->internalFixedFunction = TRUE;
     } catch (...) {
         delete shader;
         return E_OUTOFMEMORY;
@@ -2243,7 +1715,7 @@ triton9EnsureFixedVertexShader(TRITON9_DEVICE *device,
     shaders->vertexDeclarationSerial = declaration->serial;
     shaders->vertexStateKey = stateKey;
     *outShader = shader;
-    return S_OK;
+    return triton9RememberFixedState(&shaders->vertexSnapshot, std::move(state));
 }
 
 static HRESULT
@@ -2253,30 +1725,55 @@ triton9EnsureFixedPixelShader(TRITON9_DEVICE *device,
 {
     Triton9FixedFunctionShaders *shaders;
     Triton9Shader *shader;
-    std::vector<UINT> tokens;
+    Triton9Fixed::State state;
+    Triton9Fixed::Program program;
     UINT64 stateKey;
     HRESULT hr;
 
     if (!device || !vertexShader || !outShader)
         return E_INVALIDARG;
-    hr = triton9BuildFixedPixelTokens(device, vertexShader, &tokens, &stateKey);
+    try {
+        triton9FixedSnapshot(device, nullptr, vertexShader, state);
+        shaders = triton9FixedShaders(device);
+        if (!shaders)
+            return E_OUTOFMEMORY;
+        if (shaders->pixelShader && shaders->pixelSnapshot &&
+            shaders->pixelVertexShader == vertexShader &&
+            shaders->pixelVertexInstanceSerial == vertexShader->instanceSerial &&
+            shaders->pixelVertexGeneration == vertexShader->generation &&
+            Triton9Fixed::equal(*shaders->pixelSnapshot, state)) {
+            *outShader = shaders->pixelShader;
+            return S_OK;
+        }
+        hr = Triton9Fixed::pixel(state, program);
+    } catch (...) {
+        return E_OUTOFMEMORY;
+    }
     if (FAILED(hr))
         return hr;
+    delete shaders->pixelSnapshot;
+    shaders->pixelSnapshot = nullptr;
+    hr = triton9UploadFixedProgram(device, FALSE, program);
+    if (FAILED(hr))
+        return hr;
+    stateKey = triton9FixedTokenKey(program.tokens);
     shaders = triton9FixedShaders(device);
     if (!shaders)
         return E_OUTOFMEMORY;
     if (shaders->pixelShader && shaders->pixelStateKey == stateKey &&
+        shaders->pixelShader->legacyTokens == program.tokens &&
         shaders->pixelVertexShader == vertexShader &&
         shaders->pixelVertexInstanceSerial == vertexShader->instanceSerial &&
         shaders->pixelVertexGeneration == vertexShader->generation) {
         *outShader = shaders->pixelShader;
-        return S_OK;
+        return triton9RememberFixedState(&shaders->pixelSnapshot, std::move(state));
     }
     shader = new (std::nothrow) Triton9Shader(Triton9ShaderStage::Pixel);
     if (!shader)
         return E_OUTOFMEMORY;
     try {
-        shader->legacyTokens = std::move(tokens);
+        shader->legacyTokens = std::move(program.tokens);
+        shader->internalFixedFunction = TRUE;
     } catch (...) {
         delete shader;
         return E_OUTOFMEMORY;
@@ -2293,7 +1790,7 @@ triton9EnsureFixedPixelShader(TRITON9_DEVICE *device,
     shaders->pixelVertexInstanceSerial = vertexShader->instanceSerial;
     shaders->pixelVertexGeneration = vertexShader->generation;
     *outShader = shader;
-    return S_OK;
+    return triton9RememberFixedState(&shaders->pixelSnapshot, std::move(state));
 }
 
 static HRESULT
@@ -2345,15 +1842,21 @@ triton9PrimitiveTopology(D3DPRIMITIVETYPE primitiveType, UINT primitiveCount,
     return S_OK;
 }
 
-/* The caller holds shaderLock. */
+/* Validate every input before refreshing the consumed SYSTEMMEM ranges.
+ * The caller holds shaderLock. */
 static HRESULT
 triton9ValidateStreamRange(TRITON9_DEVICE *device, const Triton9Shader *shader,
                            const Triton9VertexDeclaration *declaration,
                            UINT firstVertex, UINT vertexCount,
                            UINT instanceCount)
 {
+    UINT rangeFirst[TRITON9_MAX_VERTEX_STREAMS];
+    UINT rangeEnd[TRITON9_MAX_VERTEX_STREAMS] = {};
+
     if (!device || !shader || !declaration)
         return E_INVALIDARG;
+    for (UINT stream = 0; stream < TRITON9_MAX_VERTEX_STREAMS; ++stream)
+        rangeFirst[stream] = UINT_MAX;
     for (UINT i = 0; i < shader->inputDecls.GetSize(); ++i) {
         const ShaderConv::VSInputDecl &input = shader->inputDecls[i];
         const D3DDDIVERTEXELEMENT *element = triton9FindDeclarationElement(
@@ -2412,7 +1915,103 @@ triton9ValidateStreamRange(TRITON9_DEVICE *device, const Triton9Shader *shader,
         end = base + lastElement * stride + elementSize;
         if (end > resource->width)
             return D3DDDIERR_INVALIDCALL;
+        /* Include the gaps between elements, but do not scan unused portions
+         * of a large buffer. Coalesce declarations sharing the same stream. */
+        UINT first = (UINT)(base + (UINT64)firstElement * stride);
+        if (first < rangeFirst[element->Stream])
+            rangeFirst[element->Stream] = first;
+        if (end > rangeEnd[element->Stream])
+            rangeEnd[element->Stream] = (UINT)end;
     }
+    for (UINT stream = 0; stream < TRITON9_MAX_VERTEX_STREAMS; ++stream) {
+        if (rangeEnd[stream]) {
+            HRESULT hr = triton9PrepareBufferRangeForHostRead(
+                device, device->streamResources[stream], rangeFirst[stream],
+                rangeEnd[stream]);
+            if (FAILED(hr))
+                return hr;
+        }
+    }
+    return S_OK;
+}
+
+/* Converter geometry expansion is required for point size/sprites, point fill,
+ * and wrapped interpolation. Flat color interpolation is emitted by the PS. */
+static HRESULT
+triton9PrepareGeometryShader(TRITON9_DEVICE *device, Triton9Shader *vertex,
+                             const ShaderConv::RasterStates &raster,
+                             const Triton9Shader **pixelLinkage)
+{
+    bool needed = raster.PrimitiveType == D3DPT_POINTLIST ||
+                  raster.FillMode == D3DFILL_POINT;
+    if (raster.PrimitiveType != D3DPT_POINTLIST)
+        for (UINT i = 0; i < ShaderConv::MAX_PS_SAMPLER_REGS; ++i)
+            needed |= (vertex->outputDecls.TexCoords & (1u << i)) &&
+                      raster.PSSamplers[i].TexCoordWrap;
+    if (!needed) {
+        device->hostContext->GSSetShader(nullptr, nullptr, 0);
+        return S_OK;
+    }
+    auto *cache = triton9FixedShaders(device);
+    if (!cache)
+        return E_OUTOFMEMORY;
+    if (!cache->geometryShader || cache->geometryVertex != vertex ||
+        cache->geometryInstanceSerial != vertex->instanceSerial ||
+        cache->geometryGeneration != vertex->generation ||
+        memcmp(&cache->geometryRaster, &raster, sizeof(raster))) {
+        auto *linkage = new (std::nothrow) Triton9Shader(Triton9ShaderStage::Vertex);
+        if (!linkage)
+            return E_OUTOFMEMORY;
+        ShaderConv::CreateGeometryShaderArgs args(9,
+            ShaderConv::AnythingTimes0Equals0, vertex->outputDecls,
+            &linkage->outputDecls, raster);
+        std::vector<TRITON_DXBC_SIGNATURE> inputSignatures, outputSignatures;
+        HRESULT hr;
+        try {
+            hr = vertex->converter.CreateGeometryShader(args);
+        } catch (...) {
+            hr = E_OUTOFMEMORY;
+        }
+        if (SUCCEEDED(hr))
+            hr = triton9BuildVsOutputSignatures(vertex->outputDecls, &inputSignatures);
+        if (SUCCEEDED(hr))
+            hr = triton9BuildVsOutputSignatures(linkage->outputDecls, &outputSignatures);
+        void *dxbc = nullptr;
+        SIZE_T dxbcSize = 0;
+        if (SUCCEEDED(hr)) {
+            dxbc = tritonBuildDxbc(static_cast<const UINT *>(args.m_GSByteCode.m_pByteCode),
+                args.m_GSByteCode.m_byteCodeSize, inputSignatures.data(),
+                (UINT)inputSignatures.size(), outputSignatures.data(),
+                (UINT)outputSignatures.size(), nullptr, 0,
+                sizeof(TRITON_DXBC_SIGNATURE), &dxbcSize);
+            if (!dxbc)
+                hr = E_OUTOFMEMORY;
+        }
+        ID3D11GeometryShader *geometry = nullptr;
+        if (SUCCEEDED(hr))
+            hr = device->hostDevice->CreateGeometryShader(dxbc, dxbcSize,
+                                                          nullptr, &geometry);
+        if (dxbc)
+            HeapFree(GetProcessHeap(), 0, dxbc);
+        ShaderConv::ShaderConverterAPI::CleanUpConvertedShader(args.m_GSByteCode);
+        if (FAILED(hr)) {
+            delete linkage;
+            return hr;
+        }
+        linkage->generation = 1;
+        linkage->transformedFixedFunction = vertex->transformedFixedFunction;
+        delete cache->geometryLinkage;
+        if (cache->geometryShader)
+            cache->geometryShader->Release();
+        cache->geometryShader = geometry;
+        cache->geometryLinkage = linkage;
+        cache->geometryVertex = vertex;
+        cache->geometryInstanceSerial = vertex->instanceSerial;
+        cache->geometryGeneration = vertex->generation;
+        cache->geometryRaster = raster;
+    }
+    device->hostContext->GSSetShader(cache->geometryShader, nullptr, 0);
+    *pixelLinkage = cache->geometryLinkage;
     return S_OK;
 }
 
@@ -2420,20 +2019,18 @@ triton9ValidateStreamRange(TRITON9_DEVICE *device, const Triton9Shader *shader,
 static HRESULT
 triton9PrepareDrawFailure(UINT stage, HRESULT hr)
 {
-    triton9DiagU32("TRITON9-DRAW-PREP-STAGE", stage);
-    triton9DiagU32("TRITON9-DRAW-PREP-HR", (DWORD)hr);
+    triton9DiagU32("TRITON9-DRAW-PREP-FAIL-STAGE", stage);
+    triton9DiagU32("TRITON9-DRAW-PREP-FAIL-HR", (DWORD)hr);
     return hr;
 }
 
 /* The caller holds shaderLock. */
 static HRESULT
-triton9PrepareDraw(TRITON9_DEVICE *device)
+triton9PrepareDraw(TRITON9_DEVICE *device, UINT primitive)
 {
     Triton9Shader *vertexShader;
     Triton9Shader *pixelShader;
     Triton9VertexDeclaration *declaration;
-    BOOL vertexFallback = FALSE;
-    BOOL pixelFallback = FALSE;
     HRESULT hr;
 
     hr = triton9EnsureHostDevice(device);
@@ -2456,47 +2053,36 @@ triton9PrepareDraw(TRITON9_DEVICE *device)
             device->streamResources[0]->fvfDeclaration);
     if (!declaration)
         return triton9PrepareDrawFailure(4, D3DDDIERR_INVALIDCALL);
-    if (!vertexShader) {
+    /* POSITIONT bypasses all vertex processing, including a shader left bound
+     * by an earlier draw. Keep the application binding intact so switching
+     * back to an ordinary declaration restores it. */
+    if (!vertexShader || declaration->hasTransformedPosition) {
         hr = triton9EnsureFixedVertexShader(device, declaration, &vertexShader);
         if (FAILED(hr))
             return triton9PrepareDrawFailure(5, triton9RejectFixedFunction(
                 hr, "neptune_d3d9: rejected unsupported fixed-function vertex state.\n"));
-        vertexFallback = TRUE;
     }
+    const auto raster = triton9RasterStates(device, primitive,
+                                             declaration->hasTransformedPosition);
+    hr = triton9PrepareVertexShader(device, vertexShader, declaration, raster);
+    if (FAILED(hr))
+        return triton9PrepareDrawFailure(7, hr);
+    const Triton9Shader *pixelLinkage = vertexShader;
+    hr = triton9PrepareGeometryShader(device, vertexShader, raster, &pixelLinkage);
+    if (FAILED(hr))
+        return triton9PrepareDrawFailure(15, hr);
     if (!pixelShader) {
-        hr = triton9EnsureFixedPixelShader(device, vertexShader, &pixelShader);
+        hr = triton9EnsureFixedPixelShader(device, pixelLinkage, &pixelShader);
         if (FAILED(hr))
             return triton9PrepareDrawFailure(6, triton9RejectFixedFunction(
-                hr, "neptune_d3d9: rejected unsupported fixed-function pixel state.\n"));
-        pixelFallback = TRUE;
+                hr, "neptune_d3d9: rejected invalid fixed-function pixel state.\n"));
     }
-    if (!vertexFallback) {
-        hr = triton9PrepareVertexShader(device, vertexShader, declaration);
-        if (FAILED(hr))
-            return triton9PrepareDrawFailure(7, hr);
-    }
-    if (!pixelFallback) {
-        hr = triton9PreparePixelShader(device, pixelShader, vertexShader);
-        if (FAILED(hr))
-            return triton9PrepareDrawFailure(8, hr);
-    }
-    if (vertexFallback && !declaration->hasTransformedPosition) {
-        hr = triton9UploadFixedVertexConstants(device);
-        if (FAILED(hr))
-            return triton9PrepareDrawFailure(9, hr);
-    }
-    if (pixelFallback) {
-        hr = triton9UploadFixedPixelConstants(device);
-        if (FAILED(hr))
-            return triton9PrepareDrawFailure(10, hr);
-    }
-    if (!pixelFallback &&
-        (device->renderStates[D3DDDIRS_ALPHATESTENABLE] ||
-         device->renderStates[D3DDDIRS_FOGENABLE])) {
-        hr = triton9UploadPixelExtensionConstants(device);
-        if (FAILED(hr))
-            return triton9PrepareDrawFailure(11, hr);
-    }
+    hr = triton9PreparePixelShader(device, pixelShader, pixelLinkage, raster);
+    if (FAILED(hr))
+        return triton9PrepareDrawFailure(8, hr);
+    hr = triton9UploadPixelExtensionConstants(device);
+    if (FAILED(hr))
+        return triton9PrepareDrawFailure(11, hr);
     hr = triton9BindStageConstants(device, vertexShader, TRUE);
     if (FAILED(hr))
         return triton9PrepareDrawFailure(12, hr);
@@ -2915,7 +2501,7 @@ triton9CreateVertexShaderFunc(HANDLE hDevice,
     if (!args)
         return E_INVALIDARG;
     triton9DiagU32("TRITON9-CREATE-VS-SIZE", args->Size);
-    if (tokens)
+    if (tokens && args->Size >= sizeof(*tokens))
         triton9DiagU32("TRITON9-CREATE-VS-VERSION", tokens[0]);
     hr = triton9CreateShader(static_cast<TRITON9_DEVICE *>(hDevice),
                              Triton9ShaderStage::Vertex, args->Size, tokens,
@@ -3292,7 +2878,7 @@ triton9SetStreamSource(HANDLE hDevice, const D3DDDIARG_SETSTREAMSOURCE *args)
             return D3DDDIERR_INVALIDCALL;
         if (!args->Stride || args->Offset >= resource->width)
             return D3DDDIERR_INVALIDCALL;
-        hr = triton9PrepareResourceForHostRead(device, resource);
+        hr = triton9EnsureResourceHost(device, resource);
         if (FAILED(hr))
             return hr;
         hr = triton9GetBuffer(resource, D3D11_BIND_VERTEX_BUFFER, &buffer);
@@ -3375,7 +2961,6 @@ triton9SetStreamSourceFreq(HANDLE hDevice,
                            D3DSTREAMSOURCE_INSTANCEDATA;
     UINT frequency;
     UINT flags;
-    UINT value;
 
     if (!device || !args || args->Stream >= TRITON9_MAX_VERTEX_STREAMS ||
         !device->shaderLockInitialized)
@@ -3384,10 +2969,8 @@ triton9SetStreamSourceFreq(HANDLE hDevice,
         return D3DDDIERR_DEVICEREMOVED;
     frequency = args->Divider;
     flags = frequency & flagsMask;
-    value = frequency & kTriton9StreamFrequencyValueMask;
-    if (frequency != 1 &&
-        !((args->Stream == 0 && flags == D3DSTREAMSOURCE_INDEXEDDATA && value) ||
-          (args->Stream != 0 && flags == D3DSTREAMSOURCE_INSTANCEDATA && value)))
+    if (!frequency || flags == flagsMask ||
+        (args->Stream == 0 && (flags & D3DSTREAMSOURCE_INSTANCEDATA)))
         return D3DDDIERR_INVALIDCALL;
 
     EnterCriticalSection(&device->shaderLock);
@@ -3426,7 +3009,7 @@ triton9SetIndices(HANDLE hDevice, const D3DDDIARG_SETINDICES *args)
             (args->Stride == 2 && resource->format != D3DDDIFMT_INDEX16) ||
             (args->Stride == 4 && resource->format != D3DDDIFMT_INDEX32))
             return D3DDDIERR_INVALIDCALL;
-        hr = triton9PrepareResourceForHostRead(device, resource);
+        hr = triton9EnsureResourceHost(device, resource);
         if (FAILED(hr))
             return hr;
         hr = triton9GetBuffer(resource, D3D11_BIND_INDEX_BUFFER, &buffer);
@@ -3562,6 +3145,14 @@ triton9SetPixelShaderConstB(HANDLE hDevice,
                                data, 16, sizeof(BOOL));
 }
 
+static void
+triton9DrawResourcesWritten(TRITON9_DEVICE *device)
+{
+    for (UINT i = 0; i < TRITON9_MAX_RENDER_TARGETS; ++i)
+        triton9ResourceWritten(device->renderTargets[i]);
+    triton9ResourceWritten(device->depthStencil);
+}
+
 extern "C" HRESULT APIENTRY
 triton9DrawPrimitive(HANDLE hDevice, const D3DDDIARG_DRAWPRIMITIVE *args,
                      const UINT *flags)
@@ -3572,7 +3163,7 @@ triton9DrawPrimitive(HANDLE hDevice, const D3DDDIARG_DRAWPRIMITIVE *args,
     D3D11_PRIMITIVE_TOPOLOGY topology;
     UINT vertexCount;
     UINT drawCount;
-    UINT instanceCount;
+    const UINT instanceCount = 1;
     UINT startIndex = 0;
     int expand;
     std::vector<UINT> expandedIndices;
@@ -3614,13 +3205,12 @@ triton9DrawPrimitive(HANDLE hDevice, const D3DDDIARG_DRAWPRIMITIVE *args,
             return D3DDDIERR_INVALIDCALL;
     }
     EnterCriticalSection(&device->shaderLock);
-    hr = triton9PrepareDraw(device);
+    hr = triton9PrepareDraw(device, args->PrimitiveType);
     vertexShader = static_cast<Triton9Shader *>(device->drawVertexShader);
     declaration = static_cast<Triton9VertexDeclaration *>(
         device->drawVertexDeclaration);
-    if (SUCCEEDED(hr))
-        hr = triton9GetInstanceCount(device, vertexShader, declaration,
-                                     &instanceCount);
+    /* INDEXEDDATA repeats indexed draws only.  Instance streams still supply
+     * their first element when DrawPrimitive follows an instanced draw. */
     if (SUCCEEDED(hr))
         hr = triton9BindUpVertexStreams(device, vertexShader, declaration,
                                         args->VStart, vertexCount,
@@ -3635,17 +3225,10 @@ triton9DrawPrimitive(HANDLE hDevice, const D3DDDIARG_DRAWPRIMITIVE *args,
     if (SUCCEEDED(hr)) {
         device->hostContext->IASetPrimitiveTopology(topology);
         if (expand) {
-            if (instanceCount == 1)
-                device->hostContext->DrawIndexed(drawCount, startIndex,
-                                                 args->VStart);
-            else
-                device->hostContext->DrawIndexedInstanced(
-                    drawCount, instanceCount, startIndex, args->VStart, 0);
-        } else if (instanceCount == 1) {
-            device->hostContext->Draw(vertexCount, args->VStart);
+            device->hostContext->DrawIndexed(drawCount, startIndex,
+                                             args->VStart);
         } else {
-            device->hostContext->DrawInstanced(vertexCount, instanceCount,
-                                               args->VStart, 0);
+            device->hostContext->Draw(vertexCount, args->VStart);
         }
     }
     triton9RestoreTemporaryVertexStreams(device);
@@ -3653,6 +3236,8 @@ triton9DrawPrimitive(HANDLE hDevice, const D3DDDIARG_DRAWPRIMITIVE *args,
         triton9RestoreIndexBuffer(device);
     if (SUCCEEDED(hr))
         hr = triton9CheckHostDevice(device);
+    if (SUCCEEDED(hr))
+        triton9DrawResourcesWritten(device);
     if (FAILED(hr))
         triton9DiagU32("TRITON9-DRAW-PRIMITIVE-HR", (DWORD)hr);
     LeaveCriticalSection(&device->shaderLock);
@@ -3673,7 +3258,7 @@ triton9DrawIndexedPrimitive(HANDLE hDevice,
     UINT instanceCount;
     UINT firstVertex;
     UINT drawStartIndex;
-    UINT64 indexEnd;
+    UINT64 indexEnd = 0;
     const BYTE *sourceIndices = nullptr;
     UINT sourceIndexStride = 0;
     int expand;
@@ -3742,7 +3327,7 @@ triton9DrawIndexedPrimitive(HANDLE hDevice,
         hr = D3DDDIERR_INVALIDCALL;
     }
     if (SUCCEEDED(hr))
-        hr = triton9PrepareDraw(device);
+        hr = triton9PrepareDraw(device, args->PrimitiveType);
     if (SUCCEEDED(hr) && !triton9_draw_validate_indices(
             sourceIndices, sourceIndexStride, indexCount, args->MinIndex,
             args->NumVertices))
@@ -3783,6 +3368,11 @@ triton9DrawIndexedPrimitive(HANDLE hDevice,
             (UINT64)args->StartIndex * device->upIndexStride, indexCount,
             &drawStartIndex);
     }
+    if (SUCCEEDED(hr) && !temporaryIndex)
+        hr = triton9PrepareBufferRangeForHostRead(
+            device, device->indexResource,
+            (UINT)((UINT64)args->StartIndex * device->indexStride),
+            (UINT)indexEnd);
     if (SUCCEEDED(hr)) {
         device->hostContext->IASetPrimitiveTopology(topology);
         if (instanceCount == 1)
@@ -3799,6 +3389,8 @@ triton9DrawIndexedPrimitive(HANDLE hDevice,
         triton9RestoreIndexBuffer(device);
     if (SUCCEEDED(hr))
         hr = triton9CheckHostDevice(device);
+    if (SUCCEEDED(hr))
+        triton9DrawResourcesWritten(device);
     if (FAILED(hr))
         triton9DiagU32("TRITON9-DRAW-INDEXED-HR", (DWORD)hr);
     LeaveCriticalSection(&device->shaderLock);
@@ -3855,7 +3447,7 @@ triton9DrawPrimitive2(HANDLE hDevice, const D3DDDIARG_DRAWPRIMITIVE2 *args)
     }
 
     EnterCriticalSection(&device->shaderLock);
-    hr = triton9PrepareDraw(device);
+    hr = triton9PrepareDraw(device, args->PrimitiveType);
     vertexShader = static_cast<Triton9Shader *>(device->drawVertexShader);
     declaration = static_cast<Triton9VertexDeclaration *>(
         device->drawVertexDeclaration);
@@ -3891,6 +3483,8 @@ triton9DrawPrimitive2(HANDLE hDevice, const D3DDDIARG_DRAWPRIMITIVE2 *args)
         triton9RestoreIndexBuffer(device);
     if (SUCCEEDED(hr))
         hr = triton9CheckHostDevice(device);
+    if (SUCCEEDED(hr))
+        triton9DrawResourcesWritten(device);
     if (FAILED(hr))
         triton9DiagU32("TRITON9-DRAW-PRIMITIVE2-HR", (DWORD)hr);
     LeaveCriticalSection(&device->shaderLock);
@@ -3954,7 +3548,7 @@ triton9DrawIndexedPrimitive2(HANDLE hDevice,
         return D3DDDIERR_INVALIDCALL;
 
     EnterCriticalSection(&device->shaderLock);
-    hr = triton9PrepareDraw(device);
+    hr = triton9PrepareDraw(device, args->PrimitiveType);
     vertexShader = static_cast<Triton9Shader *>(device->drawVertexShader);
     declaration = static_cast<Triton9VertexDeclaration *>(
         device->drawVertexDeclaration);
@@ -4037,6 +3631,8 @@ triton9DrawIndexedPrimitive2(HANDLE hDevice,
     triton9RestoreIndexBuffer(device);
     if (SUCCEEDED(hr))
         hr = triton9CheckHostDevice(device);
+    if (SUCCEEDED(hr))
+        triton9DrawResourcesWritten(device);
     if (FAILED(hr))
         triton9DiagU32("TRITON9-DRAW-INDEXED2-HR", (DWORD)hr);
     LeaveCriticalSection(&device->shaderLock);
@@ -4112,6 +3708,11 @@ triton9ReleaseFixedFunctionShaders(TRITON9_DEVICE *device)
         device->drawVertexDeclaration = nullptr;
     delete shaders->vertexShader;
     delete shaders->pixelShader;
+    delete shaders->geometryLinkage;
+    delete shaders->vertexSnapshot;
+    delete shaders->pixelSnapshot;
+    if (shaders->geometryShader)
+        shaders->geometryShader->Release();
     delete shaders;
     device->fixedFunctionShaders = nullptr;
 }
@@ -4125,7 +3726,7 @@ triton9CreatePixelShader(HANDLE hDevice, D3DDDIARG_CREATEPIXELSHADER *args,
     if (!args)
         return E_INVALIDARG;
     triton9DiagU32("TRITON9-CREATE-PS-SIZE", args->CodeSize);
-    if (tokens)
+    if (tokens && args->CodeSize >= sizeof(*tokens))
         triton9DiagU32("TRITON9-CREATE-PS-VERSION", tokens[0]);
     hr = triton9CreateShader(static_cast<TRITON9_DEVICE *>(hDevice),
                              Triton9ShaderStage::Pixel, args->CodeSize, tokens,

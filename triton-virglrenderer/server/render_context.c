@@ -132,7 +132,7 @@ render_context_dispatch_import_resource(struct render_context *ctx,
    const struct render_context_op_import_resource_request *req =
       &request->import_resource;
    return render_state_import_resource(ctx->ctx_id, req->res_id, req->fd_type, fds[0],
-                                       req->size);
+                                       req->size, &req->layout);
 }
 
 static bool
@@ -145,12 +145,13 @@ render_context_dispatch_create_resource(struct render_context *ctx,
       &request->create_resource;
    struct render_context_op_create_resource_reply reply = {
       .fd_type = VIRGL_RESOURCE_FD_INVALID,
+      .layout_version = RENDER_RESOURCE_LAYOUT_VERSION,
    };
    int res_fd;
    bool ok = render_state_create_resource(ctx->ctx_id, req->res_id, req->blob_id,
                                           req->blob_size, req->blob_flags, &reply.fd_type,
                                           &res_fd, &reply.map_info, &reply.vulkan_info,
-                                          &reply.export_format);
+                                          &reply.export_format, &reply.export_layout);
    if (!ok)
       return render_socket_send_reply(&ctx->socket, &reply, sizeof(reply));
 

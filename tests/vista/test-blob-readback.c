@@ -3,14 +3,21 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __linux__
+#define CONFIG_LINUX 1
+#include <sys/ioctl.h>
+#include <linux/dma-buf.h>
+#endif
 
 #define VIRGL_RENDERER_BLOB_FD_TYPE_SHM 3
+#define VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF 1
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 struct resource_base { uint32_t resource_id; uint64_t blob_size; };
@@ -33,6 +40,19 @@ static uint32_t surface_bytes_per_pixel(DisplaySurface *s) { return s->bytes_pp;
 
 static int exported_fd = -1;
 static uint32_t exported_type = VIRGL_RENDERER_BLOB_FD_TYPE_SHM;
+#ifdef CONFIG_LINUX
+static int gpu_calls, gpu_result;
+static int virtio_gpu_neptune_readback_dmabuf(
+    int fd, uint32_t id, const struct virtio_gpu_framebuffer *fb,
+    const struct virtio_gpu_rect *source, uint32_t left, uint32_t top,
+    uint32_t width, uint32_t height, DisplaySurface *surface)
+{
+    if (fd < 0 || !id || !fb || !source || !width || !height || !surface ||
+        left < source->x || top < source->y) abort();
+    gpu_calls++;
+    return gpu_result;
+}
+#endif
 static int virgl_renderer_resource_export_blob(uint32_t id, uint32_t *type,
                                                int *fd)
 {
@@ -184,6 +204,22 @@ int main(void)
     if (virtio_gpu_neptune_readback_blob(&res, &fb, &source, 1, 1, 1, 1,
                                          &surface) != -EINVAL) fail("non-SHM type");
     if (count_fds() != fds) fail("fd leak after non-SHM");
+#ifdef CONFIG_LINUX
+    exported_type = VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF;
+    if (pwrite(fd, blob, sizeof(blob), 0) != sizeof(blob)) fail("restore pixels");
+    memset(dst, 0xcc, sizeof(dst));
+    gpu_calls = 0;
+    gpu_result = 0;
+    if (virtio_gpu_neptune_readback_blob(&res, &fb, &source, 2, 2, 2, 1,
+                                         &surface) != 0) fail("dma-buf GPU dispatch");
+    if (gpu_calls != 1) fail("dma-buf did not use GPU");
+    if (count_fds() != fds) fail("dma-buf fd leak");
+    gpu_result = -EIO;
+    if (virtio_gpu_neptune_readback_blob(&res, &fb, &source, 1, 1, 1, 1,
+                                         &surface) != -EIO) fail("GPU failure propagation");
+    if (count_fds() != fds) fail("GPU failure fd leak");
+    gpu_result = 0;
+#endif
     exported_type = VIRGL_RENDERER_BLOB_FD_TYPE_SHM;
     for (int i = 0; i < 100; i++) {
         if (virtio_gpu_neptune_readback_blob(&res, &fb, &source, 1, 1, 1, 1,

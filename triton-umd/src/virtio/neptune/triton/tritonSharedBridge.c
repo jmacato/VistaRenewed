@@ -8,6 +8,7 @@
  */
 
 #include "tritonSharedBridge.h"
+#include "tritonDitherControl.h"
 
 #include <string.h>
 
@@ -16,11 +17,64 @@
 #include "npt_device.h"
 #include "npt_dispatch.h"
 #include "npt_renderer.h"
+#include "npt_resource.h"
 #include "npt_ring.h"
 #include "npt_shared_texture.h"
 #include "npt_transport_defs.h"
 
 #include "neptune-protocol/npt_protocol_defs.h"
+#include "neptune-protocol/npt_protocol_client_id3d11devicechild.h"
+#include "neptune-protocol/npt_protocol_client_id3d11devicecontext.h"
+
+int32_t
+tritonSharedBridgeCopyColor(void *context, void *dst_rtv, void *src_srv)
+{
+   return npt_dispatch_resource_copy_color(context, dst_rtv, src_srv);
+}
+
+int32_t
+tritonSharedBridgeGetDitherCaps(void *context, uint32_t *flags)
+{
+   static const GUID guid = TRITON_DITHER_CAPS_GUID;
+   struct TritonDitherCaps caps = {0};
+   UINT size = sizeof(caps);
+   HRESULT hr;
+
+   if (!context || !flags)
+      return (int32_t)0x80070057; /* E_INVALIDARG */
+   *flags = 0;
+   hr = npt_id3d11devicechild_default_GetPrivateData(context, &guid, &size, &caps);
+   if (hr < 0)
+      return hr;
+   if (size != sizeof(caps) || caps.version != TRITON_DITHER_VERSION)
+      return (int32_t)0x887a0004; /* DXGI_ERROR_UNSUPPORTED */
+   *flags = caps.flags;
+   return hr;
+}
+
+int32_t
+tritonSharedBridgeSetDither(void *context, uint32_t enabled)
+{
+   static const GUID guid = TRITON_DITHER_STATE_GUID;
+   const struct TritonDitherState state = {TRITON_DITHER_VERSION, enabled};
+
+   if (!context || enabled > 1)
+      return (int32_t)0x80070057; /* E_INVALIDARG */
+   /* The ordinary SetPrivateData thunk is asynchronous. This state affects
+    * draw correctness, so propagate host validation/feature errors. */
+   return npt_call_ID3D11DeviceChild_SetPrivateData(
+      npt_com_self_ring(context), npt_com_self_id(context), &guid,
+      sizeof(state), &state);
+}
+
+int32_t
+tritonSharedBridgeTraceQueryRead(void *context, void *query, void *data, uint32_t size)
+{
+   /* Feedback generations are not a trustworthy source for diagnostic query
+    * reuse yet. Query the host object after the existing completion fence;
+    * never accept a stale shared-memory result or force an extra GPU flush. */
+   return npt_id3d11devicecontext_default_GetData(context, query, data, size, 1);
+}
 
 /* The two descs carry the same export half but are copied field by
  * field, so only the plane-array bound has to agree. */
@@ -49,9 +103,10 @@ tritonSharedBridgeDrain(void *pWrapper, uint32_t timeout_ms)
    if (!dev || !dev->renderer || !ring)
       return false;
 
-   /* Ring-head completion means that the host dispatcher has consumed all
-    * preceding D3D11 proxy calls.  The synchronous empty renderer submit is
-    * ordered after them and retires only when their GPU work has completed. */
+   /* Wait for the host dispatcher to consume preceding proxy calls, then
+    * retire an explicit renderer marker. Host API dispatch can enqueue GPU
+    * work asynchronously; callers needing completed pixels must wait for a
+    * GPU fence separately before using this transport boundary. */
    if (!npt_ring_wait_all_timeout(ring, timeout_ms))
       return false;
    return npt_renderer_submit_cmd_sync(dev->renderer, NULL, 0);
@@ -133,6 +188,15 @@ tritonSharedBridgeExportBlob(void *pResourceWrapper,
 }
 
 bool
+tritonSharedBridgeCancelExportBlob(void *pResourceWrapper, uint64_t blob_id)
+{
+   if (!pResourceWrapper || !blob_id)
+      return false;
+   struct npt_ring *ring = npt_com_self_ring(pResourceWrapper);
+   return ring && NPT_SUCCEEDED(npt_dispatch_shared_cancel_export(ring, blob_id));
+}
+
+bool
 tritonSharedBridgeImportRes(void *pDeviceWrapper, uint32_t res_id,
                             uint64_t size, uint32_t *out_alloc,
                             uint32_t *out_res_kmt)
@@ -156,6 +220,37 @@ tritonSharedBridgeReleaseImportRes(void *pDeviceWrapper, uint32_t alloc,
    if (!dev || !dev->renderer)
       return false;
    return npt_renderer_release_import_res(dev->renderer, alloc, res_kmt);
+}
+
+bool
+tritonSharedBridgeQueryRes(void *pDeviceWrapper, uint32_t res_id,
+                           struct triton_shared_texture_desc *opts)
+{
+   if (!pDeviceWrapper || !res_id || !opts)
+      return false;
+   struct npt_ring *ring = npt_com_self_ring(pDeviceWrapper);
+   if (!ring)
+      return false;
+   struct npt_cmd_shared_query_layout_reply reply = {0};
+   if (NPT_FAILED(npt_dispatch_shared_query_layout(ring, res_id, &reply)) ||
+       reply.export_info.plane_count != 1 || !reply.width || !reply.height)
+      return false;
+   memset(opts, 0, sizeof(*opts));
+   opts->width = reply.width;
+   opts->height = reply.height;
+   opts->format = reply.format;
+   opts->mip_levels = opts->array_size = opts->sample_count = 1;
+   opts->bind_flags = 0x28; /* D3D11_BIND_RENDER_TARGET | SHADER_RESOURCE */
+   opts->misc_flags = 2; /* D3D11_RESOURCE_MISC_SHARED */
+   opts->plane_count = reply.export_info.plane_count;
+   opts->modifier = reply.export_info.modifier;
+   opts->allocation_size = reply.export_info.allocation_size;
+   opts->texture_layout = reply.export_info.texture_layout;
+   for (uint32_t i = 0; i < opts->plane_count; i++) {
+      opts->planes[i].offset = reply.export_info.planes[i].offset;
+      opts->planes[i].pitch = reply.export_info.planes[i].pitch;
+   }
+   return true;
 }
 
 void *
@@ -207,7 +302,29 @@ tritonSharedBridgeOpenRes(void *pDeviceWrapper, uint32_t res_id,
       return NULL;
    }
 
-   return npt_com_get_or_wrap_or_release(
+   void *wrapper = npt_com_get_or_wrap_or_release(
       dev, &NPT_IID_ID3D11Texture2D, mint,
       (struct npt_com_base *)pDeviceWrapper);
+   struct npt_d3d11_texture *texture = npt_d3d11_texture_cast(wrapper);
+   if (!texture) {
+      if (wrapper)
+         npt_com_default_release(wrapper);
+      return NULL;
+   }
+   const struct npt_d3d11_texture_desc desc = {
+      .width = opts->width,
+      .height = opts->height,
+      .depth = 1,
+      .mip_levels = opts->mip_levels,
+      .array_size = opts->array_size,
+      .format = opts->format,
+      .sample_count = opts->sample_count,
+      .usage = opts->usage,
+      .bind_flags = opts->bind_flags,
+      .cpu_access_flags = opts->cpu_access_flags,
+      .misc_flags = opts->misc_flags,
+      .texture_layout = opts->texture_layout,
+   };
+   npt_d3d11_texture_set_desc(texture, &desc);
+   return wrapper;
 }

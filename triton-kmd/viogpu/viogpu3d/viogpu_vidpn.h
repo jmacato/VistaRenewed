@@ -2,6 +2,7 @@
 
 #include "helper.h"
 #include "viogpu.h"
+#include "viogpu_trace.h"
 
 class VioGpuAdapter;
 class VioGpuAllocation;
@@ -123,9 +124,10 @@ class VioGpuVidPN
 
     void Flip();
     static void FlipThread(void *ctx);
+    static void VsyncThread(void *ctx);
 
     // Scan out an armed source. Returns TRUE only after the scanout and flush
-    // commands have entered the host queue.
+    // commands have completed successfully on the host.
     BOOLEAN TryPromoteFlip();
     NTSTATUS CompletePendingFlip();
     void SetVsyncEnabled(BOOLEAN Enabled)
@@ -140,12 +142,8 @@ class VioGpuVidPN
     // dxgkrnl's flip. The vsync Flip thread then scans it out continuously.
     // Used by the blt-present path where dxgkrnl issues no SetVidPnSourceAddress
     // for the windowed present source.
-    // Latch \p res as the scanout source.  \p addr is the allocation's
-    // segment address when the caller knows it (DdiPresent's allocation
-    // list); the vsync interrupt echoes it so dxgkrnl sees the display
-    // progressing across flips.  Callers without an address (creation-
-    // time promotion) pass {0}, which leaves the reported address alone.
-    void SetScanoutSource(VioGpuAllocation *res, PHYSICAL_ADDRESS addr);
+    // Creation-time promotion preserves the scheduler's current address.
+    void SetScanoutSource(VioGpuAllocation *res);
     BOOLEAN SetScanoutSourceIfGeneration(VioGpuAllocation *res,
                                          LONG sourceGeneration, BOOLEAN dmaFlip = FALSE);
     LONG GetScanoutSourceGeneration()
@@ -153,21 +151,23 @@ class VioGpuVidPN
         return InterlockedCompareExchange(&m_sourceGeneration, 0, 0);
     }
     void RearmFlipIfScanout(VioGpuAllocation *res);
-    inline void SetScanoutSource(VioGpuAllocation *res)
-    {
-        PHYSICAL_ADDRESS zero = {};
-        SetScanoutSource(res, zero);
-    }
-
     // Currently-committed refresh rate, or {0,0} if no source mode is
     // pinned. Caller is responsible for choosing a default.
     D3DDDI_RATIONAL GetActiveRefreshRate() const;
+    NTSTATUS GetScanLine(DXGKARG_GETSCANLINE *args);
+    void PublishRasterTiming(ULONGLONG epoch, ULONGLONG period);
+    NTSTATUS BeginSynchronizedFlip(UINT interval);
+    void EndSynchronizedFlip();
 
   private:
+    // Epoch/period share the source lock so x86 never observes a torn clock.
+    ULONGLONG m_rasterEpoch100ns = 0;
+    ULONGLONG m_rasterPeriod100ns = 166667;
+    volatile LONG m_rasterHeight = 0;
     BOOLEAN IsScanoutSourceCompatible(VioGpuAllocation *res) const;
     BOOLEAN SetScanoutSourceIfGeneration(VioGpuAllocation *res,
                                          PHYSICAL_ADDRESS addr,
-                                         LONG sourceGeneration);
+                                         LONG sourceGeneration, BOOLEAN addressValid);
     void StopFlipThread();
     NTSTATUS SetSourceModeAndPath(CONST D3DKMDT_VIDPN_SOURCE_MODE *pSourceMode,
                                   CONST D3DKMDT_VIDPN_PRESENT_PATH *pPath);
@@ -182,7 +182,7 @@ class VioGpuVidPN
                                  D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId);
     BOOLEAN IsDuplicateModeSize(UINT ModeIndex) const;
     D3DDDI_VIDEO_PRESENT_SOURCE_ID FindSourceForTarget(D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId, BOOLEAN DefaultToZero);
-    VOID BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalInfo, PVIDEO_MODE_INFORMATION pModeInfo);
+    VOID BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalInfo, PVIDEO_MODE_INFORMATION pModeInfo, ULONG RefreshRate);
 
     // m_sourceLock is taken from PASSIVE/DISPATCH (mode set, FlipThread) and
     // also from DIRQL: with FlipCaps.FlipOnVSyncMmIo set, dxgkrnl runs
@@ -227,6 +227,8 @@ class VioGpuVidPN
     USHORT m_CustomModeIndex;
     BYTE m_EDIDs[MAX_CHILDREN][EDID_RAW_BLOCK_SIZE];
     BOOLEAN m_bEDID;
+    ULONG m_RefreshRate;
+    volatile LONG m_ActiveRefreshRate;
 
 #if !defined(VIOGPU_TARGET_VISTA)
     DXGK_DISPLAY_INFORMATION m_SystemDisplayInfo;
@@ -236,6 +238,7 @@ class VioGpuVidPN
     VioGpuObj *m_pFrameBuf;
 
     PHYSICAL_ADDRESS m_sourceAddress = {0};
+    VioGpuTraceTag m_sourceTraceTag = {};
     VioGpuAllocation *m_sourceRes = NULL;
     KSPIN_LOCK m_sourceLock;
     FAST_MUTEX m_flipSubmitMutex;
@@ -250,9 +253,10 @@ class VioGpuVidPN
     // dxgkrnl retires a queued flip -- and frees the primary it displaced --
     // when a vsync reports that flip's address, so reporting a latched but
     // not-yet-scanned-out address would hand a buffer back while it is still
-    // the one being displayed.  Only Flip() promotes latched -> displayed,
-    // and only after the scanout has been emitted.
+    // the one being displayed. TryPromoteFlipLocked publishes the address
+    // only after the host has completed the scanout copy.
     PHYSICAL_ADDRESS m_displayedAddress = {0};
+    VioGpuTraceTag m_displayedTraceTag = {};
     BOOLEAN m_displayedAddressValid = FALSE;
 
     // Signalled after a PASSIVE_LEVEL producer latches a new source. This
@@ -263,17 +267,14 @@ class VioGpuVidPN
     // also covers the rare path where ObReferenceObjectByHandle fails and no
     // PETHREAD pointer is available for KeWaitForSingleObject.
     KEVENT m_flipExitEvent;
+    KEVENT m_vsyncExitEvent;
+    KEVENT m_vsyncStopEvent;
 
-    // Periodic vsync timer.  The vsync cadence MUST be independent of the
-    // source-ready wakes above: a single KeWaitForSingleObject with the period
-    // as a relative timeout restarts the period on every wake. Per MSDN, an
-    // MMIO flip completes ONLY when the CRTC_VSYNC interrupt reports its
-    // address, so starving the tick freezes every queued flip.  A periodic
-    // KTIMER keeps ticking no matter how often the event fires.
+    // Vblank deadline timer. Source-ready events cannot postpone the tick.
     KTIMER m_vsyncTimer;
 
     // Period the timer is currently programmed with (100ns units), so the
-    // flip thread re-arms it only when a mode change alters the refresh
+    // vsync thread re-arms it only when a mode change alters the refresh
     // rate.
     LONGLONG m_vsyncTimerPeriod100ns = 0;
 
@@ -284,6 +285,7 @@ class VioGpuVidPN
     // tell whether the reference is still theirs to drop.  Checked builds
     // fill fresh objects with 0xCD rather than zeroes.
     PETHREAD m_pFlipThread = NULL;
+    PETHREAD m_pVsyncThread = NULL;
     // Read by the flip system thread and written by pageable start/stop paths.
     // Use interlocked access so teardown cannot miss the stop request on
     // another processor.
@@ -291,4 +293,7 @@ class VioGpuVidPN
     // DxgkDdiControlInterrupt owns this state. Do not report synthetic CRTC
     // interrupts before dxgkrnl enables them or after it disables them.
     volatile LONG m_vsyncEnabled = FALSE;
+    volatile LONG m_synchronizedFlip = FALSE;
+    volatile LONG m_vblankSequence = 0;
+    KEVENT m_vblankEvent;
 };
