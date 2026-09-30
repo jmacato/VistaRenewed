@@ -16,7 +16,9 @@ These are the base revisions. The local trees also contain this project's change
 ## DXVK sources
 
 `patches/dxvk-neptune.bundle` contains the Neptune commit
-`c6bb6d57fac2b6cae7f6adbbc521eb949849815e`. The source revisions and patch hashes
+[c6bb6d57](https://github.com/jmacato/osy-dxvk/commit/c6bb6d57fac2b6cae7f6adbbc521eb949849815e)
+on our `vista-neptune` branch. The submodule and build scripts fetch our fork;
+the bundle also keeps a copy of this commit. The source revisions and patch hashes
 are listed in `patches/sources.json`.
 
 `patches/dxvk-vista.patch` adds the Vista backend changes.

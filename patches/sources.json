@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "url": "https://github.com/osy/dxvk.git",
+  "url": "https://github.com/jmacato/osy-dxvk.git",
   "base": "404240fdacf47470b02c76d6e684639a95dc7387",
   "bundle": "patches/dxvk-neptune.bundle",
   "bundle_sha256": "cbe369c877971b9742c26ef0aadc14260cd8f049c1916b01c8b5c8ec2e2148bb",
