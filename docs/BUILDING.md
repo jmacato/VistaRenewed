@@ -141,6 +141,9 @@ inspect `bash run-vm.sh --help` before launching. Set `VISTA_RENDER_NODE` for
 the intended host GPU and configure NVIDIA CDI when applicable. Audio defaults
 to `VISTA_AUDIO=auto`, which uses PipeWire when available; `none` disables it
 and `pipewire` requires it. Building a package does not start or modify a VM.
+QEMU draw diagnostics are disabled by default; set `VISTA_DISPLAY_STATS=1`
+when investigating the display path. Those counters do not establish visible
+presentation performance.
 For nondefault build locations, map the build settings to the launcher's
 `VISTA_HOST_PREFIX` and `VISTA_QEMU_BUILD_DIR` overrides.
 
