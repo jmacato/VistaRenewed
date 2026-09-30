@@ -1,8 +1,9 @@
 # Triton for Windows Vista — developer preview
 
-This repository adapts osy's Triton/Neptune virtual graphics stack to Windows
-Vista. It combines Vista WDDM 1.0 drivers, Direct3D 9 and 10 frontends, a matching
-QEMU/Neptune host renderer, and native DXVK on Linux/Vulkan. The original
+Triton Vista is an experimental Windows Vista bringup project. It includes a
+QEMU/Linux graphics stack with WDDM 1.0 and Direct3D 9/10 drivers, IE/MSHTML
+integration experiments, restored Sidebar data providers, Supermium/CEF build
+tooling, and desktop control and Media Center diagnostics. The original
 Direct3D 11 route and macOS source components remain in the tree.
 
 This is experimental source for developers. Full Direct3D 9/10 compatibility,
@@ -23,6 +24,7 @@ shader-compiler patches. A recursive submodule checkout alone is insufficient.
 Microsoft SDK/WDK inputs and a licensed Vista installation are separate inputs;
 no Windows installation media, VM disk or private signing key is included.
 
+- [Desktop modules: IE, Sidebar, Supermium and diagnostics](docs/DESKTOP-MODULES.md)
 - [Build and test workflow](docs/BUILDING.md)
 - [Architecture and paired-component contracts](docs/ARCHITECTURE.md)
 - [Installer/CI behavior](docs/CI.md) and [installation instructions](docs/INSTALL-ISO.txt)
@@ -40,6 +42,8 @@ no Windows installation media, VM disk or private signing key is included.
 | `triton-qemu/`, `triton-virglrenderer/` | Matching VM, renderer and presentation code |
 | `triton-dxvk/`, `patches/` | Pinned host backend and downstream source patches |
 | `triton-dxmt/`, `triton-angle/`, `triton-libepoxy/` | Retained upstream platform components |
+| `tools/` | IE/MSHTML adapters, desktop control, Sidebar updates and diagnostics |
+| `packaging/vista-sidebar-gadgets/` | RSS, weather and currency providers and host relay |
 | `scripts/`, `packaging/` | Bootstrap, builds, validators and installer source |
 | `tests/`, component test directories | [CPU, native GPU and guest tests](tests/README.md) |
 | `docs/` | Build, architecture, installation and validation documentation |

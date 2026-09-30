@@ -1,0 +1,11 @@
+{
+  "release_tag": "v144-r5",
+  "release_name": "Release 144.0.7559.256 R5",
+  "product_version": "144.0.7559.256",
+  "asset_name": "supermium_144_64_nonsetup.zip",
+  "source_url": "https://github.com/win32ss/supermium/releases/download/v144-r5/supermium_144_64_nonsetup.zip",
+  "sha256": "805232e5cde1bf6971748bc7fb6a2cb09fdfce9ceb91062a1814b228139956ca",
+  "archive_path": "third_party/supermium-v144-r5/supermium_144_64_nonsetup.zip",
+  "portable_root": "Supermium",
+  "runtime_directory": "Supermium/144.0.7559.256"
+}

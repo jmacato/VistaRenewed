@@ -1,0 +1,28 @@
+diff --git a/src/d3d11/d3d11_context_def.cpp b/src/d3d11/d3d11_context_def.cpp
+index d58774c..268cc46 100644
+--- a/src/d3d11/d3d11_context_def.cpp
++++ b/src/d3d11/d3d11_context_def.cpp
+@@ -193,7 +193,7 @@ namespace dxvk {
+     // Any use of ExecuteCommandList will reset command list state
+     // before the command list is actually executed.
+     m_commandList = CreateCommandList();
+-    m_chunkId = 0;
++    m_chunkId = ~0ull;
+     
+     if (RestoreDeferredContextState)
+       RestoreCommandListState();
+diff --git a/src/d3d11/d3d11_context_def.h b/src/d3d11/d3d11_context_def.h
+index feabf44..81b2bcf 100644
+--- a/src/d3d11/d3d11_context_def.h
++++ b/src/d3d11/d3d11_context_def.h
+@@ -92,7 +92,9 @@ namespace dxvk {
+     std::vector<Com<D3D11Query, false>> m_queriesBegun;
+ 
+     // Chunk ID within the current command list
+-    uint64_t m_chunkId = 0ull;
++    // Index of the last emitted chunk. Before the first emission, adding
++    // one in GetCurrentChunkId must produce chunk zero.
++    uint64_t m_chunkId = ~0ull;
+ 
+     D3DDestructionNotifier m_destructionNotifier;
+ 

@@ -1,0 +1,57 @@
+diff --git a/build/toolchain/win/toolchain.gni b/build/toolchain/win/toolchain.gni
+--- a/build/toolchain/win/toolchain.gni
++++ b/build/toolchain/win/toolchain.gni
+@@ -14,6 +14,11 @@
+ assert(is_win, "Should only be running on Windows")
+ 
++declare_args() {
++  triton_rc_sdk_overlay = ""
++  triton_rc_vctools_version = ""
++}
++
+ # This tool will is used as a wrapper for various commands below.
+@@ -267,1 +272,8 @@
+       command = "\"$python_path\" $_tool_wrapper_path rc-wrapper $env rc.exe /nologo $werror$sys_include_flags{{defines}} {{include_dirs}} /fo{{output}} {{source}}"
++      if (triton_rc_sdk_overlay != "") {
++        command += " --sdk-overlay=\"" +
++                   rebase_path(triton_rc_sdk_overlay, root_build_dir) + "\""
++      }
++      if (triton_rc_vctools_version != "") {
++        command += " --vctools-version=$triton_rc_vctools_version"
++      }
+       depsformat = "msvc"
+       outputs = [ "$object_subdir/{{source_name_part}}.res" ]
+       description = "RC {{output}}"
+diff --git a/build/toolchain/win/rc/rc.py b/build/toolchain/win/rc/rc.py
+--- a/build/toolchain/win/rc/rc.py
++++ b/build/toolchain/win/rc/rc.py
+@@ -44,2 +44,3 @@
+   werror = False
++  preprocess_flags = []
+   # Parse.
+@@ -72,3 +73,10 @@
+     elif flag == '-Werror':
+       werror = True
++    elif flag.startswith('--sdk-overlay='):
++      preprocess_flags += ['/clang:-ivfsoverlay',
++                           '/clang:' + flag.split('=', 1)[1],
++                           '-Wno-nonportable-include-path']
++    elif flag.startswith('--vctools-version='):
++      preprocess_flags += ['/vctoolsversion', flag.split('=', 1)[1]]
+     elif (flag.startswith('-') or
+@@ -90,2 +98,2 @@
+-      'show_includes', 'werror'
++      'show_includes', 'werror', 'preprocess_flags'
+   ])
+@@ -98,2 +107,3 @@
+                show_includes=show_includes,
+-               werror=werror)
++               werror=werror,
++               preprocess_flags=preprocess_flags)
+ 
+ 
+ def ReadInput(input):
+@@ -163,2 +172,3 @@
+   clang_cmd += flags.imsvcs + flags.winsysroot + flags.includes + flags.defines
++  clang_cmd += flags.preprocess_flags
+   p = subprocess.Popen(clang_cmd, stdin=subprocess.PIPE)

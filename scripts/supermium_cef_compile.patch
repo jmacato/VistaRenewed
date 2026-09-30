@@ -1,0 +1,66 @@
+diff --git a/base/win/win_util.cc b/base/win/win_util.cc
+--- a/base/win/win_util.cc
++++ b/base/win/win_util.cc
+@@ -158,11 +158,10 @@
+     DLOG_IF(ERROR, hr == E_ACCESSDENIED)
+         << "Access denied error from SetProcessDpiAwarenessInternal. "
+            "Function called twice, or manifest was used.";
+     NOTREACHED()
+         << "SetProcessDpiAwarenessInternal failed with unexpected error: "
+         << hr;
+-    return false;
+   }
+ 
+   DCHECK_LT(GetVersion(), Version::WIN8_1) << "SetProcessDpiAwarenessInternal "
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.h b/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.h
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.h
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_address_space.h
+@@ -377,12 +377,12 @@
+   PA_ALWAYS_INLINE static size_t CorePoolSize() {
+     return IsIOSTestProcess() ? kCorePoolSizeForIOSTestProcess : kCorePoolSize;
+   }
+-#elif !PA_BUILDFLAG(IS_WIN)
++#endif  // PA_BUILDFLAG(IS_IOS)
++#else  // PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
+   // The pool sizes should be as large as maximum whenever possible.
+   PA_ALWAYS_INLINE static constexpr size_t CorePoolSize() {
+     return kCorePoolSize;
+   }
+-#endif  // PA_CONFIG(IS_IOS)
+ #endif  // PA_CONFIG(DYNAMICALLY_SELECT_POOL_SIZE)
+diff --git a/ui/gfx/BUILD.gn b/ui/gfx/BUILD.gn
+--- a/ui/gfx/BUILD.gn
++++ b/ui/gfx/BUILD.gn
+@@ -190,8 +190,13 @@
+     "//base:base_static",
+     "//base:i18n",
+     "//build:blink_buildflags",
++    # Supermium's custom vector icons include chrome/common/chrome_paths.h.
++    "//build:branding_buildflags",
++    "//cef/libcef/features:buildflags",
+     "//device/vr/buildflags",
++    "//extensions/buildflags",
+     "//mojo/public/cpp/bindings:struct_traits",
+     "//skia",
++    "//third_party/widevine/cdm:buildflags",
+     "//third_party/zlib",
+diff --git a/ui/base/ime/win/input_method_win_imm32.cc b/ui/base/ime/win/input_method_win_imm32.cc
+--- a/ui/base/ime/win/input_method_win_imm32.cc
++++ b/ui/base/ime/win/input_method_win_imm32.cc
+@@ -78,6 +78,5 @@
+     default:
+       NOTREACHED() << "Unknown IME message:" << event.message;
+-      break;
+   }
+   if (result)
+     *result = original_result;
+diff --git a/third_party/blink/renderer/platform/scheduler/public/frame_or_worker_scheduler.h b/third_party/blink/renderer/platform/scheduler/public/frame_or_worker_scheduler.h
+--- a/third_party/blink/renderer/platform/scheduler/public/frame_or_worker_scheduler.h
++++ b/third_party/blink/renderer/platform/scheduler/public/frame_or_worker_scheduler.h
+@@ -264,5 +264,5 @@
+   base::ObserverList<LifecycleObserverHandle,
+                      /*check_empty=*/false,
+-                     base::ObserverListReentrancyPolicy::kDisallowReentrancy>
++                     /*allow_reentrancy=*/false>
+       lifecycle_observers_{base::ObserverListPolicy::EXISTING_ONLY};
+ 

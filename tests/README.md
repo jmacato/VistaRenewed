@@ -41,3 +41,10 @@ not beside source fixtures. Preserve failures, interruption and timeout results.
 CPU, build, package and runtime results establish different things; follow
 [release validation](../docs/RELEASE-VALIDATION.md) before making compatibility
 or presentation claims.
+
+## Desktop module checks
+
+The public CPU manifest also runs offline Sidebar provider contracts and source
+checks, Supermium/CEF pin and toolchain tests, and registry-policy tests.
+`python3 scripts/build_vista_desktop_extras.py` cross-compiles the IE/MSHTML
+experiments; guest execution is separate. See [desktop modules](../docs/DESKTOP-MODULES.md).

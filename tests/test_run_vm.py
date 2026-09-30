@@ -109,7 +109,20 @@ class LauncherTests(unittest.TestCase):
         return {'Name': '/' + name, 'Args': args,
                 'Config': {'Labels': {'io.triton.vista.state-dir': str(state)} if labelled else {}}}
 
-    def test_public_defaults_and_no_sidebar_dependency(self):
+    def test_sidebar_can_be_disabled(self):
+        self.env['VISTA_SIDEBAR'] = '0'
+        result, runs = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('TRITON_SIDEBAR_RELAY=0', runs[0])
+
+    def test_invalid_sidebar_setting_rejected(self):
+        self.env['VISTA_SIDEBAR'] = 'maybe'
+        result, runs = self.launch()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('VISTA_SIDEBAR must be 0 or 1', result.stderr)
+        self.assertFalse(runs)
+
+    def test_public_defaults_with_sidebar_relay(self):
         self.env.pop('VISTA_ISO')
         iso = self.root / 'dist/triton-vista-x64.iso'
         iso.parent.mkdir()
@@ -119,9 +132,11 @@ class LauncherTests(unittest.TestCase):
         args = runs[0]
         self.assertIn('cpus=4,sockets=1,cores=4,threads=1', args)
         self.assertIn('DXVK_FILTER_DEVICE_NAME=', args)
+        self.assertIn('TRITON_SIDEBAR_RELAY=1', args)
+        self.assertIn('scripts/vista_sidebar_launch.sh', args)
         self.assertIn('localhost/triton-vista-builder:preview', args)
         self.assertIn(str(iso) + ':/tmp/vista-driver.iso:ro', args)
-        self.assertFalse(any('sidebar' in arg.lower() or '/var/tmp/triton-vista-media' in arg
+        self.assertFalse(any('/var/tmp/triton-vista-media' in arg
                              for arg in args))
         calls = [json.loads(line) for line in self.calls.read_text().splitlines()]
         self.assertFalse(any(call[0] == 'exec' for call in calls))

@@ -12,6 +12,7 @@ render_node=${VISTA_RENDER_NODE:-/dev/dri/renderD128}
 gpu_filter=${VISTA_GPU_FILTER-}
 nvidia_device=${VISTA_NVIDIA_DEVICE:-}
 display_stats=${VISTA_DISPLAY_STATS:-0}
+sidebar=${VISTA_SIDEBAR:-1}
 host_prefix=${VISTA_HOST_PREFIX:-$root/host-linux}
 qemu_build=${VISTA_QEMU_BUILD_DIR:-$root/triton-qemu/build-linux}
 iso=${VISTA_ISO:-$root/dist/triton-vista-x64.iso}
@@ -45,6 +46,7 @@ Optional environment variables:
   VISTA_NVIDIA_DEVICE Optional NVIDIA CDI device, e.g. nvidia.com/gpu=0
   VISTA_BUILD_IMAGE Builder/runtime image (default: localhost/triton-vista-builder:preview)
   VISTA_AUDIO    auto (default), pipewire (required), or none
+  VISTA_SIDEBAR  1 (default) starts the Sidebar data relay; 0 disables it
   VISTA_DISPLAY_STATS 0 (default) or 1 to log QEMU draw diagnostics
   VISTA_HOST_PREFIX Host install prefix (default: host-linux under this checkout)
   VISTA_QEMU_BUILD_DIR QEMU build directory (default: triton-qemu/build-linux)
@@ -60,6 +62,7 @@ die() { printf '%s\n' "$*" >&2; exit 1; }
 command -v podman >/dev/null || die 'Podman is required.'
 command -v flock >/dev/null || die 'flock is required (util-linux).'
 [[ $name =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]] || die 'Invalid VISTA_VM_NAME.'
+[[ $sidebar == 0 || $sidebar == 1 ]] || die 'VISTA_SIDEBAR must be 0 or 1.'
 [[ $display_stats == 0 || $display_stats == 1 ]] || die 'VISTA_DISPLAY_STATS must be 0 or 1.'
 [[ -r $disk && -f $disk ]] || die "VM disk is missing or unreadable: $disk"
 disk=$(realpath -- "$disk")
@@ -220,7 +223,8 @@ podman run -d --name "$name" 9>&- \
     -e "DXVK_SHADER_CACHE_PATH=$vm/shader-cache" \
     -e "MESA_SHADER_CACHE_DIR=$vm/shader-cache/mesa" \
     -e "TRITON_DISPLAY_STATS=$display_stats" \
-    "$image" "$qemu_build/qemu-system-x86_64" \
+    -e "TRITON_SIDEBAR_RELAY=$sidebar" \
+    "$image" bash scripts/vista_sidebar_launch.sh "$qemu_build/qemu-system-x86_64" \
     -name "$name" -L "$root/triton-qemu/pc-bios" \
     -machine pc,accel=kvm,max-ram-below-4g=2G -cpu host,monitor=off \
     -smp "cpus=$cpus,sockets=1,cores=$cpus,threads=1" -m "$ram" \

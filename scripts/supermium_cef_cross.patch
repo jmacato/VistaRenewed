@@ -1,0 +1,35 @@
+diff --git a/build/config/win/BUILD.gn b/build/config/win/BUILD.gn
+--- a/build/config/win/BUILD.gn
++++ b/build/config/win/BUILD.gn
+@@ -19,6 +19,10 @@
+ declare_args() {
++  # Optional Linux-hosted SDK view. Leave native Windows builds unchanged.
++  triton_sdk_vfs_overlay = ""
++  triton_sdk_lib_root = ""
++
+   # Turn this on to have the linker output extra timing information.
+   win_linker_timing = false
+ 
+@@ -76,6 +80,17 @@
+   if (is_clang) {
++    if (triton_sdk_vfs_overlay != "") {
++      cflags += [
++        "/vctoolsversion", "14.43.34808",
++        "/clang:-ivfsoverlay",
++        "/clang:" + rebase_path(triton_sdk_vfs_overlay, root_build_dir),
++        "-Wno-nonportable-include-path",
++      ]
++    }
+     cflags += [
+       "/Zc:twoPhase",
+ 
+@@ -172,6 +183,10 @@
+   ldflags = []
++  if (triton_sdk_lib_root != "") {
++    ldflags += [ "/libpath:" + rebase_path(
++                     "$triton_sdk_lib_root/lib-$current_cpu", root_build_dir) ]
++    ldflags += [ "/vfsoverlay:" + rebase_path(
++                     "$triton_sdk_lib_root/library-overlay-$current_cpu.json", root_build_dir) ]
++  }
+ 
+   if (use_lld) {

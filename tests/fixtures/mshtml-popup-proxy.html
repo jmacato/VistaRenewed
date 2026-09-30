@@ -1,0 +1,41 @@
+<!doctype html>
+<title>Popup proxy test ready</title>
+<style>body{font:24px sans-serif;margin:40px}button{font:inherit;padding:12px}pre{white-space:pre-wrap}</style>
+<button onclick="run()">Test window.open child proxy</button>
+<pre id="results">Ready</pre>
+<script>
+const results=document.getElementById('results');
+function check(condition,message){if(!condition)throw Error(message);results.textContent+='\nPASS '+message}
+function delay(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function until(predicate){for(let i=0;i<100;i++){try{if(predicate())return}catch(e){}await delay(100)}throw Error('timeout')}
+async function run(){
+ let child;
+ try{
+  results.textContent='Running';
+  child=window.open('about:blank','triton-child','width=420,height=320');
+  check(child!==null,'returned window reference');
+  check(!child.closed,'child starts open');
+  check(child.opener===window,'opener identity');
+  child.document.write('<title>Child written from opener</title><h1>Real child document</h1>');
+  child.document.close();
+  check(child.document.querySelector('h1').textContent==='Real child document','synchronous document access');
+  child.location.href='/b';
+  await until(()=>child.document.title==='Navigation B');
+  check(child.location.pathname==='/b','child location navigation');
+  check(window.open('','triton-child')===child,'named child identity');
+  child.focus();
+  await delay(1500);
+  child.location.href='http://10.0.2.2:18768/a';
+  await until(()=>{try{void child.document;return false}catch(e){return e.name==='SecurityError'}});
+  check(true,'cross-origin document access rejected');
+  child.location='http://10.0.2.2:18767/a';
+  await until(()=>child.document.title==='Navigation A');
+  check(child.document.body.textContent.includes('Page A'),'same-origin access restored');
+  child.close();
+  await until(()=>child.closed);
+  check(child.closed,'close reflected in child reference');
+  document.title='MSHTML POPUP PROXY PASSED';
+  results.textContent+='\nMSHTML POPUP PROXY PASSED';
+ }catch(error){document.title='POPUP PROXY FAILED '+error.message;results.textContent+='\nFAIL '+error.stack;if(child&&!child.closed)child.close()}
+}
+</script>

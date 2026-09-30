@@ -1,0 +1,21 @@
+{
+  "views_1749_2102_3330": [
+    ["   mutable bool layout_text_up_to_date_ = false;\n+\n+  int draw_strings_flags_ = 0;\n };", "   mutable bool layout_text_up_to_date_ = false;\n+\n+  int draw_strings_flags_ = 0;\n   \n   // Offset of Y used for accurate font positioning in GDI.\n   int y_offset_;\n };"]
+  ],
+  "chrome_runtime": [
+    [" #include \"base/values.h\"\n #include \"build/build_config.h\"\n+#include \"cef/libcef/features/features.h\"\n #include \"chrome/browser/active_use_util.h\"", " #include \"base/values.h\"\n #include \"base/win/windows_version.h\"\n #include \"build/build_config.h\"\n+#include \"cef/libcef/features/features.h\"\n #include \"chrome/browser/about_flags.h\"\n #include \"chrome/browser/active_use_util.h\""],
+    ["         g_browser_process->profile_manager()->GetLastOpenedProfiles();\n   }\n #endif\n+\n+  // Bypass StartupBrowserCreator", "     return CHROME_RESULT_CODE_NORMAL_EXIT_UPGRADE_RELAUNCHED;\n   }\n \n+\n+  // Bypass StartupBrowserCreator"]
+  ],
+  "chrome_runtime_views": [
+    ["                                browser_->profile()->IsGuestSession() ||\n                                browser_->profile()->IsRegularProfile();\n #endif\n-  avatar_->SetVisible", "     show_avatar_toolbar_button = false;\n \n-  avatar_->SetVisible"]
+  ],
+  "embedder_product_override": [
+    ["+#include \"cef/libcef/features/features.h\"\n #include \"components/embedder_support/pref_names.h\"", "+#include \"cef/libcef/features/features.h\"\n #include \"chrome/common/chrome_paths.h\"\n #include \"components/embedder_support/pref_names.h\""]
+  ],
+  "mac_chrome_locale_3623": [
+    ["-  std::string preferred_locale;\n-#if BUILDFLAG(IS_MAC)", "-  std::string preferred_locale;\n \n   if (base::CommandLine::ForCurrentProcess()->HasSwitch(\"reset-locale\")){\n     local_state->SetString(language::prefs::kApplicationLocale, std::string());\n   }\n-#if BUILDFLAG(IS_MAC)"]
+  ],
+  "linux_gtk_theme_3610": [
+    ["   SanitizeIconThemeName();\n", ""]
+  ]
+}

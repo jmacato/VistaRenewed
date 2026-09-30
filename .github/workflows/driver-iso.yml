@@ -36,6 +36,13 @@ jobs:
         env:
           CONTAINER_ENGINE: docker
         run: bash scripts/dev-container.sh run python3 scripts/test_public.py --output test-artifacts/ci-cpu
+      - name: Build optional IE/MSHTML experiments
+        env:
+          CONTAINER_ENGINE: docker
+        run: |
+          mkdir -p ci-logs
+          set -o pipefail
+          python3 scripts/build_vista_desktop_extras.py 2>&1 | tee ci-logs/desktop-extras.log
       - name: Build host renderer and QEMU
         env:
           CONTAINER_ENGINE: docker
@@ -53,6 +60,17 @@ jobs:
             test-artifacts/ci-cpu/
             ci-logs/
           if-no-files-found: warn
+          retention-days: 14
+      - name: Upload optional IE/MSHTML payloads
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vista-desktop-experiments-${{ github.sha }}
+          path: |
+            build/*ie7*.dll
+            build/triton-mshtml-x64.dll
+            build/*mshtml*.exe
+            build/*bridge-host.exe
+          if-no-files-found: error
           retention-days: 14
   build:
     needs: host-and-cpu

@@ -37,8 +37,9 @@ def cases(output):
                                               '--evidence', str(output / 'shared-map')]),
                ('shader-cache', ['triton-umd/src/virtio/neptune/vista-d3d9/tests/native_compat/shader_cache_test.py'])]
     result += [(n, ['-m', 'unittest', 'discover', '-s', 'tests', '-p', 'test_' + n + '.py'])
-               for n in ('run_vm', 'triton_trace', 'vista_control', 'vista_transfer', 'vista_uia_client', 'source_notices', 'sdk_headers')]
-    result += [('bootstrap-sources', ['tests/bootstrap/test_sources.py']),
+               for n in ('run_vm', 'triton_trace', 'vista_control', 'vista_transfer', 'vista_uia_client', 'source_notices', 'sdk_headers', 'supermium_cef_source', 'supermium_cef_toolchain', 'vista_supermium_policy', 'sidebar')]
+    result += [('sidebar-source', ['tools/verify_vista_sidebar_gadgets.py', '--source']),
+               ('bootstrap-sources', ['tests/bootstrap/test_sources.py']),
                ('bootstrap-qemu-sources', ['tests/bootstrap/test_qemu_sources.py'])]
     return result
 

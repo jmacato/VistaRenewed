@@ -1,0 +1,49 @@
+diff --git a/media/cdm/cdm_module.h b/media/cdm/cdm_module.h
+index 0e4e6d2387..978b8caa98 100644
+--- a/media/cdm/cdm_module.h
++++ b/media/cdm/cdm_module.h
+@@ -12,6 +12,7 @@
+ #include "base/scoped_native_library.h"
+ #include "media/base/media_export.h"
+ #include "media/cdm/api/content_decryption_module.h"
++#include "media/cdm/api/content_decryption_module_ext.h"
+ #include "media/media_buildflags.h"
+ 
+ #if !BUILDFLAG(ENABLE_LIBRARY_CDMS)
+@@ -23,36 +24,6 @@
+ #include "media/cdm/cdm_host_files.h"
+ #endif  // BUILDFLAG(ENABLE_CDM_HOST_VERIFICATION)
+ 
+-namespace cdm {
+-
+-#if defined(_WIN32)
+-typedef wchar_t FilePathCharType;
+-typedef HANDLE PlatformFile;
+-const PlatformFile kInvalidPlatformFile = INVALID_HANDLE_VALUE;
+-#else
+-typedef char FilePathCharType;
+-typedef int PlatformFile;
+-const PlatformFile kInvalidPlatformFile = -1;
+-#endif  // defined(_WIN32)
+-
+-
+-struct HostFile {
+-  HostFile(const FilePathCharType* file_path,
+-           PlatformFile file,
+-           PlatformFile sig_file)
+-      : file_path(file_path), file(file), sig_file(sig_file) {}
+-
+-  // File that is part of the host of the CDM.
+-  const FilePathCharType* file_path = nullptr;
+-  PlatformFile file = kInvalidPlatformFile;
+-
+-  // Signature file for |file|.
+-  PlatformFile sig_file = kInvalidPlatformFile;
+-};
+-	
+-	
+-}
+-
+ namespace media {
+ 
+ class MEDIA_EXPORT CdmModule {
