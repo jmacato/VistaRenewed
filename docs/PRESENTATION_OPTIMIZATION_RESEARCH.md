@@ -130,4 +130,3 @@ multi-output movement, and cursor changes during Present.
 
 Primary references: [Linux DRM/KMS damage and plane documentation](https://docs.kernel.org/gpu/drm-kms.html)
 and [virtio-gpu cursor commands in the Linux UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/virtio_gpu.h).
-
